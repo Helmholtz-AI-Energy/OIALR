@@ -1,0 +1,30 @@
+# @package _global_
+
+# specify here default evaluation configuration
+defaults:
+  - _self_
+  - datamodule: cirsean4.yaml # choose the data for evaluation
+  - model: cirsean4.yaml
+  - callbacks: null
+  - logger: null
+  - trainer: default.yaml
+  - log_dir: evaluation.yaml
+
+  - experiment: null
+
+  # enable color logging
+  - override hydra/hydra_logging: colorlog
+  - override hydra/job_logging: colorlog
+
+original_work_dir: ${hydra:runtime.cwd}
+
+print_config: True
+
+ignore_warnings: True
+
+seed: null
+
+name: "default"
+
+# passing checkpoint path is necessary
+ckpt_path: logs/experiments/runs/default/2022-03-21_04-40-51/checkpoints/last.ckpt

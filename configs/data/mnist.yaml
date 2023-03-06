@@ -1,0 +1,6 @@
+dataset: mnist
+data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/mnist" # data_dir is specified in config.yaml
+num_workers: 4
+pin_memory: True
+local_batch_size: 128
+resize: True

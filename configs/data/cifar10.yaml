@@ -1,0 +1,8 @@
+dataset: cifar100
+data_location: "/hkfs/home/dataset/datasets/CIFAR10/"
+num_workers: 4
+pin_memory: True
+local_batch_size: 256 # 512 -> OOM error
+timm_transforms: True
+persistent_workers: True
+distributed_sample: True

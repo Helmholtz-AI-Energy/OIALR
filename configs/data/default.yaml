@@ -1,0 +1,6 @@
+num_workers: 4
+pin_memory: True
+timm_transforms: False
+persistent_workers: True
+distributed_sample: True
+distributed_sample_val: True

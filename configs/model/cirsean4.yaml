@@ -1,0 +1,12 @@
+_target_: madonna.models.components.simple_dense_net.SimpleDenseNet
+input_size: 784
+fc_sizes:
+  - 4500
+  - 2000
+  - 1500
+  - 1000
+  - 500
+output_size: 10
+activation: Tanh
+batch_norm: True
+activate_last_layer: True
