@@ -12,3 +12,4 @@ batch_norm: True
 activate_last_layer: True
 name: cirsean4
 autocast: True
+mnist_channels: 1

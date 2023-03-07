@@ -1,0 +1,22 @@
+start_epoch: null
+epochs: null
+
+# number of validation steps to execute at the beginning of the training
+# num_sanity_val_steps: 0
+_target_: null
+init_ddp: null
+
+# ckpt path
+resume_from_checkpoint: null
+
+criterion: null
+
+lr: null
+lr_schedule: null
+lr_warmup: null
+
+lr_warmup_step_frequency: null
+lr_warmup_step_args: null
+
+optimizer: null
+init_opt_with_model: False

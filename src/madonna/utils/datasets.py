@@ -377,6 +377,7 @@ def cifar100_val_dataset_n_loader(config):
 
 def mnist_train_data(config):
     dsconfig = config["data"]
+    channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
     base_dir = dsconfig["data_location"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
@@ -385,7 +386,7 @@ def mnist_train_data(config):
             [
                 transforms.ToTensor(),
                 transforms.Resize(size=32),
-                transforms.Grayscale(3),
+                transforms.Grayscale(channels),
                 mnist_normalize,
             ],
         )
@@ -411,6 +412,7 @@ def mnist_train_data(config):
 
 def mnist_val_data(config):
     dsconfig = config["data"]
+    channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
     base_dir = dsconfig["data_location"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
@@ -419,7 +421,7 @@ def mnist_val_data(config):
             [
                 transforms.ToTensor(),
                 transforms.Resize(size=32),
-                transforms.Grayscale(3),
+                transforms.Grayscale(channels),
                 mnist_normalize,
             ],
         )

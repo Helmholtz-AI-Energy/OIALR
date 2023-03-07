@@ -9,6 +9,8 @@ from .utils import *
 
 
 def get_model(config):
+    if config.model is None:
+        raise ValueError("model must be specified")
     model: nn.Module = hydra.utils.instantiate(config.model)
     # send model to devices
     if torch.cuda.is_available():
@@ -18,6 +20,8 @@ def get_model(config):
 
 
 def get_criterion(config):
+    if config.training.criterion is None:
+        raise ValueError("Training criterion must be specified")
     criterion: nn.Module = hydra.utils.instantiate(config.training.criterion, _recursive=False)
     if torch.cuda.is_available():
         return criterion.cuda()
@@ -26,8 +30,19 @@ def get_criterion(config):
 
 
 def get_optimizer(config, network):
+    if config.training.optimizer is None:
+        raise ValueError("Optimizer must be specified")
     optimizer = hydra.utils.instantiate(config.training.optimizer)
-    return optimizer(network.parameters(), lr=config.training.lr)
+    kwargs = {}
+    if config.training.init_opt_with_model:
+        first = network
+    else:
+        first = network.parameters
+
+    if config.training.lr is not None:
+        kwargs["lr"] = config.training.lr
+
+    return optimizer(first, **kwargs)
 
 
 def get_lr_schedules(config, optim, len_ds=None):
@@ -44,6 +59,9 @@ def get_lr_schedules(config, optim, len_ds=None):
     -------
 
     """
+    if config.training.lr_schedule is None:
+        return
+
     sched_name = config.training.lr_schedule._target_.split(".")[0]
 
     # sched_params = config["lr_schedule"]["params"]
@@ -61,6 +79,9 @@ def get_lr_schedules(config, optim, len_ds=None):
 
     scheduler = hydra.utils.instantiate(config.training.lr_schedule)
     scheduler = scheduler(optim)
+
+    if config.training.lr_warmup:
+        return scheduler, None
     warmup_scheduler = hydra.utils.instantiate(config.training.lr_warmup)
     warmup_scheduler = warmup_scheduler(optim)
 

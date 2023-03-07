@@ -129,14 +129,17 @@ def main(config, log):  # noqa: C901
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
             )
-
-        with warmup_scheduler.dampening():
+        if warmup_scheduler is not None:
+            with warmup_scheduler.dampening():
+                if rlrp:  # ReduceLROnPlateau requires the training loss
+                    scheduler.step(train_loss)
+                elif epoch_step:  # StepLR / ExponentialLR / others
+                    scheduler.step()
+        elif scheduler is not None:
             if rlrp:  # ReduceLROnPlateau requires the training loss
                 scheduler.step(train_loss)
             elif epoch_step:  # StepLR / ExponentialLR / others
                 scheduler.step()
-            else:  # the other schedulers are stepped durring the training loop
-                pass
 
 
 def train(
@@ -162,13 +165,13 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.lr_warmup._target_.split(".")[0] in [
+    if lr_scheduler is not None and config.lr_schedule._target_.split(".")[0] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
-        batch_warmup_step = True
+        batch_lr_step = True
     else:
-        batch_warmup_step = False
+        batch_lr_step = False
     # switch to train mode
     model.train()
     end = time.time()
@@ -199,8 +202,10 @@ def train(
 
         if warmup_scheduler is not None:
             with warmup_scheduler.dampening():
-                if batch_warmup_step:
+                if batch_lr_step:
                     lr_scheduler.step()
+        elif lr_scheduler is not None and batch_lr_step:
+            lr_scheduler.step()
 
         if (i % config["print_freq"] == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
             # console.rule(f"train step {i}")
