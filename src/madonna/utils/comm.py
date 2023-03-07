@@ -354,3 +354,25 @@ def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride
 
     print(f"finished dist init - rank: {dist.get_rank()} ws: {dist.get_world_size()}")
     return batchnorm_group
+
+
+def init_and_set_config_rank_size(config):
+    size = 1
+    rank = 0
+    try:
+        if int(os.environ["SLURM_NTASKS"]) > 1 or int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
+            init(method="nccl-slurm")
+            config["world_size"] = dist.get_world_size()
+            config["rank"] = dist.get_rank()
+    except KeyError:
+        try:
+            if int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
+                init(method="nccl-slurm")
+                config["world_size"] = dist.get_world_size()
+                config["rank"] = dist.get_rank()
+        except KeyError:
+            pass
+
+    config["world_size"] = size
+    config["rank"] = rank
+    return rank, size

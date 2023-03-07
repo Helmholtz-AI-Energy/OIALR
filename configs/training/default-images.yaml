@@ -3,6 +3,8 @@ epochs: 400
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
+_target_: madonna.trainers.images.baseline.main
+init_ddp: True
 
 # ckpt path
 resume_from_checkpoint: null
@@ -10,7 +12,7 @@ resume_from_checkpoint: null
 criterion:
   _target_: torch.nn.CrossEntropyLoss
 
-lr: 0.01
+lr: 0.1
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR
   _partial_: True

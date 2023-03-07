@@ -7,3 +7,4 @@ timm_transforms: True
 persistent_workers: True
 distributed_sample: True
 distributed_sample_val: True
+train_crop_size: 176

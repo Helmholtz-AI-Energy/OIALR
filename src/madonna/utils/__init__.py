@@ -4,6 +4,9 @@ import hydra
 import torch.nn as nn
 import torch.optim
 
+from . import comm, datasets, tracking
+from .utils import *
+
 
 def get_model(config):
     model: nn.Module = hydra.utils.instantiate(config.model)

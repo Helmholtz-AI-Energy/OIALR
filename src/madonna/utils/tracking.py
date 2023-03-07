@@ -13,10 +13,8 @@ from .utils import only_on_rank_n
 __all__ = ["setup_mlflow"]
 
 
-only_on_rank_n(run_on_rank=0)
-
-
-def setup_mlflow(config: dict, verbose: bool = False) -> Experiment | None:  # noqa: E302
+@only_on_rank_n(run_on_rank=0)
+def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None:  # noqa: E302
     """Setup MLFlow server, connect to it, and set the experiment
 
     Parameters
@@ -25,11 +23,6 @@ def setup_mlflow(config: dict, verbose: bool = False) -> Experiment | None:  # n
         Config dictionary
     verbose: bool
         if this should print the mlflow server on rank0
-    rank: int, optional
-        process rank
-
-    exp_id: int
-        MLFlow experiment ID
     """
     print("in SETUP_MLFLOW: TESTING TO MAKRE SURE THIS ONLY RUNS ON RANK 0! REMOVE WHEN CONFIRMED")
     # if rank is not None:
@@ -39,24 +32,22 @@ def setup_mlflow(config: dict, verbose: bool = False) -> Experiment | None:  # n
     #     return
     restart_mlflow_server(config)
     # Connect to the MLFlow client for tracking this training - only on rank0!
-    mlflow_server = f"http://127.0.0.1:{config['mlflow']['port']}"
+    mlflow_server = f"http://127.0.0.1:{config.tracking.mlflow.port}"
     mlflow.set_tracking_uri(mlflow_server)
     if verbose:
         print(f"MLFlow connected to server {mlflow_server}")
 
-    experiment = mlflow.set_experiment(f"{config['dataset']}-{config['arch']}")
+    experiment = mlflow.set_experiment(f"{config.data.dataset}-{config.model.name}")
     return experiment
 
 
-only_on_rank_n(run_on_rank=0)
-
-
-def restart_mlflow_server(config: dict):  # noqa: E302
+@only_on_rank_n(run_on_rank=0)
+def restart_mlflow_server(config: DictConfig):  # noqa: E302
     """Kill any existing mlflow servers and restart them
 
     Parameters
     ----------
-    config: dict
+    config: DictConfig
         Config dictionary
     """
 
@@ -71,20 +62,18 @@ def restart_mlflow_server(config: dict):  # noqa: E302
             "/usr/local/bin/mlflow",
             "server",
             "--backend-store-uri",
-            f"{config['mlflow']['tracking_uri']}",
+            f"{config.tracking.mlflow.tracking_uri}",
             "--default-artifact-root",
-            f"{config['mlflow']['artifact_location']}",
+            f"{config.tracking.mlflow.artifact_location}",
             "--port",
-            f"{config['mlflow']['port']}",
+            f"{config.tracking.mlflow.port}",
         ]
         print("mlflow cmd", mlflow_server_cmd)
         _ = subprocess.Popen(mlflow_server_cmd)
         time.sleep(2)
 
 
-only_on_rank_n(0)
-
-
+@only_on_rank_n(0)
 def log_config(config, keys=None):  # noqa: E302
     # mlflow.log_params(config)
     for k in config:
@@ -99,6 +88,8 @@ def log_config(config, keys=None):  # noqa: E302
                     else:
                         lpkeys = f"{k}-{k2}"
                     mlflow.log_param(lpkeys, config[k][k2])
+        elif k == "_partial_":
+            continue
         else:
             if keys is not None:
                 lpkeys = f"{keys}-{k}"

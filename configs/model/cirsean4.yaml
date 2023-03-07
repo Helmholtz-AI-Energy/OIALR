@@ -10,3 +10,5 @@ output_size: 10
 activation: Tanh
 batch_norm: True
 activate_last_layer: True
+name: cirsean4
+autocast: True

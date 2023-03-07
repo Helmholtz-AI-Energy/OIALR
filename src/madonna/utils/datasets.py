@@ -9,6 +9,7 @@ import torch.utils.data
 import torch.utils.data.distributed as datadist
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
+from omegaconf import DictConfig
 from timm.data.transforms_factory import create_transform
 
 __all__ = ["get_dataset"]
@@ -35,7 +36,7 @@ mnist_normalize = transforms.Normalize(
 )
 
 
-def get_dataset(config):
+def get_dataset(config: DictConfig) -> dict:
     # get datasets
 
     options = {
@@ -47,7 +48,7 @@ def get_dataset(config):
     if config["dataset"] not in options:
         raise ValueError("dataset not in options! add to utils.datasets")
 
-    dset_dict = options[config["dataset"]](config)
+    dset_dict = options[config.data.dataset](config)
 
     return dset_dict
 
@@ -124,9 +125,11 @@ def imagenet_train_dataset_plus_loader(config):
 
     train_dir = Path(base_dir) / "train"
 
+    train_crop_size = config.data.train_crop_size
+
     if dsconfig["timm_transforms"]:
         transform = create_transform(
-            176,
+            train_crop_size,
             is_training=True,
             auto_augment="rand-m9-mstd0.5",
             mean=(0.485, 0.456, 0.406),
@@ -136,7 +139,7 @@ def imagenet_train_dataset_plus_loader(config):
         transform = (
             transforms.Compose(
                 [
-                    transforms.RandomResizedCrop(176),
+                    transforms.RandomResizedCrop(train_crop_size),
                     transforms.RandomHorizontalFlip(),
                     transforms.ToTensor(),
                     imagenet_normalize,
