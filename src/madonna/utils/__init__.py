@@ -60,7 +60,7 @@ def get_lr_schedules(config, optim, len_ds=None):
 
     """
     if config.training.lr_schedule is None:
-        return
+        return None, None
 
     sched_name = config.training.lr_schedule._target_.split(".")[0]
 
@@ -79,10 +79,9 @@ def get_lr_schedules(config, optim, len_ds=None):
 
     scheduler = hydra.utils.instantiate(config.training.lr_schedule)
     scheduler = scheduler(optim)
-
     if config.training.lr_warmup:
         return scheduler, None
+
     warmup_scheduler = hydra.utils.instantiate(config.training.lr_warmup)
     warmup_scheduler = warmup_scheduler(optim)
-
     return scheduler, warmup_scheduler

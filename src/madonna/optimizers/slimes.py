@@ -1,17 +1,92 @@
-# import torch
-# import torch.nn as nn
-# import torch.distributed as dist
-#
-#
-# class TorchSMA(object):
-#     """
-#     torch slime mold optimizer method
-#
-#     This is a work in progress and will be changed greatly later
-#     """
-#
-#
-#
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+
+
+class TorchSMA(object):
+    """
+    torch slime mold optimizer method
+
+    This is a work in progress and will be changed greatly later
+    """
+
+    def __init__(
+        self,
+        model,
+        upper_bound=2,
+        lower_bound=-2,
+        z=0.03,
+        individual=False,
+        chaotic_init=True,
+    ):
+        self.model = model
+        self.ub = upper_bound
+        self.lb = lower_bound
+        self.z = z
+        self.individual = individual
+        self.rank = dist.get_rank()
+        self.size = dist.get_world_size()
+        self.chaotic_init = chaotic_init
+        self.chaotic_factor = 0.5
+        self.model_buffers = {}
+        self.model_buffers_waits = {}
+        for nc, c in self.model.named_children():
+            if hasattr(c, "reset_parameters"):
+                c.reset_parameters()
+                for np, p in c.named_parameters():
+                    self.model_buffers[f"{nc}-{np}"] = torch.zeros_like(p.data)
+            # self.model_buffers[c] = torch.zeros_like(p)
+            # self.model_buffers_waits[c] = None
+
+    def init_model(self):
+        if not self.chaotic_init:
+            for c in self.model.children():
+                if hasattr(c, "reset_parameters"):
+                    c.reset_parameters()
+            return
+        if self.rank == 0:
+            tag = 0
+            # TODO: what to do about the requires grad stuff? that just means its training?
+            for c in self.model.children():
+                if hasattr(c, "reset_parameters"):
+                    c.reset_parameters()
+                    for p in c.parameters():
+                        dist.send(p.data, dst=1, tag=tag)
+                        tag += 1
+            return
+        # rest of the ranks
+        tag = 0
+        # TODO: what to do about the requires grad stuff? that just means its training?
+        for nc, c in self.model.named_children():
+            if hasattr(c, "reset_parameters"):
+                # c.reset_parameters()
+                for np, p in c.named_parameters():
+                    self.model_buffers[f"{nc}-{np}"] += p
+                    dist.recv(self.model_buffers[f"{nc}-{np}"], src=self.rank - 1, tag=tag)
+
+                    hold = self.model_buffers[f"{nc}-{np}"]
+                    p.set_(self.chaotic_factor * hold * (1 - hold))
+                    dist.send(p.data, dst=self.rank + 1, tag=tag)
+                    tag += 1
+        print(self.model)
+
+    def step(self, fitness):
+        # randomly roll parameter combinations
+        # for loop over number of epochs:
+        #   sort them by their fitness (get loss value)
+        #   get the spread of the fitness values (losses)
+        #   find the weights of each slime mold
+        #   eq 2.4
+        #   update the position of search agents - update network parameters - work on each pop
+        #           member
+        #       roll random value, if below self.z, roll new random params
+        #       eq 2.2 -> eq 2.3
+        #       two positions randomly selected from population
+        #       randomly combine the two positions
+        #       Check bounds (roll random if values are out of bounds)
+        pass
+
+
 # class BaseSMA(object):
 #     """
 #         Modified version of: Slime Mould Algorithm (SMA)
@@ -174,8 +249,8 @@
 #                        list(set(range(0, self.pop_size)) - {i}), 2, replace=False
 #                        )
 #
-#                     pos_1 = g_best[self.ID_POS] + vb * \ (pop[i][self.ID_WEI] * pop[id_a][
-#                       self.ID_POS] - pop[id_b][self.ID_POS])
+#                     pos_1 = g_best[self.ID_POS] + vb * \
+#                             (pop[i][self.ID_WEI] * pop[id_a][self.ID_POS] - pop[id_b][self.ID_POS])
 #                     pos_2 = vc * pop[i][self.ID_POS]
 #                     # combine positions
 #                     pos_new = where(uniform(0, 1, self.problem_size) < p, pos_1, pos_2)  #
