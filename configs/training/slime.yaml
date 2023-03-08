@@ -33,3 +33,8 @@ optimizer:
 #  momentum: 0.9
 #  weight_decay: 1.0e-4
 #  nesterov: True
+
+lr: null
+lr_schedule: null
+lr_warmup: null
+
