@@ -25,20 +25,20 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
-    if "seed" in config:
+    if config.seed is not None:
         random.seed(config["seed"])
         torch.manual_seed(config["seed"])
-
+    
     if dist.is_initialized():
-        config["gpu"] = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
-        log.debug(f"Using GPU: {config['gpu']}")
+        gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
+        log.debug(f"Using GPU: {gpu}")
     else:
-        config["gpu"] = 0
-    torch.cuda.set_device(config["gpu"])
+        gpu = 0
+    torch.cuda.set_device(gpu)
     # device = torch.device(f"cuda:{config['gpu']}")
 
     model = madonna.utils.get_model(config)
-    model.cuda(config["gpu"])
+    model.cuda(gpu)
 
     # criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.slimes.TorchSMA

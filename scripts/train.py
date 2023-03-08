@@ -39,9 +39,9 @@ def main(config: DictConfig):
         config["rank"] = rank
     log.info(f"Rank: {rank}, world size: {size}")
 
-    if config.trainer.trainer == "slime":
+    if config.training.trainer == "slime":
         fn = madonna.trainers.slime_trainer.main
-    elif config.trainer.trainer == "image-baseline":
+    elif config.training.trainer == "image-baseline":
         fn = madonna.trainers.images.baseline.main
     else:
         raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
