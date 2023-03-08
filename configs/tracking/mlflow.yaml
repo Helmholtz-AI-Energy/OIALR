@@ -1,8 +1,8 @@
 # https://mlflow.org
 
 mlflow:
-  artifact_location: file:/hkfs/work/workspace/scratch/qv2382-dlrt/mlflowsql/artifacts/
-  tracking_uri: sqlite:////hkfs/work/workspace/scratch/qv2382-dlrt/mlflowsql/runsdb.sqlite
+  artifact_location: file:/hkfs/work/workspace/scratch/qv2382-madonna/mlflowsql/artifacts/
+  tracking_uri: sqlite:////hkfs/work/workspace/scratch/qv2382-madonna/mlflowsql/runsdb.sqlite
   port: 24685
 #  experiment_name: ${name}
 #  tags: null

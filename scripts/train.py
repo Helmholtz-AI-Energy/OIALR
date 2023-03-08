@@ -3,7 +3,7 @@ import os
 
 import hydra
 import mlflow
-from omegaconf import DictConfig
+from omegaconf import OmegaConf, DictConfig, open_dict
 from rich.pretty import pprint
 
 import madonna
@@ -22,18 +22,23 @@ log = logging.getLogger(__name__)  # testing! possibly remove later
 def main(config: DictConfig):
     # Imports can be nested inside @hydra.main to optimize tab completion
     # https://github.com/facebookresearch/hydra/issues/934
-    config.slurm_id = os.environ["SLURM_JOBID"]
+    OmegaConf.set_struct(config, True)
+    with open_dict(config):
+        config.slurm_id = os.environ["SLURM_JOBID"]
     # from madonna.training_pipeline import train
-
+    print(config_name)
     # Applies optional utilities
     # utils.extras(config)
-    # pprint(config)
+    pprint(config)
     #
     # optimizer = madonna.utils.get_optimizer(config, model)
     # sch, warmup = madonna.utils.get_lr_schedules(config, optimizer, 10)
     log.info("comm init")
     rank, size = utils.comm.init_and_set_config_rank_size(config)
-    log.debug(f"Rank: {rank}, world size: {size}")
+    with open_dict(config):
+        config["world_size"] = size
+        config["rank"] = rank
+    log.info(f"Rank: {rank}, world size: {size}")
     if rank == 0:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
         pprint(config)
