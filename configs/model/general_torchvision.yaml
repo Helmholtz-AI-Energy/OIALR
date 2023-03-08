@@ -1,3 +1,4 @@
-_target_: madonna.models.get_tv_model
-name: resnet18
+model:
+  _target_: madonna.models.get_tv_model
+  name: resnet18
 autocast: True

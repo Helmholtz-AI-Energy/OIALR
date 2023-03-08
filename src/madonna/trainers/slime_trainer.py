@@ -28,7 +28,7 @@ def main(config):  # noqa: C901
     if config.seed is not None:
         random.seed(config["seed"])
         torch.manual_seed(config["seed"])
-    
+
     if dist.is_initialized():
         gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
         log.debug(f"Using GPU: {gpu}")

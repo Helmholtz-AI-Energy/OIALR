@@ -11,7 +11,7 @@ from .utils import *
 def get_model(config):
     if config.model is None:
         raise ValueError("model must be specified")
-    model: nn.Module = hydra.utils.instantiate(config.model)
+    model: nn.Module = hydra.utils.instantiate(config.model.model)
     # send model to devices
     if torch.cuda.is_available():
         return model.cuda()

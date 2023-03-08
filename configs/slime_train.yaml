@@ -34,7 +34,7 @@ train: True
 validate: True
 test: False
 # seed for random number generators in pytorch, numpy and python.random
-seed: null
+seed: 42
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
 name: "default"
