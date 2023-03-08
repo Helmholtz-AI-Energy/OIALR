@@ -39,6 +39,13 @@ def main(config: DictConfig):
         config["rank"] = rank
     log.info(f"Rank: {rank}, world size: {size}")
 
+    if config.trainer.trainer == "slime":
+        fn = madonna.trainers.slime_trainer.main
+    elif config.trainer.trainer == "image-baseline":
+        fn = madonna.trainers.images.baseline.main
+    else:
+        raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
+
     if rank == 0:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
         pprint(config)
@@ -56,10 +63,12 @@ def main(config: DictConfig):
             log.info(f"tracking uri: {mlflow.get_tracking_uri()}")
             log.info(f"artifact uri: {mlflow.get_artifact_uri()}")
             madonna.utils.tracking.log_config(config)
-            hydra.utils.call(config.training.script, config)
+            # hydra.utils.call(config.training.script, config)
+            fn(config)
             # exit(0)
     else:
-        hydra.utils.call(config.training.script, config)
+        # hydra.utils.call(config.training.script, config)
+        fn(config)
 
 
 if __name__ == "__main__":
