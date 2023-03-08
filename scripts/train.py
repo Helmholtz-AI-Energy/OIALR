@@ -38,6 +38,7 @@ def main(config: DictConfig):
         config["world_size"] = size
         config["rank"] = rank
     log.info(f"Rank: {rank}, world size: {size}")
+
     if rank == 0:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
         pprint(config)
@@ -55,10 +56,10 @@ def main(config: DictConfig):
             log.info(f"tracking uri: {mlflow.get_tracking_uri()}")
             log.info(f"artifact uri: {mlflow.get_artifact_uri()}")
             madonna.utils.tracking.log_config(config)
-            hydra.utils.call(config.training.script)
+            hydra.utils.call(config.training.script, config)
             # exit(0)
     else:
-        hydra.utils.call(config.training.script)
+        hydra.utils.call(config.training.script, config)
 
 
 if __name__ == "__main__":

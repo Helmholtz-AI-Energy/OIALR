@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import random
 import shutil
@@ -20,9 +21,10 @@ from torch.utils.data import Subset
 import madonna
 
 best_acc1 = 0
+log = logging.getLogger(__name__)
 
 
-def main(config, log):  # noqa: C901
+def main(config):  # noqa: C901
     if "seed" in config:
         random.seed(config["seed"])
         torch.manual_seed(config["seed"])
