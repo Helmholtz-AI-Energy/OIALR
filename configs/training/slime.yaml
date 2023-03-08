@@ -3,7 +3,8 @@ epochs: 400
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
-_target_: madonna.trainers.slime_trainer.main
+script:
+  _target_: madonna.trainers.slime_trainer.main
 init_ddp: False
 
 # ckpt path
@@ -12,7 +13,7 @@ resume_from_checkpoint: null
 criterion:
   _target_: torch.nn.CrossEntropyLoss
 
-lr: 0.1
+#lr: 0.1
 #lr_schedule:
 #  _target_: torch.optim.lr_scheduler.StepLR
 #  _partial_: True
@@ -30,6 +31,6 @@ init_opt_with_model: True
 optimizer:
   _target_: madonna.optimizers.slimes.TorchSMA
   _partial_: True
-  momentum: 0.9
-  weight_decay: 1.0e-4
-  nesterov: True
+#  momentum: 0.9
+#  weight_decay: 1.0e-4
+#  nesterov: True

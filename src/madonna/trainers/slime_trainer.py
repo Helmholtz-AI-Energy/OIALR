@@ -12,7 +12,6 @@ import torch
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Subset
 
 # import cProfile, pstats, io
@@ -20,9 +19,6 @@ from torch.utils.data import Subset
 # pr = cProfile.Profile()
 import madonna
 
-from ..optimizers.slimes import TorchSMA
-
-# console = Console(width=140)
 best_acc1 = 0
 
 

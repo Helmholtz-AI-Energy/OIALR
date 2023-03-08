@@ -13,8 +13,8 @@ class TorchSMA(object):
     def __init__(
         self,
         model,
-        upper_bound=2,
-        lower_bound=-2,
+        upper_bound=2.0,
+        lower_bound=-2.0,
         z=0.03,
         individual=False,
         chaotic_init=True,

@@ -3,7 +3,8 @@ epochs: 400
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
-_target_: madonna.trainers.images.baseline.main
+script:
+  _target_: madonna.trainers.images.baseline.main
 init_ddp: True
 
 # ckpt path

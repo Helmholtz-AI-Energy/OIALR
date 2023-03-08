@@ -364,19 +364,13 @@ def init_and_set_config_rank_size(config):
             init(method="nccl-slurm")
             rank = dist.get_rank()
             size = dist.get_world_size()
-            #config["world_size"] = dist.get_world_size()
-            #config["rank"] = dist.get_rank()
     except KeyError:
         try:
             if int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
                 init(method="nccl-slurm")
                 rank = dist.get_rank()
                 size = dist.get_world_size()
-                #config["world_size"] = dist.get_world_size()
-                #config["rank"] = dist.get_rank()
         except KeyError:
             pass
 
-    #config["world_size"] = size
-    #config["rank"] = rank
     return rank, size

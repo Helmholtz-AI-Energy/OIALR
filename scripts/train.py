@@ -3,7 +3,7 @@ import os
 
 import hydra
 import mlflow
-from omegaconf import OmegaConf, DictConfig, open_dict
+from omegaconf import DictConfig, OmegaConf, open_dict
 from rich.pretty import pprint
 
 import madonna
@@ -26,7 +26,6 @@ def main(config: DictConfig):
     with open_dict(config):
         config.slurm_id = os.environ["SLURM_JOBID"]
     # from madonna.training_pipeline import train
-    print(config_name)
     # Applies optional utilities
     # utils.extras(config)
     pprint(config)
@@ -52,14 +51,14 @@ def main(config: DictConfig):
             # print("run_name:", run_name)
             # print("tracking uri:", mlflow.get_tracking_uri())
             # print("artifact uri:", mlflow.get_artifact_uri())
-            log.info("run_name:", run_name)
-            log.info("tracking uri:", mlflow.get_tracking_uri())
-            log.info("artifact uri:", mlflow.get_artifact_uri())
+            log.info(f"run_name: {run_name}")
+            log.info(f"tracking uri: {mlflow.get_tracking_uri()}")
+            log.info(f"artifact uri: {mlflow.get_artifact_uri()}")
             madonna.utils.tracking.log_config(config)
-            hydra.utils.call(config.training)
+            hydra.utils.call(config.training.script)
             # exit(0)
     else:
-        hydra.utils.call(config.training)
+        hydra.utils.call(config.training.script)
 
 
 if __name__ == "__main__":
