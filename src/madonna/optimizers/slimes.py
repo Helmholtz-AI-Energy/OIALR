@@ -30,40 +30,61 @@ class TorchSMA(object):
         self.chaotic_factor = 0.5
         self.model_buffers = {}
         self.model_buffers_waits = {}
+        self.best_parameters = {}
+        self.best_parameters_waits = {}
+        self.model_buffers_waits = {}
         for nc, c in self.model.named_children():
             if hasattr(c, "reset_parameters"):
                 c.reset_parameters()
             for np, p in c.named_parameters():
                 self.model_buffers[f"{nc}-{np}"] = torch.zeros_like(p.data)
-            # self.model_buffers[c] = torch.zeros_like(p)
-            # self.model_buffers_waits[c] = None
+                self.model_buffers_waits[f"{nc}-{np}"] = None
+                if p.requires_grad:
+                    self.best_parameters[f"{nc}-{np}"] = torch.zeros_like(p.data)
+                    self.best_parameters_waits[f"{nc}-{np}"] = None
+        for np, p in self.model.named_parameters():
+            if p.requires_grad:
+                self.best_parameters[f"{np}"] = torch.zeros_like(p.data)
+                self.best_parameters_waits[f"{np}"] = None
+        self.uniform01 = None
+        self.uniform_lbub = None
+        self.step_count = torch.tensor([0.0])
+        self.rank_selector = torch.arange(self.size)
+
+    def set_model_buffers_to_params(self):
+        self.model_buffers = {}
+        self.model_buffers_waits = {}
+        for np, p in self.model.named_parameters():
+            if p.requires_grad:
+                self.model_buffers[f"{np}"] = torch.zeros_like(p.data)
+                self.model_buffers_waits[f"{np}"] = None
 
     @torch.no_grad()
-    def init_model(self):
+    def init_model(self, keep_rank0=False):
         print(self.chaotic_init)
         if not self.chaotic_init:
             for c in self.model.children():
                 if hasattr(c, "reset_parameters"):
                     c.reset_parameters()
+            self.set_model_buffers_to_params()
             return
         if self.rank == 0:
             tag = 0
             # TODO: what to do about the requires grad stuff? that just means its training?
             for c in self.model.children():
                 print(c)
-                if hasattr(c, "reset_parameters"):
+                if hasattr(c, "reset_parameters") and not keep_rank0:
                     c.reset_parameters()
                 for n, p in c.named_parameters():
                     print(f"sending {n} to rank 1")
                     dist.send(p.data, dst=1, tag=tag)
                     tag += 1
+            self.set_model_buffers_to_params()
             return
         # rest of the ranks
         tag = 0
         # TODO: what to do about the requires grad stuff? that just means its training?
         for nc, c in self.model.named_children():
-            #if hasattr(c, "reset_parameters"):
-                # c.reset_parameters()
             for np, p in c.named_parameters():
                 self.model_buffers[f"{nc}-{np}"] += p
                 print(f"recv {np} from rank {self.rank - 1}, sending to {self.rank + 1}")
@@ -74,11 +95,78 @@ class TorchSMA(object):
                 if self.rank < self.size - 1:
                     dist.send(p.data, dst=self.rank + 1, tag=tag)
                 tag += 1
-        #print(self.model)
+        self.set_model_buffers_to_params()
 
+    def init_rngs(self, tensor):
+        fact = {"dtype": tensor.dtype, "device": tensor.device}
+        self.uniform01 = torch.distributions.uniform.Uniform(
+            torch.tensor([0.0], **fact),
+            torch.tensor([1.0], **fact),
+        )
+        self.step_count = self.step_count.to(**fact)
+        self.uniform_lbub = torch.distributions.uniform.Uniform(
+            torch.tensor([self.lb], **fact),
+            torch.tensor([self.ub], **fact),
+        )
+        self.rank_selector = self.rank_selector.to(**fact)
+
+    def get_slime_masses(self, sorted_fitnesses, fitnesses):
+        # 2. get the spread of the fitness values
+        eps = torch.finfo(fitnesses.dtype).eps
+        # NOTE: in the original, this is defined to be negative, but that is dumb
+        fitness_spread = sorted_fitnesses[-1] - sorted_fitnesses[0] + eps
+        # Eq.(2.5)
+        masses = torch.zeros_like(fitnesses)
+        # for first half of the sorted population use 1 +
+        half = self.size // 2
+
+        masses[:half] = 1 + self.uniform01.sample(masses[:half].shape) * torch.log10(
+            (sorted_fitnesses[:half] - sorted_fitnesses[0]) / fitness_spread + 1,  # +1 in ()?
+        )
+        masses[half:] = 1 - self.uniform01.sample(masses[half:].shape) * torch.log10(
+            (sorted_fitnesses[half:] - sorted_fitnesses[0]) / fitness_spread + 1,  # +1 in ()?
+        )
+        return masses
+
+    def bcast_best_position(self, sorted_inds):
+        if self.rank == sorted_inds[0]:
+            for np, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                self.best_parameters[f"{np}"].set_(p.data)
+                self.best_parameters_waits[f"{np}"] = dist.broadcast(
+                    self.best_parameters[f"{np}"],
+                    src=self.rank,
+                    async_op=True,
+                )
+        else:
+            for np, p in self.model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                self.best_parameters_waits[f"{np}"] = dist.broadcast(
+                    self.best_parameters[f"{np}"],
+                    src=sorted_inds[0],
+                    async_op=True,
+                )
+
+    def send_model_to_partner(self, partner):
+        for np, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            self.model_buffers_waits[f"{np}"] = dist.isend(
+                p.data,
+                dst=partner,
+            )
+            # self.model_buffers[f"{nc}-{np}"].set_(p.data)
+            self.model_buffers_waits[f"{np}"] = dist.irecv(
+                self.model_buffers[f"{np}"],
+                src=partner,
+            )
+
+    @torch.no_grad()
     def step(self, fitness):
-        # randomly roll parameter combinations
-        # for loop over number of epochs:
+        # randomly roll parameter combinations -> init_model
+        # for loop over number of epochs: (assume this is run at the end of a training step
         #   sort them by their fitness (get loss value)
         #   get the spread of the fitness values (losses)
         #   find the weights of each slime mold
@@ -90,6 +178,79 @@ class TorchSMA(object):
         #       two positions randomly selected from population
         #       randomly combine the two positions
         #       Check bounds (roll random if values are out of bounds)
+        pass
+        # NOTE: fitness must be a torch tensor
+        # 1. get fitness of all ranks + sort
+        fitnesses = torch.zeros(
+            (self.size, *tuple(fitness.shape)),
+            dtype=fitness.dtype,
+            device=fitness.device,
+        )
+        fitnesses[self.rank] = fitness
+        wait = dist.all_reduce(fitnesses, async_op=True)  # defaults are SUM and blocking
+        if self.step_count == 0:
+            self.init_rngs(fitness)
+        wait.wait()
+
+        # TODO: what do when fitness is not a single value
+        # assuming ascending sort order (min at index 0)
+        sorted_fitnesses, sorted_inds = torch.sort(fitnesses, dim=-1)
+        self.bcast_best_position(sorted_inds)
+
+        # get pair
+
+        # 3. get the weights of each slime mold
+        masses = self.get_slime_masses(sorted_fitnesses=sorted_fitnesses, fitnesses=fitnesses)
+        # 4. Update the Position of search agents
+        # do a local RNG roll to determine this
+        # 4a. if the random roll is below a cutoff, reroll it
+        reroll = self.uniform01.sample() < self.z
+        rerolls = torch.zeros_like(fitnesses, dtype=torch.int32)
+        rerolls[self.rank] = reroll.to(torch.int32)
+        dist.all_reduce(rerolls)
+        pairs = self.rank_selector[rerolls > 0]
+        if self.rank == 0:
+            pairs = pairs[torch.randperm(pairs.shape).to(pairs.device)]
+        dist.broadcast(pairs, src=0, async_op=False)
+        if reroll:
+            # if the random roll is below the cutoff need to REROLL
+            # TODO: write new way to reroll these values (or at least how to better move forward)
+            # need to tell other ranks which ones are not syncing
+            return
+
+        if pairs.shape[0] % 2 == 1:
+            # remrank = pairs[-1]  # what to do with me??? ignore for now.....
+            pairs = pairs[:-1]
+        pairs = pairs.view(pairs.shape[0] // 2, 2)
+        my_pair = pairs[torch.any(pairs == self.rank, 1)]
+        partner = my_pair[my_pair != self.rank]
+        self.send_model_to_partner(partner)
+        # 4b. normal combination
+        # Eq 2.4
+        a = torch.arctanh(-((self.step_count + 1.0) / self.step_count) + 1.0)  # Eq.(2.4)
+        b = 1 - (self.step_count + 1) / self.step_count
+        p = torch.tanh(torch.abs(fitness[self.rank] - sorted_fitnesses[0]))
+        # vb and vc are the size of the parameters to replace
+        # select 2 random ranks from the population..... start with the neighbor?
+        for n, p in self.model.named_parameters():
+            if not p.requires_grad:
+                continue
+            # todo: rand or randn?
+            vb = torch.rand_like(p.data) * (2 * a) - a  # rescale vb to -a to a
+            vc = torch.rand_like(p.data) * (2 * b) - b  # rescale vb to -a to a
+            # best_pos -> best values, need to send immediately
+            self.best_parameters_waits[n].wait()
+            self.model_buffers_waits[n].wait()
+            partner_data = self.model_buffers[n]
+            # pos_1 -> my values
+            # pos_2 -> from partner values
+            pos1 = self.best_parameters[n] + vb * (masses[self.rank] * p.data - partner_data)
+            pos2 = vc * partner_data
+            merging_rand = self.uniform01.sample(p.shape)
+            p.set_(torch.where(merging_rand < p, pos1, pos2))
+
+        # NOTE: keep at end:
+        self.step_count += 1
         pass
 
 

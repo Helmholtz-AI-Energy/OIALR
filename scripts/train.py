@@ -65,7 +65,6 @@ def main(config: DictConfig):
             madonna.utils.tracking.log_config(config)
             # hydra.utils.call(config.training.script, config)
             fn(config)
-            # exit(0)
     else:
         # hydra.utils.call(config.training.script, config)
         fn(config)

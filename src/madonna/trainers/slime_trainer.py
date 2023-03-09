@@ -35,21 +35,21 @@ def main(config):  # noqa: C901
     else:
         gpu = 0
     torch.cuda.set_device(gpu)
-    # device = torch.device(f"cuda:{config['gpu']}")
+    device = torch.device(f"cuda:{gpu}")
 
     model = madonna.utils.get_model(config)
     model.cuda(gpu)
 
-    # criterion = madonna.utils.get_criterion(config)
+    criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.slimes.TorchSMA
 
     optimizer.init_model()
-    return
-
     # scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, 10)
 
     # # optionally resume from a checkpoint
     # # TODO: add checkpointing
+    # # Reminder: when resuming from a single checkpoint, make sure to call init_model with
+    # # keep_rank0=True
     # if "resume" in config:
     #     if os.path.isfile(config["resume"]):
     #         print(f"=> loading checkpoint: {config['resume']}")
@@ -76,48 +76,48 @@ def main(config):  # noqa: C901
     #     else:
     #         print(f"=> no checkpoint found at: {config['resume']}")
     #
-    # dset_dict = madonna.utils.datasets.get_dataset(config)
-    # train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
-    # val_loader = dset_dict["val"]["loader"]
-    #
+    dset_dict = madonna.utils.datasets.get_dataset(config)
+    train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
+    val_loader = dset_dict["val"]["loader"]
+
     # # if config['evaluate']:
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
     #
-    # scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
-    #
-    # for epoch in range(config["start_epoch"], config["epochs"]):
-    #     if config["rank"] == 0:
-    #         # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-    #         log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-    #         mlflow.log_metrics(
-    #             metrics={"lr": optimizer.param_groups[0]["lr"]},
-    #             step=epoch,
-    #         )
-    #     if dist.is_initialized():
-    #         train_sampler.set_epoch(epoch)
-    #
-    #     train_loss = train(
-    #         train_loader,
-    #         optimizer,
-    #         model,
-    #         criterion,
-    #         epoch,
-    #         device,
-    #         config,
-    #         log=log,
-    #         scaler=scaler,
-    #     )
-    #
-    #     # save_selected_weights(model, epoch)
-    #     if config.rank == 0:
-    #         log.info(f"Average Training loss across process space: {train_loss}")
-    #     # evaluate on validation set
-    #     _, val_loss = validate(val_loader, model, criterion, config, epoch)
-    #     if config.rank == 0:
-    #         log.info(
-    #             f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
-    #         )
+    scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
+
+    for epoch in range(config["start_epoch"], config["epochs"]):
+        if config["rank"] == 0:
+            # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
+            log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
+            mlflow.log_metrics(
+                metrics={"lr": optimizer.param_groups[0]["lr"]},
+                step=epoch,
+            )
+        if dist.is_initialized():
+            train_sampler.set_epoch(epoch)
+
+        train_loss = train(
+            train_loader,
+            optimizer,
+            model,
+            criterion,
+            epoch,
+            device,
+            config,
+            log=log,
+            scaler=scaler,
+        )
+
+        # save_selected_weights(model, epoch)
+        if config.rank == 0:
+            log.info(f"Average Training loss across process space: {train_loss}")
+        # evaluate on validation set
+        _, val_loss = validate(val_loader, model, criterion, config, epoch)
+        if config.rank == 0:
+            log.info(
+                f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
+            )
 
 
 def train(
@@ -143,13 +143,13 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.lr_warmup._target_.split(".")[0] in [
-        "CosineAnnealingWarmRestarts",
-        "CosineAnnealingLR",
-    ]:
-        batch_warmup_step = True
-    else:
-        batch_warmup_step = False
+    # if warmup_scheduler is not None and config.lr_warmup._target_.split(".")[0] in [
+    #     "CosineAnnealingWarmRestarts",
+    #     "CosineAnnealingLR",
+    # ]:
+    #     batch_warmup_step = True
+    # else:
+    #     batch_warmup_step = False
     # switch to train mode
     model.train()
     end = time.time()
@@ -160,13 +160,16 @@ def train(
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
-            output = model(images)
-            loss = criterion(output, target)
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-        optimizer.zero_grad()
+        # with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
+        #     output = model(images)
+        #     loss = criterion(output, target)
+        # scaler.scale(loss).backward()
+        # scaler.step(optimizer)
+        # scaler.update()
+        # optimizer.zero_grad()
+        output = model(images)
+        loss = criterion(output, target)
+        optimizer.step(fitness=loss)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -178,10 +181,10 @@ def train(
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if warmup_scheduler is not None:
-            with warmup_scheduler.dampening():
-                if batch_warmup_step:
-                    lr_scheduler.step()
+        # if warmup_scheduler is not None:
+        #     with warmup_scheduler.dampening():
+        #         if batch_warmup_step:
+        #             lr_scheduler.step()
 
         if (i % config["print_freq"] == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
             # console.rule(f"train step {i}")
