@@ -1,8 +1,9 @@
+import time
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from mpi4py import MPI
-import time
 
 
 class TorchSMA(object):
@@ -20,7 +21,7 @@ class TorchSMA(object):
         z=0.03,
         individual=False,
         chaotic_init=True,
-        num_steps=-1
+        num_steps=-1,
     ):
         self.model = model
         self.ub = upper_bound
@@ -66,7 +67,7 @@ class TorchSMA(object):
 
     @torch.no_grad()
     def init_model(self, keep_rank0=False):
-        #print(self.chaotic_init)
+        # print(self.chaotic_init)
         if not self.chaotic_init:
             for c in self.model.children():
                 if hasattr(c, "reset_parameters"):
@@ -77,11 +78,11 @@ class TorchSMA(object):
             tag = 0
             # TODO: what to do about the requires grad stuff? that just means its training?
             for c in self.model.children():
-                #print(c)
+                # print(c)
                 if hasattr(c, "reset_parameters") and not keep_rank0:
                     c.reset_parameters()
-                for n, p in c.named_parameters():
-                    #print(f"sending {n} to rank 1")
+                for _, p in c.named_parameters():
+                    # print(f"sending {n} to rank 1")
                     dist.send(p.data, dst=1, tag=tag)
                     tag += 1
             self.set_model_buffers_to_params()
@@ -92,7 +93,7 @@ class TorchSMA(object):
         for nc, c in self.model.named_children():
             for np, p in c.named_parameters():
                 self.model_buffers[f"{nc}-{np}"] += p
-                #print(f"recv {np} from rank {self.rank - 1}, sending to {self.rank + 1}")
+                # print(f"recv {np} from rank {self.rank - 1}, sending to {self.rank + 1}")
                 dist.recv(self.model_buffers[f"{nc}-{np}"], src=self.rank - 1, tag=tag)
 
                 hold = self.model_buffers[f"{nc}-{np}"]
@@ -108,7 +109,7 @@ class TorchSMA(object):
             torch.tensor([0.0], **fact),
             torch.tensor([1.0], **fact),
         )
-        #self.step_count = self.step_count.to(**fact)
+        # self.step_count = self.step_count.to(**fact)
         self.uniform_lbub = torch.distributions.uniform.Uniform(
             torch.tensor([self.lb], **fact),
             torch.tensor([self.ub], **fact),
@@ -124,7 +125,7 @@ class TorchSMA(object):
         masses = torch.zeros_like(fitnesses)
         # for first half of the sorted population use 1 +
         half = self.size // 2
-        #print(1 + self.uniform01.sample(masses[:half].shape), torch.log10(
+        # print(1 + self.uniform01.sample(masses[:half].shape), torch.log10(
         #    (sorted_fitnesses[:half] - sorted_fitnesses[0]) / fitness_spread + 1))
         masses[:half] = 1 + self.uniform01.sample(masses[:half].shape).flatten() * torch.log10(
             (sorted_fitnesses[:half] - sorted_fitnesses[0]) / fitness_spread + 1,  # +1 in ()?
@@ -205,7 +206,7 @@ class TorchSMA(object):
         fact = {"dtype": fitness.dtype, "device": fitness.device}
         if fitness.isnan():
             fitness = torch.tensor(10000, **fact)
-            for n, p in self.model.named_parameters():
+            for _, p in self.model.named_parameters():
                 p.zero_()
                 # self.best_parameters_waits[n].wait()
                 # hold = self.best_parameters[n]
@@ -235,7 +236,7 @@ class TorchSMA(object):
         rerolls = torch.zeros_like(fitnesses, dtype=torch.int32)
         rerolls[self.rank] = reroll.to(torch.int32)
         dist.all_reduce(rerolls)
-        #print(f"rerolls {rerolls}")
+        # print(f"rerolls {rerolls}")
         # pairs should be where the rerolls is False, other ranks are removed
         pairs = self.rank_selector[rerolls == 0]
         if self.rank == 0:
@@ -246,19 +247,19 @@ class TorchSMA(object):
             # TODO: write new way to reroll these values (or at least how to better move forward)
             # # need to tell other ranks which ones are not syncing
             # for nc, c in self.model.named_children():
-            for n, p in self.model.named_parameters():
+            for _, p in self.model.named_parameters():
                 p.zero_()
                 # self.best_parameters_waits[n].wait()
                 # hold = self.best_parameters[n]
                 p.set_(self.chaotic_factor * p.data * (1 - p.data))
-            print('h')
+            print("h")
             return
 
         if pairs.shape[0] % 2 == 1:
             # remrank = pairs[-1]  # what to do with me??? ignore for now.....
             pairs = pairs[:-1]
         pairs = pairs.view(pairs.shape[0] // 2, 2)
-        #print("pairs", pairs)
+        # print("pairs", pairs)
         my_pair = pairs[torch.any(pairs == self.rank, 1)]
         partner = my_pair[my_pair != self.rank]
         # 4b. normal combination
@@ -284,12 +285,12 @@ class TorchSMA(object):
             #     hold = self.best_parameters[n] * torch.rand_like(self.best_parameters[n])
             #     p.zero_()
             #     p.add_(hold)
-            for n, p in self.model.named_parameters():
+            for _, p in self.model.named_parameters():
                 p.zero_()
                 # self.best_parameters_waits[n].wait()
                 # hold = self.best_parameters[n]
                 p.set_(self.chaotic_factor * p.data * (1 - p.data))
-            print('hh')
+            print("hh")
             return
         self.send_model_to_partner(partner)
         # MPI.COMM_WORLD.Barrier()
@@ -317,7 +318,7 @@ class TorchSMA(object):
             pos2 = vc * partner_data
             # merging_rand = r1
             # print(pos1.shape, pos2.shape, r1.shape, p.shape)
-            # mask = merging_rand 
+            # mask = merging_rand
             # print(mask)
             new_p = torch.where(r1 < torch.abs(p.data), pos1, pos2)
             # print("after torch where")
