@@ -22,7 +22,7 @@ def get_model(config):
 def get_criterion(config):
     if config.training.criterion is None:
         raise ValueError("Training criterion must be specified")
-    criterion: nn.Module = hydra.utils.instantiate(config.training.criterion, _recursive=False)
+    criterion: nn.Module = hydra.utils.instantiate(config.training.criterion)
     if torch.cuda.is_available():
         return criterion.cuda()
     else:

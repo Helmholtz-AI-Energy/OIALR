@@ -26,6 +26,7 @@ defaults:
 # path to original working directory
 # hydra hijacks working directory by changing it to the new log directory
 # https://hydra.cc/docs/next/tutorials/basic/running_your_app/working_directory
+skip_tracking: True
 original_work_dir: ${hydra:runtime.cwd}
 # pretty print config at the start of the run using Rich library
 print_config: True

@@ -26,8 +26,8 @@ log = logging.getLogger(__name__)
 
 def main(config):  # noqa: C901
     if config.seed is not None:
-        random.seed(config["seed"])
-        torch.manual_seed(config["seed"])
+        random.seed(int(config["seed"]) + config.rank)
+        torch.manual_seed(int(config["seed"]) + config.rank)
 
     if dist.is_initialized():
         gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
@@ -86,15 +86,15 @@ def main(config):  # noqa: C901
     #
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
 
-    for epoch in range(config["start_epoch"], config["epochs"]):
-        if config["rank"] == 0:
+    for epoch in range(config.training["start_epoch"], config.training["epochs"]):
+        if config["rank"] == -1:  # TODO: remove this??
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
             log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
             mlflow.log_metrics(
                 metrics={"lr": optimizer.param_groups[0]["lr"]},
                 step=epoch,
             )
-        if dist.is_initialized():
+        if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
 
         train_loss = train(
@@ -128,10 +128,10 @@ def train(
     epoch,
     device,
     config,
-    lr_scheduler,
-    warmup_scheduler,
-    log,
-    scaler,
+    lr_scheduler=None,
+    warmup_scheduler=None,
+    log=None,
+    scaler=None,
 ):
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
@@ -169,6 +169,8 @@ def train(
         # optimizer.zero_grad()
         output = model(images)
         loss = criterion(output, target)
+        # if torch.isnan(loss):
+        #     raise ValueError("NaN loss")
         optimizer.step(fitness=loss)
 
         # measure accuracy and record loss
@@ -186,16 +188,16 @@ def train(
         #         if batch_warmup_step:
         #             lr_scheduler.step()
 
-        if (i % config["print_freq"] == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
-            # console.rule(f"train step {i}")
-            argmax = torch.argmax(output, dim=1).to(torch.float32)
-            # console.print(
-            log.info(
-                f"Argmax outputs s "
-                f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
-                f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
-            )
-            progress.display(i + 1, log=log)
+        # if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
+        # console.rule(f"train step {i}")
+        argmax = torch.argmax(output, dim=1).to(torch.float32)
+        # console.print(
+        log.info(
+            f"Argmax outputs s "
+            f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
+            f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
+        )
+        progress.display(i + 1, log=log)
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -286,7 +288,7 @@ def validate(val_loader, model, criterion, config, epoch, log):
                 batch_time.update(time.time() - end)
                 end = time.time()
 
-                if (i % config["print_freq"] == 0 or i == num_elem) and rank == 0:
+                if (i % config.training.print_freq == 0 or i == num_elem) and rank == 0:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",

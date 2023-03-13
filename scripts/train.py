@@ -46,7 +46,7 @@ def main(config: DictConfig):
     else:
         raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
 
-    if rank == 0:
+    if rank == 0 and not config.skip_tracking:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
         pprint(config)
 

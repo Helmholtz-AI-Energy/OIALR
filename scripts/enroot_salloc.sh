@@ -40,10 +40,12 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
-export TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+
+TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
-TOMOUNT+="/scratch,/tmp,/usr/bin/srun:/usr/bin/srun"
+TOMOUNT+="/scratch,/tmp,"
 TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
 
 salloc --partition=accelerated \

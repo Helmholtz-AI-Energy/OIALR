@@ -8,12 +8,12 @@
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-test-mlperf
-#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-dlrt/madonna/logs/slurm-%j"
+#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
 
 ml purge
 
 # pmi2 cray_shasta
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-dlrt/"
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
@@ -48,7 +48,7 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
-export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
+#export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 #echo "Loading data from ${DATA_PREFIX}"
 #echo "${SCRIPT_DIR}"
@@ -56,6 +56,6 @@ export CUDA_VISIBLE_DEVICES="0,1,2,3"
 #  --bind "${DATA_PREFIX}","${SCRIPT_DIR}","/scratch","/tmp","/hkfs/work/workspace/scratch/qv2382-dlrt/DLRT/dlrt/":"/opt/conda/lib/python3.8/site-packages/dlrt/" "${SINGULARITY_FILE}" \
 #    bash -c "TORCH_DISTRIBUTED_DEBUG=DETAIL python -u baseline-resnet.py --config ${CONFIGS}resnet18.yaml"
 
-export CONFIG_NAME="train.yaml"
+export CONFIG_NAME="slime_train.yaml"
 
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME='train.yaml'; python -u ${SCRIPT_DIR}madonna/scripts/train.py"
+srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${SCRIPT_DIR}madonna/scripts/train.py"

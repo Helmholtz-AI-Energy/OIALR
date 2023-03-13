@@ -45,7 +45,7 @@ def get_dataset(config: DictConfig) -> dict:
         "cifar100": get_cifar100_datasets,
         "mnist": get_mnist_datasets,
     }
-    if config["dataset"] not in options:
+    if config.data.dataset not in options:
         raise ValueError("dataset not in options! add to utils.datasets")
 
     dset_dict = options[config.data.dataset](config)
@@ -119,7 +119,7 @@ def get_mnist_datasets(config):
 
 def imagenet_train_dataset_plus_loader(config):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -172,7 +172,7 @@ def imagenet_train_dataset_plus_loader(config):
 
 def imagenet_get_val_dataset_n_loader(config):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -209,7 +209,7 @@ def imagenet_get_val_dataset_n_loader(config):
 def cifar10_train_dataset_plus_loader(config):
     # CIFAR-10 dataset
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -263,7 +263,7 @@ def cifar10_train_dataset_plus_loader(config):
 
 def cifar10_val_dataset_n_loader(config):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
@@ -294,7 +294,7 @@ def cifar10_val_dataset_n_loader(config):
 def cifar100_train_dataset_plus_loader(config):
     # CIFAR-10 dataset
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -346,7 +346,7 @@ def cifar100_train_dataset_plus_loader(config):
 
 def cifar100_val_dataset_n_loader(config):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
@@ -378,7 +378,7 @@ def cifar100_val_dataset_n_loader(config):
 def mnist_train_data(config):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     if dsconfig["resize"]:
@@ -413,7 +413,7 @@ def mnist_train_data(config):
 def mnist_val_data(config):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
-    base_dir = dsconfig["data_location"]
+    base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     if dsconfig["resize"]:

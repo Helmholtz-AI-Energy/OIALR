@@ -1,4 +1,4 @@
-start_epoch: null
+start_epoch: 0
 epochs: null
 
 # number of validation steps to execute at the beginning of the training
@@ -20,3 +20,5 @@ lr_warmup_step_args: null
 
 optimizer: null
 init_opt_with_model: False
+
+print_freq: 10

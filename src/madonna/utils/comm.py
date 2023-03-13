@@ -343,16 +343,18 @@ def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride
             torch.cuda.set_device(get_local_rank())
         dist.barrier()
         dist.barrier(device_ids=[get_local_rank()], group=_DATA_PARALLEL_GROUP)
-        disttest = torch.ones(2).cuda()
+        disttest = torch.ones(1).cuda()
         # print(disttest)
 
         dist.all_reduce(disttest)
         assert disttest[0] == nccl_world_size, "failed test of dist!"
+    else:
+        disttest = None
 
     # get the local process group for batchnorm
     batchnorm_group = init_local_group(batchnorm_group_size, batchnorm_group_stride)
 
-    print(f"finished dist init - rank: {dist.get_rank()} ws: {dist.get_world_size()}")
+    print(f"finished dist init - rank: {dist.get_rank()} ws: {dist.get_world_size()}, test: {disttest}")
     return batchnorm_group
 
 
