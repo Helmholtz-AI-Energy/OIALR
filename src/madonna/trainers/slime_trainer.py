@@ -169,8 +169,8 @@ def train(
         # optimizer.zero_grad()
         output = model(images)
         loss = criterion(output, target)
-        # if torch.isnan(loss):
-        #     raise ValueError("NaN loss")
+        if torch.isnan(loss):
+            raise ValueError("NaN loss")
         optimizer.step(fitness=loss)
 
         # measure accuracy and record loss
@@ -188,16 +188,16 @@ def train(
         #         if batch_warmup_step:
         #             lr_scheduler.step()
 
-        # if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
-        # console.rule(f"train step {i}")
-        argmax = torch.argmax(output, dim=1).to(torch.float32)
-        # console.print(
-        log.info(
-            f"Argmax outputs s "
-            f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
-            f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
-        )
-        progress.display(i + 1, log=log)
+        if (i % config.training.print_freq == 0 or i == len(train_loader) - 1):# and config["rank"] == 0:
+            # console.rule(f"train step {i}")
+            argmax = torch.argmax(output, dim=1).to(torch.float32)
+            # console.print(
+            log.info(
+                f"Argmax outputs s "
+                f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
+                f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
+            )
+            progress.display(i + 1, log=log)
 
     if dist.is_initialized():
         losses.all_reduce()

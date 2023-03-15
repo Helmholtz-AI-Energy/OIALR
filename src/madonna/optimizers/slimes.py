@@ -247,12 +247,12 @@ class TorchSMA(object):
             # TODO: write new way to reroll these values (or at least how to better move forward)
             # # need to tell other ranks which ones are not syncing
             # for nc, c in self.model.named_children():
-            for _, p in self.model.named_parameters():
-                p.zero_()
-                # self.best_parameters_waits[n].wait()
-                # hold = self.best_parameters[n]
-                p.set_(self.chaotic_factor * p.data * (1 - p.data))
-            print("h")
+            # for _, p in self.model.named_parameters():
+            #     p.zero_()
+            #     # self.best_parameters_waits[n].wait()
+            #     # hold = self.best_parameters[n]
+            #     p.set_(self.chaotic_factor * p.data * (1 - p.data))
+            # print("h")
             return
 
         if pairs.shape[0] % 2 == 1:
@@ -267,44 +267,31 @@ class TorchSMA(object):
         # TODO: make step_count an int
         a = torch.arctanh(torch.tensor(-((self.step_count + 1.0) / self.num_steps) + 1.0, **fact))  # Eq.(2.4)
         b = 1 - (self.step_count + 1) / self.num_steps
-        p = torch.tanh(torch.abs(fitness - sorted_fitnesses[0]))
+        cutoff = 0.1  # torch.tanh(torch.abs(fitness - sorted_fitnesses[0]))
+        # print(a, b, cutoff)
         # vb and vc are the size of the parameters to replace
         # select 2 random ranks from the population..... start with the neighbor?
         # time.sleep(self.rank / 10)
-        print(pairs, reroll, partner)
+        # print(pairs, reroll, partner)
         try:
             partner = int(partner.item())
         except ValueError:
             # # this is the case partner has nothing in it! (faster to fail then to check shape)
-            # for n, p in self.model.named_parameters():
-            # # print("working on layer:", n)
-            #     if not p.requires_grad:
-            #         continue
-            #     # todo: rand or randn?
-            #     self.best_parameters_waits[n].wait()
-            #     hold = self.best_parameters[n] * torch.rand_like(self.best_parameters[n])
-            #     p.zero_()
-            #     p.add_(hold)
-            for _, p in self.model.named_parameters():
-                p.zero_()
-                # self.best_parameters_waits[n].wait()
-                # hold = self.best_parameters[n]
-                p.set_(self.chaotic_factor * p.data * (1 - p.data))
-            print("hh")
             return
+
         self.send_model_to_partner(partner)
-        # MPI.COMM_WORLD.Barrier()
-        # print('before barrier')
-        # dist.barrier()
-        # print('after barrier')
+
         for n, p in self.model.named_parameters():
             # print("working on layer:", n)
             if not p.requires_grad:
                 continue
             # todo: rand or randn?
-            r1 = torch.rand_like(p.data)
-            vb = torch.rand_like(p.data) * (2 * a) - a  # rescale vb to -a to a
-            vc = torch.rand_like(p.data) * (2 * b) - b  # rescale vb to -a to a
+            # r1 = torch.rand_like(p.data)
+            r1 = self.uniform01.sample(p.data.shape).squeeze()
+            vb = torch.rand_like(p.data) * 2 * a - a  # rescale vb to -a to a
+            # vb = ((torch.rand_like(p.data) + a) / (2*a)) - a  # rescale vb to -a to a
+            vc = torch.rand_like(p.data) * 2 * b - b  # rescale vb to -b to b
+            # vc = ((torch.rand_like(p.data) + b) / (2*b)) - b  # rescale vb to -b to b
             # best_pos -> best values, need to send immediately
             # TODO: change uniform01 to be somethign different? just use torch rand?
             # merging_rand = self.uniform01.sample(p.shape).squeeze()
@@ -316,14 +303,19 @@ class TorchSMA(object):
             # pos_2 -> from partner values
             pos1 = self.best_parameters[n] + vb * (masses[self.rank] * p.data - partner_data)
             pos2 = vc * partner_data
+            print(f"pos1, min: {pos1.min()}, max: {pos1.max()}, mean: {pos1.mean()}")
+            print(f"pos2, min: {pos2.min()}, max: {pos2.max()}, mean: {pos2.mean()}")
             # merging_rand = r1
             # print(pos1.shape, pos2.shape, r1.shape, p.shape)
             # mask = merging_rand
             # print(mask)
-            new_p = torch.where(r1 < torch.abs(p.data), pos1, pos2)
+            new_p = torch.where(r1 < cutoff, pos1, pos2)
+            print(f"{n}, min: {new_p.min()}, max: {new_p.max()}, mean: {new_p.mean()}")
             # print("after torch where")
             if torch.any(new_p.isnan()):
                 print(f"nans in layer: {n}")
+            # scale new weights to same range?
+            # new_p = new_p * ()
             p.zero_()
             p.add_(new_p)
             # print("after setting new p")
