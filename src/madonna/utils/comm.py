@@ -332,6 +332,22 @@ def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride
         #     rank=rank,
         #     world_size=world_size
         # )
+    elif method == "gloo":
+        time.sleep(0.001 * comm_rank)
+
+        wireup_store = dist.TCPStore(
+            host_name=master_address,
+            port=port,
+            world_size=nccl_world_size,
+            is_master=(nccl_world_rank == 0),
+            timeout=dt.timedelta(seconds=3600),
+        )
+        dist.init_process_group(
+            backend="gloo",
+            store=wireup_store,
+            world_size=nccl_world_size,
+            rank=nccl_world_rank,
+        )
     else:
         raise NotImplementedError()
 
@@ -358,9 +374,38 @@ def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride
     return batchnorm_group
 
 
+def create_sub_groups(group_size: int) -> dist.ProcessGroup:
+    """
+    Create local sub-groups in the communicator.
+    NOTE: only the local group will be returned on each process, all procs will be in a local group
+
+    Parameters
+    ----------
+    group_size: int
+        size of groups to create
+
+    Returns
+    -------
+    torch.distributed.ProcessGroup
+    """
+    size = dist.get_world_size()
+    rank = dist.get_rank()
+
+    assert size % group_size == 0, f"global_size % group_size != 0 (f{size}, {group_size}"
+
+    group_id = rank // group_size
+
+    ranks = torch.arange(size).tolist()
+    grp_st, grp_sp = group_id * group_size, (group_id + 1) * group_size
+    local_ranks = ranks[grp_st:grp_sp]
+    return dist.new_group(local_ranks, backend=None, pg_options=None)
+
+
 def init_and_set_config_rank_size(config):
     size = 1
     rank = 0
+    if "comm_method" in config and config.comm_method == "gloo":
+        init(method="gloo")
     try:
         if int(os.environ["SLURM_NTASKS"]) > 1 or int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
             init(method="nccl-slurm")

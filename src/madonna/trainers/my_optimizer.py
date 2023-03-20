@@ -47,9 +47,7 @@ def main(config):  # noqa: C901
         model.cuda(gpu)
 
     criterion = madonna.utils.get_criterion(config)
-    optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.slimes.TorchSMA
-
-    optimizer.init_model()
+    optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
     # scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, 10)
 
     # # optionally resume from a checkpoint
@@ -91,22 +89,23 @@ def main(config):  # noqa: C901
     # #     return
     #
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
-
+    target_model = model
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
-        if config["rank"] == -1:  # TODO: remove this??
+        if config["rank"] == 0:  # TODO: remove this??
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
             log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            mlflow.log_metrics(
-                metrics={"lr": optimizer.param_groups[0]["lr"]},
-                step=epoch,
-            )
+            if not config.skip_tracking:
+                mlflow.log_metrics(
+                    metrics={"lr": optimizer.param_groups[0]["lr"]},
+                    step=epoch,
+                )
         if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
 
-        train_loss = train(
+        train_loss, target_model = train(
             train_loader,
             optimizer,
-            model,
+            target_model,
             criterion,
             epoch,
             device,
@@ -119,7 +118,7 @@ def main(config):  # noqa: C901
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        _, val_loss = validate(val_loader, model, criterion, config, epoch, log=log)
+        _, val_loss = validate(val_loader, target_model, criterion, config, epoch, log=log)
         if config.rank == 0:
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
@@ -177,7 +176,7 @@ def train(
         loss = criterion(output, target)
         if torch.isnan(loss):
             raise ValueError("NaN loss")
-        optimizer.step(fitness=loss)
+        model = optimizer.step(fitness=loss)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -210,7 +209,7 @@ def train(
         top1.all_reduce()
         top5.all_reduce()
 
-    if config["rank"] == 0:
+    if config["rank"] == 0 and not config.skip_tracking:
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
@@ -222,7 +221,7 @@ def train(
             },
             step=epoch,
         )
-    return losses.avg
+    return losses.avg, model
 
 
 @torch.no_grad()
@@ -342,7 +341,7 @@ def validate(val_loader, model, criterion, config, epoch, log):
         top1.all_reduce()
         top5.all_reduce()
 
-    if config["rank"] == 0:
+    if config["rank"] == 0 and not config.skip_tracking:
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg

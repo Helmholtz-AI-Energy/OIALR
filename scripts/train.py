@@ -43,6 +43,8 @@ def main(config: DictConfig):
         fn = madonna.trainers.slime_trainer.main
     elif config.training.trainer == "image-baseline":
         fn = madonna.trainers.images.baseline.main
+    elif config.training.trainer == "MyOpt":
+        fn = madonna.trainers.my_optimizer.main
     else:
         raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
 

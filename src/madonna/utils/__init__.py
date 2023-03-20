@@ -13,7 +13,7 @@ def get_model(config):
         raise ValueError("model must be specified")
     model: nn.Module = hydra.utils.instantiate(config.model.model)
     # send model to devices
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and not config.cpu_training:
         return model.cuda()
     else:
         return model
@@ -23,7 +23,7 @@ def get_criterion(config):
     if config.training.criterion is None:
         raise ValueError("Training criterion must be specified")
     criterion: nn.Module = hydra.utils.instantiate(config.training.criterion)
-    if torch.cuda.is_available():
+    if torch.cuda.is_available() and not config.cpu_training:
         return criterion.cuda()
     else:
         return criterion
