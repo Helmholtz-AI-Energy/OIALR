@@ -68,39 +68,40 @@ class TorchSMA(object):
     @torch.no_grad()
     def init_model(self, keep_rank0=False):
         # print(self.chaotic_init)
-        if not self.chaotic_init:
-            for c in self.model.children():
-                if hasattr(c, "reset_parameters"):
-                    c.reset_parameters()
-            self.set_model_buffers_to_params()
-            return
-        if self.rank == 0:
-            tag = 0
-            # TODO: what to do about the requires grad stuff? that just means its training?
-            for c in self.model.children():
-                # print(c)
-                if hasattr(c, "reset_parameters") and not keep_rank0:
-                    c.reset_parameters()
-                for _, p in c.named_parameters():
-                    # print(f"sending {n} to rank 1")
-                    dist.send(p.data, dst=1, tag=tag)
-                    tag += 1
-            self.set_model_buffers_to_params()
-            return
-        # rest of the ranks
-        tag = 0
-        # TODO: what to do about the requires grad stuff? that just means its training?
-        for nc, c in self.model.named_children():
-            for np, p in c.named_parameters():
-                self.model_buffers[f"{nc}-{np}"] += p
-                # print(f"recv {np} from rank {self.rank - 1}, sending to {self.rank + 1}")
-                dist.recv(self.model_buffers[f"{nc}-{np}"], src=self.rank - 1, tag=tag)
-
-                hold = self.model_buffers[f"{nc}-{np}"]
-                p.set_(self.chaotic_factor * hold * (1 - hold))
-                if self.rank < self.size - 1:
-                    dist.send(p.data, dst=self.rank + 1, tag=tag)
-                tag += 1
+        pass
+        # if not self.chaotic_init:
+        #     for c in self.model.children():
+        #         if hasattr(c, "reset_parameters"):
+        #             c.reset_parameters()
+        #     self.set_model_buffers_to_params()
+        #     return
+        # if self.rank == 0:
+        #     tag = 0
+        #     # TODO: what to do about the requires grad stuff? that just means its training?
+        #     for c in self.model.children():
+        #         # print(c)
+        #         if hasattr(c, "reset_parameters") and not keep_rank0:
+        #             c.reset_parameters()
+        #         for _, p in c.named_parameters():
+        #             # print(f"sending {n} to rank 1")
+        #             dist.send(p.data, dst=1, tag=tag)
+        #             tag += 1
+        #     self.set_model_buffers_to_params()
+        #     return
+        # # rest of the ranks
+        # tag = 0
+        # # TODO: what to do about the requires grad stuff? that just means its training?
+        # for nc, c in self.model.named_children():
+        #     for np, p in c.named_parameters():
+        #         self.model_buffers[f"{nc}-{np}"] += p
+        #         # print(f"recv {np} from rank {self.rank - 1}, sending to {self.rank + 1}")
+        #         dist.recv(self.model_buffers[f"{nc}-{np}"], src=self.rank - 1, tag=tag)
+        #
+        #         hold = self.model_buffers[f"{nc}-{np}"]
+        #         p.set_(self.chaotic_factor * hold * (1 - hold))
+        #         if self.rank < self.size - 1:
+        #             dist.send(p.data, dst=self.rank + 1, tag=tag)
+        #         tag += 1
         self.set_model_buffers_to_params()
 
     def init_rngs(self, tensor):

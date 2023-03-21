@@ -48,6 +48,9 @@ def main(config):  # noqa: C901
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
+
+    log.info("after optimizer started")
+
     # scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, 10)
 
     # # optionally resume from a checkpoint
@@ -91,18 +94,18 @@ def main(config):  # noqa: C901
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     target_model = model
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
-        if config["rank"] == 0:  # TODO: remove this??
-            # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            if not config.skip_tracking:
-                mlflow.log_metrics(
-                    metrics={"lr": optimizer.param_groups[0]["lr"]},
-                    step=epoch,
-                )
+        # if config["rank"] == 0:  # TODO: remove this?? logging LR, which isnt there...
+        #     # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
+        #     # log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
+        #     if not config.skip_tracking:
+        #         mlflow.log_metrics(
+        #             metrics={"lr": optimizer.param_groups[0]["lr"]},
+        #             step=epoch,
+        #         )
         if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
 
-        train_loss, target_model = train(
+        train_loss, target_model, last_loss = train(
             train_loader,
             optimizer,
             target_model,
@@ -118,7 +121,19 @@ def main(config):  # noqa: C901
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        _, val_loss = validate(val_loader, target_model, criterion, config, epoch, log=log)
+        losses, ranks = optimizer.get_sorted_losses(last_loss)
+        print(losses, ranks)
+        best_rank = ranks[0]
+        _, val_loss = validate(
+            val_loader,
+            target_model,
+            criterion,
+            config,
+            epoch,
+            log=log,
+            device=device,
+            target_rank=best_rank,
+        )
         if config.rank == 0:
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
@@ -175,8 +190,10 @@ def train(
         output = model(images)
         loss = criterion(output, target)
         if torch.isnan(loss):
+            for n, p in model.named_parameters():
+                print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
-        model = optimizer.step(fitness=loss)
+        model = optimizer.step(loss=loss)
 
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -204,6 +221,15 @@ def train(
             )
             progress.display(i + 1, log=log)
 
+            if argmax.std() == 0:
+                log.error(f"ISSUE WITH NETWORK printing debugging info")
+                for n, p in model.named_parameters():
+                    print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+                raise ValueError
+            # dist.barrier()
+        # if i == 60:
+        #     raise RuntimeError
+
     if dist.is_initialized():
         losses.all_reduce()
         top1.all_reduce()
@@ -221,7 +247,7 @@ def train(
             },
             step=epoch,
         )
-    return losses.avg, model
+    return losses.avg, model, loss
 
 
 @torch.no_grad()
@@ -265,7 +291,7 @@ def save_selected_weights(network, epoch):
     dist.barrier()
 
 
-def validate(val_loader, model, criterion, config, epoch, log):
+def validate(val_loader, model, criterion, config, epoch, log, device, target_rank):
     # console.rule("validation")
 
     def run_validate(loader, base_progress=0):
@@ -275,8 +301,8 @@ def validate(val_loader, model, criterion, config, epoch, log):
             num_elem = len(loader) - 1
             for i, (images, target) in enumerate(loader):
                 i = base_progress + i
-                images = images.cuda(config["gpu"], non_blocking=True)
-                target = target.cuda(config["gpu"], non_blocking=True)
+                images = images.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
 
                 # compute output
                 output = model(images)
@@ -293,7 +319,7 @@ def validate(val_loader, model, criterion, config, epoch, log):
                 batch_time.update(time.time() - end)
                 end = time.time()
 
-                if (i % config.training.print_freq == 0 or i == num_elem) and rank == 0:
+                if (i % config.training.print_freq == 0 or i == num_elem) and rank == target_rank:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",

@@ -8,6 +8,12 @@ import time
 import torch
 import torch.distributed as dist
 from mpi4py import MPI
+from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT
+from torch.distributed.distributed_c10d import (
+    _new_process_group_helper,
+    _pg_group_ranks,
+    _store_based_barrier,
+)
 
 _DATA_PARALLEL_GROUP = None
 _DATA_PARALLEL_ROOT = 0
@@ -353,13 +359,17 @@ def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride
 
     # make sure to call a barrier here in order for sharp to use the default comm:
     if dist.is_initialized():
-        if ranks_per_gpu > 1:
+        if ranks_per_gpu > 1 and method != "gloo":
             torch.cuda.set_device(get_local_rank() // ranks_per_gpu)
+        elif method == "gloo":
+            pass
         else:
             torch.cuda.set_device(get_local_rank())
         dist.barrier()
-        dist.barrier(device_ids=[get_local_rank()], group=_DATA_PARALLEL_GROUP)
-        disttest = torch.ones(1).cuda()
+        # dist.barrier(device_ids=[get_local_rank()], group=_DATA_PARALLEL_GROUP)
+        disttest = torch.ones(1)
+        if method != "gloo":
+            disttest = disttest.cuda()
         # print(disttest)
 
         dist.all_reduce(disttest)
@@ -391,14 +401,73 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     size = dist.get_world_size()
     rank = dist.get_rank()
 
-    assert size % group_size == 0, f"global_size % group_size != 0 (f{size}, {group_size}"
+    assert size % group_size == 0, f"global_size % group_size != 0 ({size}, {group_size})"
+
+    global _pg_group_ranks
 
     group_id = rank // group_size
+    group_rank = rank % group_size
+    time.sleep(rank * 0.01)
+
+    mpi_comm = MPI.COMM_WORLD
+    gp_ranks = [i for i in range(group_id * group_size, (group_id + 1) * group_size)]
+
+    group = mpi_comm.group.Incl(gp_ranks)
+    mpi_group = mpi_comm.Create_group(group)
+    master_address = socket.gethostname()
+    master_address = mpi_group.bcast(master_address, root=0)
+
+    # save env vars
+    os.environ["MASTER_ADDR"] = master_address
+    port = 29510 + group_id
+    os.environ["MASTER_PORT"] = str(port)
+    # print(master_address, port)
 
     ranks = torch.arange(size).tolist()
     grp_st, grp_sp = group_id * group_size, (group_id + 1) * group_size
     local_ranks = ranks[grp_st:grp_sp]
-    return dist.new_group(local_ranks, backend=None, pg_options=None)
+
+    # ------- from torch.distributed --------------------------------
+    wireup_store = dist.TCPStore(
+        host_name=master_address,
+        port=port,
+        world_size=group_size,
+        is_master=(group_rank == 0),
+        timeout=dt.timedelta(seconds=3600),
+    )
+    pg = _new_process_group_helper(
+        group_size,
+        group_rank,
+        ranks,
+        backend="gloo",
+        store=wireup_store,
+        pg_options=None,
+        timeout=_DEFAULT_PG_TIMEOUT,
+    )
+
+    # Create the global rank to group rank mapping
+    _pg_group_ranks[pg] = {global_rank: group_rank for group_rank, global_rank in enumerate(ranks)}
+
+    # barrier at the end to ensure that once we return from this method, all
+    # process groups including global variables are updated correctly on all
+    # ranks.
+    # if backend == Backend.MPI:
+    #     # MPI doesn't have store.
+    #     barrier()
+    # else:
+    # Use store based barrier here since barrier() used a bunch of
+    # default devices and messes up NCCL internal state.
+    # _store_based_barrier(rank, default_store, timeout)
+    # Set sequence numbers for gloo and nccl process groups.
+    # if pg != dist.GroupMember.NON_GROUP_MEMBER and get_backend(pg) in [
+    #     Backend.GLOO,
+    #     Backend.NCCL,
+    # ]:
+    pg._set_sequence_number_for_group()
+
+    # return dist.new_group(local_ranks)
+
+    return pg
 
 
 def init_and_set_config_rank_size(config):
@@ -406,6 +475,8 @@ def init_and_set_config_rank_size(config):
     rank = 0
     if "comm_method" in config and config.comm_method == "gloo":
         init(method="gloo")
+        rank = dist.get_rank()
+        size = dist.get_world_size()
     try:
         if int(os.environ["SLURM_NTASKS"]) > 1 or int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
             init(method="nccl-slurm")

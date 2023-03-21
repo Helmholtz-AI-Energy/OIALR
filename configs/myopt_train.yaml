@@ -5,7 +5,7 @@ defaults:
   - data: mnist.yaml
   - model: cirsean4.yaml
   - tracking: mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
-  - training: slime.yaml
+  - training: myopt.yaml
   - log_dir: default.yaml
   # experiment configs allow for version control of specific configurations
   # e.g. hyperparameters for each combination of model and data

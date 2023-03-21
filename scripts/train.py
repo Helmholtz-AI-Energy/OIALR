@@ -24,7 +24,10 @@ def main(config: DictConfig):
     # https://github.com/facebookresearch/hydra/issues/934
     OmegaConf.set_struct(config, True)
     with open_dict(config):
-        config.slurm_id = os.environ["SLURM_JOBID"]
+        try:
+            config.slurm_id = os.environ["SLURM_JOBID"]
+        except KeyError:
+            pass
     # from madonna.training_pipeline import train
     # Applies optional utilities
     # utils.extras(config)

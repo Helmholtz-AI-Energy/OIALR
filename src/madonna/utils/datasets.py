@@ -405,7 +405,7 @@ def mnist_train_data(config):
         shuffle=(train_sampler is None),
         sampler=train_sampler,
         num_workers=workers,
-        persistent_workers=True,
+        persistent_workers=False,
     )
     return train_dataset, train_loader, train_sampler
 
