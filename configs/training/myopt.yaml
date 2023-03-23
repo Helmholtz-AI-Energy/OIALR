@@ -31,7 +31,7 @@ optimizer:
   _target_: madonna.optimizers.myopt.MyOpt
   _partial_: True
   reset_params: True
-  contract_group_size: 3
+  contract_group_size: 4
   contract_method: "ddp"
 #  momentum: 0.9
 #  weight_decay: 1.0e-4
@@ -40,4 +40,4 @@ optimizer:
 lr: null
 lr_schedule: null
 lr_warmup: null
-print_freq: 5
+print_freq: 100

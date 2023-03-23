@@ -3,14 +3,14 @@ model:
   input_size: 784
   fc_sizes:
     - 2500
-    #    - 2000
-    #    - 1500
-    #    - 1000
+    # - 2000
+    - 1500
+    # - 1000
     - 500
   output_size: 10
-  activation: ReLU
-  batch_norm: False
-  activate_last_layer: True
+  activation: Tanh
+  batch_norm: True
+  activate_last_layer: False
 autocast: False
 mnist_channels: 1
 name: cirsean4

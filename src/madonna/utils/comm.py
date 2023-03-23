@@ -477,6 +477,7 @@ def init_and_set_config_rank_size(config):
         init(method="gloo")
         rank = dist.get_rank()
         size = dist.get_world_size()
+        return rank, size
     try:
         if int(os.environ["SLURM_NTASKS"]) > 1 or int(os.environ["OMPI_COMM_WORLD_SIZE"]) > 1:
             init(method="nccl-slurm")

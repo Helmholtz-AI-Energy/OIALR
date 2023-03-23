@@ -92,7 +92,7 @@ def main(config):  # noqa: C901
     # #     return
     #
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
-    target_model = model
+    target_model = optimizer.model
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         # if config["rank"] == 0:  # TODO: remove this?? logging LR, which isnt there...
         #     # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
@@ -104,6 +104,7 @@ def main(config):  # noqa: C901
         #         )
         if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
+        madonna.utils.change_batchnorm_tracking(target_model, tracking=True)
 
         train_loss, target_model, last_loss = train(
             train_loader,
@@ -116,14 +117,26 @@ def main(config):  # noqa: C901
             log=log,
             scaler=scaler,
         )
+        # move the best model to all ranks
+        best_rank = optimizer.set_all_to_best()
+        madonna.utils.change_batchnorm_tracking(target_model, tracking=False)
+        # if dist.get_rank() in [best_rank, 0]:
+        #     print(target_model)
+        # target_model.eval()
+        # if dist.get_rank() in [best_rank, 0]:
+        #     for n, p in target_model.named_parameters():
+        #         # if p.requires_grad:
+        #         print(f"{n}: {p.mean()}\t{p.min()}\t{p.max()}\t{p.std()}")
+        # for c in target_model.children():
+
 
         # save_selected_weights(model, epoch)
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        losses, ranks = optimizer.get_sorted_losses(last_loss)
-        print(losses, ranks)
-        best_rank = ranks[0]
+        # losses, ranks = optimizer.get_sorted_losses(last_loss)
+        # print(losses, ranks)
+        # best_rank = ranks[0]
         _, val_loss = validate(
             val_loader,
             target_model,
@@ -134,6 +147,11 @@ def main(config):  # noqa: C901
             device=device,
             target_rank=best_rank,
         )
+
+        # blur all of the models
+        if epoch != config.training["epochs"]:
+            optimizer.shuffle_positions(best_rank)
+
         if config.rank == 0:
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
@@ -221,11 +239,11 @@ def train(
             )
             progress.display(i + 1, log=log)
 
-            if argmax.std() == 0:
-                log.error(f"ISSUE WITH NETWORK printing debugging info")
-                for n, p in model.named_parameters():
-                    print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-                raise ValueError
+            # if argmax.std() == 0:
+            #     log.error(f"ISSUE WITH NETWORK printing debugging info")
+            #     for n, p in model.named_parameters():
+            #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+            #     raise ValueError
             # dist.barrier()
         # if i == 60:
         #     raise RuntimeError
@@ -291,6 +309,7 @@ def save_selected_weights(network, epoch):
     dist.barrier()
 
 
+@torch.no_grad()
 def validate(val_loader, model, criterion, config, epoch, log, device, target_rank):
     # console.rule("validation")
 
@@ -319,7 +338,7 @@ def validate(val_loader, model, criterion, config, epoch, log, device, target_ra
                 batch_time.update(time.time() - end)
                 end = time.time()
 
-                if (i % config.training.print_freq == 0 or i == num_elem) and rank == target_rank:
+                if (i % config.training.print_freq == 0 or i == num_elem) and (rank == 0 or rank == target_rank):
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
@@ -338,7 +357,7 @@ def validate(val_loader, model, criterion, config, epoch, log, device, target_ra
     )
 
     # switch to evaluate mode
-    model.eval()
+    # model.eval()
 
     run_validate(val_loader)
     if dist.is_initialized():

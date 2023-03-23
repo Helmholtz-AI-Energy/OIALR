@@ -49,17 +49,20 @@ class MyOpt(object):
 
         # ============================= control params ====================================
         self.best_local_loss = None
-        self.phases_limits = {
+        self.phases_dict = {
             "explore": {
                 "step": 0,
                 "num_iters": 100,
-                "patience": 10,
+                "patience": 1,
                 "last_best": 0,
             },  # index 0 -> step number. index 1-> limit of iterations
-            "contract": [0, 10],  # index 0 -> step number. index 1-> limit of iterations
+            "contract": {
+                "step": 0,
+                "num_iters": 50,
+            },
+            "losses": [],
         }
-        self.phase = "explore"
-        self.prep_explore_phase()
+        self.backup_last_loss = None
 
         self.contract_method = contract_method
         self.contract_group_size = contract_group_size
@@ -68,7 +71,7 @@ class MyOpt(object):
             init_group_ddp=self.contract_method == "ddp",
         )
         # ============================= explore params ====================================
-
+        self.uniform_n1_p1 = torch.distributions.uniform.Uniform(-1, 1)
         # ============================= contract params - SGD ====================================
         if self.contract_method == "ddp":
             self.sgd_optimizer = optim.SGD(
@@ -87,6 +90,11 @@ class MyOpt(object):
             self.topk_sigma = topk_sigma
             self.steps_between_population_updates = 5
 
+        self.current_phase = "contract1"
+        # self._prep_contract_step()
+        self.prep_contract_step_1()
+        # self.prep_explore_phase()
+
     def set_model_buffers_to_params(self):
         self.model_buffers = dict()
         self.model_buffers_waits = dict()
@@ -95,30 +103,111 @@ class MyOpt(object):
                 self.model_buffers[f"{np}"] = torch.zeros_like(p.data)
                 self.model_buffers_waits[f"{np}"] = None
 
-    def step(self, loss) -> torch.nn.Module:
+    def step(self, loss: torch.Tensor) -> torch.nn.Module:
         # switch between the phases and call the step function for that phase
-        logging.debug(f"MyOpt running with step: {self.phase}")
-        if self.phase == "explore":
+        logging.debug(f"MyOpt running with step: {self.current_phase}")
+
+        self.phases_dict["losses"].append(loss)
+        if self.current_phase == "explore":
             switch = self.explore_step(loss)
-        else:  # self.phase == "exploit" / "contract"
+        else:  # self.current_phase == "exploit" / "contract" / "contract1"
             switch = self.contract_step(loss)
 
         if switch:
-            if self.phase == "explore":
+            log.info("Switching modes")
+            self.backup_last_loss = self.phases_dict["losses"][-3:]
+            self.phases_dict["losses"] = []
+            if self.current_phase == "explore":
                 log.info("Switching to contract")
-                self.phase = "contract"
+                self.current_phase = "contract"
                 # rollback network to best performing version...unsure if good plan
                 best_loss = self._rollback_network()
                 # prep contract phase
                 self._prep_contract_step(best_loss)
                 if self.contract_method == "ddp":
                     # In this case, we need to have the group-local-ddp model
+                    print("using DDP model")
                     return self.group_ddp_model
-            else:  # elif self.phase == "contract":
+            elif self.current_phase == "contract1":
                 log.info("Switching to explore")
-                self.phase = "explore"
+                self.current_phase = "explore"
+                self.phases_dict["contract"]["num_iters"] = 10
                 self.prep_explore_phase()
+            else:  # elif self.current_phase == "contract": / "contract1"
+                log.info("Switching to explore")
+                self.current_phase = "explore"
+                self.prep_explore_phase()
+            print("using individual model")
         return self.model
+    
+    @torch.no_grad()
+    def set_all_to_best(self):
+        if self.current_phase == "contract1" or self.current_phase == "contract":
+            return 1
+        # set all networks to the best performing network over the most recent phase
+        try:
+            dev = self.phases_dict["losses"][0].device
+            dtp = self.phases_dict["losses"][0].dtype
+            losslist = [l.item() for l in self.phases_dict["losses"][-5:]]
+        except IndexError:
+            dev = self.backup_last_loss[0].device
+            dtp = self.backup_last_loss[0].dtype
+            losslist = [l.item() for l in self.backup_last_loss]
+        # local_avg_loss = sum(losslist) / len(losslist)
+
+        avg_losses = torch.zeros(self.global_size, device=dev, dtype=dtp)
+        avg_losses[self.global_rank] = self.best_local_loss  # local_avg_loss
+        dist.all_reduce(avg_losses)
+        src = torch.argmin(avg_losses)
+        print(src)
+        # ranks = torch.sort(avg_losses)
+        # self.model.train()
+        waits = []
+        for p in self.model.parameters():
+            # if p.requires_grad:
+            # if self.global_rank != src:
+            #     p.zero_()
+            waits.append(dist.broadcast(p, src=src, async_op=True))
+        for w in waits:
+            w.wait()
+        return src
+
+    @torch.no_grad()
+    def shuffle_positions(self, best_rank):
+        # at the end of each epoch, the networks are all joined into the best one
+        # need to reset all the networks, but we dont want to roll random
+        # idea: keep Q the same, and generate a new R matrix for half, other half, shuffle Q and keep R the same
+        self.phases_dict["losses"] = []
+        self.current_phase = "explore"
+        if self.global_rank == best_rank:
+            return
+        keepq = torch.rand(1).item() >= 0.5
+        self.model.train()
+        for p in self.model.parameters():
+            if p.requires_grad:
+                if p.ndim == 1:  # if weights are 1D, blur them
+                    p.mul_(1 + self.uniform_n1_p1.sample(p.shape) * 0.01)  # up to 5% changes of weights up/down
+                    continue
+                shp = p.shape
+                if p.ndim > 2:
+                    hold = p.view(shp[0], -1)
+                else:
+                    hold = p
+
+                trans=False
+                if hold.shape[0] < hold.shape[1]:  # if the matrix is SF, transpose
+                    trans = True
+                    hold = hold.T
+                q, r = torch.linalg.qr(hold, mode="reduced")
+                if keepq:
+                    r *= 1 + self.uniform_n1_p1.sample(r.shape) * 0.01 # up to 5% changes of weights
+                else:  # keep r the same, shuffle Q
+                    q = q[:, torch.randperm(q.shape[1], device=q.device)]
+                if trans:
+                    p.set_((q @ r).T.reshape(shp))
+                else:
+                    p.set_((q @ r).reshape(shp))
+
 
     def _generate_comm_groups(self, group_size=2, init_group_ddp=False):
         # create comm groups for the contractions
@@ -193,19 +282,23 @@ class MyOpt(object):
     def explore_step(self, current_loss):
         # continue to explore the local area
         # record the loss values and track them
-        if self.best_local_loss is None or self.best_local_loss > current_loss:
+        if self.best_local_loss is None or self.best_local_loss > current_loss:  # assume min problem
             log.info(f"setting new best local loss: new -> {current_loss:.5f}")
             self._store_best_network_in_buffers(current_loss)
 
         # if we are not improving, bail on a direction and test again
-        self._test_explore_stability()
+        if current_loss > self.best_local_loss:
+            self._rollback_network()
+            self._set_explore_grads()
 
+        # self._test_explore_stability()
+        # self._set_explore_grads()
         self._apply_gradients()
 
         # TODO: change to the contract step after a set number. NEXT VERSION: go until things get
         #  worse, then move to next steps.
-        self.phases_limits["explore"]["step"] += 1
-        if self.phases_limits["explore"]["step"] == self.phases_limits["explore"]["num_iters"]:
+        self.phases_dict["explore"]["step"] += 1
+        if self.phases_dict["explore"]["step"] == self.phases_dict["explore"]["num_iters"]:
             return True
         return False
 
@@ -218,7 +311,8 @@ class MyOpt(object):
         for n, p in self.model.named_parameters():
             if p.requires_grad:
                 # p.mul_(p.grad)  # * 0.1 * p.data.abs().mean())
-                hold = p.data * p.grad
+                hold = p.data + p.grad
+                # hold = p.data * p.grad
                 # hold = (p.data + (p.grad * 0.1))
                 # pmin, pmax = p.data.min(), p.data.max()
                 # hold = (pmax - pmin) * (hold - hold.min()) / (hold.max() - hold.min()) + pmin
@@ -237,7 +331,7 @@ class MyOpt(object):
 
     def _store_best_network_in_buffers(self, loss):
         self.best_local_loss = loss
-        self.phases_limits["explore"]["last_best"] = self.phases_limits["explore"]["step"] + 1
+        self.phases_dict["explore"]["last_best"] = self.phases_dict["explore"]["step"] + 1
         for n, p in self.model.named_parameters():
             if p.requires_grad:
                 self.model_buffers[n].zero_()
@@ -264,10 +358,15 @@ class MyOpt(object):
                 #     p.data.shape,
                 #     dtype=p.dtype,
                 #     device=p.device,
-                #     scale_factor=1.,  # p.data.std() / self.phases_limits["explore"]['num_iters'],
+                #     scale_factor=1.,  # p.data.std() / self.phases_dict["explore"]['num_iters'],
                 # )
-                # grads = torch.clamp(torch.randn_like(p.data), -1, 1) + 1
-                grads = torch.rand_like(p.data)
+
+                # objective: the gradient change should be only 0.1% of a given weight
+                # update will be p + grad (can also be minus...)
+                # grad = 0.1% of data * rand[-1, 1]
+                grads = p.data * 0.005 * self.uniform_n1_p1.sample(p.shape)
+                # grads = 1 + self.uniform_n1_p1.sample(p.shape) * 0.001
+                # grads = torch.randn_like(p.data) * 0.1 
                 if p.grad is None:
                     # print(p.data.min(), p.data.max(), grads.min(), grads.max())
                     p.grad = grads
@@ -278,7 +377,7 @@ class MyOpt(object):
     def prep_explore_phase(self):
         # prepare for the exploration phase
         # roll new orthogonal matrices for the gradients
-        self.phases_limits["explore"]["step"] = 0
+        self.phases_dict["explore"]["step"] = 0
         self._set_explore_grads()
 
     @staticmethod
@@ -341,36 +440,44 @@ class MyOpt(object):
     def _test_explore_stability(self):
         # test the stability of the direction of the network
         # TODO: how long until we bail on a direction if it isnt working?
-        lb = self.phases_limits["explore"]["last_best"]
-        sn = self.phases_limits["explore"]["step"]
-        if sn - lb >= self.phases_limits["explore"]["patience"] and sn > 0:
-            log.info(f"moving into a new direction, step num: {sn}, last_best: {lb}")
+        lb = self.phases_dict["explore"]["last_best"]
+        sn = self.phases_dict["explore"]["step"]
+        if sn - lb >= self.phases_dict["explore"]["patience"] and sn > 0:
+            # log.info(f"moving into a new direction, step num: {sn}, last_best: {lb}")
             self._rollback_network()
             self._set_explore_grads()
-            self.phases_limits["explore"]["last_best"] = sn
+            self.phases_dict["explore"]["last_best"] = sn
+        else:
+            log.info(f"moving in same direction! step num: {sn}, last_best: {lb} -> {self.phases_dict['losses'][-3:]}")
 
     # ====================== Exploitation / Contraction functions ==================================
     def contract_step(self, loss):
         # "Contract" around a selected point
         # this is the exploitation phase -> should improve on the results
         # TODO: deciding between 2 options still: local SGD and Genetic SVD (only sigma)
+        self.phases_dict["losses"].append(loss)
         if self.contract_method == "ddp":
             self.contract_ddp_step(loss)  # call backwards and then call the local optimizer
         # elif self.contract_method == "svd-genetic":
         #     self.contract_genetic_step(loss)
 
-        self.phases_limits["contract"][0] += 1
-        if self.phases_limits["contract"][0] == self.phases_limits["contract"][1]:
+        self.phases_dict["contract"]["step"] += 1
+        if self.phases_dict["contract"]["step"] == self.phases_dict["contract"]["num_iters"]:
             return True
         return False
 
     # ----------------------------- general contract step functions --------------------------------
 
-    def _prep_contract_step(self, current_loss):
+
+    @torch.no_grad()
+    def prep_contract_step_1(self):
         # both methods: set up the groups
         # get the best networks + communicate the best networks to the groups
-        self.get_best_networks(current_loss)
-        self.phases_limits["contract"][0] = 0
+        for p in self.model.parameters():
+                if not p.is_contiguous():
+                    p.set_(p.contiguous())
+        # self.sort_and_distributed_best_to_groups(current_loss)
+        self.phases_dict["contract"]["step"] = 0
         # SGD optimization: do nothing else?? maybe find a way to change the LR??
         if self.contract_method == "ddp":
             self.sgd_optimizer.zero_grad(set_to_none=True)
@@ -379,21 +486,40 @@ class MyOpt(object):
         # if self.contract_method == "svd-genetic":
         self.svd_generate_population()
 
-    def get_best_networks(self, loss):
+    @torch.no_grad()
+    def _prep_contract_step(self, current_loss=None):
+        # both methods: set up the groups
+        # get the best networks + communicate the best networks to the groups
+        for p in self.model.parameters():
+                if not p.is_contiguous():
+                    p.set_(p.contiguous())
+        if current_loss is not None:
+            self.sort_and_distributed_best_to_groups(current_loss)
+        self.phases_dict["contract"]["step"] = 0
+        # SGD optimization: do nothing else?? maybe find a way to change the LR??
+        if self.contract_method == "ddp":
+            self.sgd_optimizer.zero_grad(set_to_none=True)
+            return
+        # genetic optimization: generate populations within the groups
+        # if self.contract_method == "svd-genetic":
+        self.svd_generate_population()
+
+    def sort_and_distributed_best_to_groups(self, loss):
         # get the best performing ranks (best networks)
-        sorted_losses, sorted_ranks = self.get_sorted_losses(loss, group=None)
+        _, sorted_ranks = self.get_sorted_losses(loss, group=None)
         self._distributed_best_params_to_groups(sorted_ranks)
         # for n, p in self.model.named_parameters():
         #     print(f"\t{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         # raise ValueError
 
     @staticmethod
-    def get_sorted_losses(loss, group=None):
+    def get_sorted_losses(loss, group=None, use_average_loss: bool = False):
         ws = dist.get_world_size(group=group)
         rank = dist.get_rank(group=group)
         losses = torch.zeros(ws, dtype=loss.dtype, device=loss.device)
         losses[rank] = loss
         dist.all_reduce(losses, group=group)  # sum op, NOT async operation
+        # TODO: this should be topk, not sort! sort is much slower...change later
         sorted_losses, sorted_ranks = torch.sort(losses, descending=False)
         return sorted_losses, sorted_ranks
 
@@ -413,21 +539,21 @@ class MyOpt(object):
             device=best_ranks.device,
         ).tolist()
         # print(group_rank0s)
-        for send, dest in zip(best_ranks[:num_groups], group_rank0s, strict=True):
+        for send, dest in zip(best_ranks[:num_groups], group_rank0s):#, strict=True):
             if send == dest:
                 continue
             if self.global_rank == send:
                 # print(f"sending to rank: {dest}")
-                self._send_best_network(dest)
+                self._send_network(dest)
             if self.global_rank == dest:
                 # print(f"receiving from rank: {send}")
-                self._recv_best_network(send)
+                self._recv_network(send)
         # now, the best parameters are on the group_rank0 in the best_parameter buffers
         dist.barrier()
         # self.local_comm_group.barrier()
-        self._bcast_best_to_group()
+        self._bcast_network_to_group()
 
-    def _send_best_network(self, dest):
+    def _send_network(self, dest):
         tag = 0
         send_waits = []
         for p in self.model.parameters():
@@ -436,7 +562,7 @@ class MyOpt(object):
         for w in send_waits:
             w.wait()
 
-    def _recv_best_network(self, src):
+    def _recv_network(self, src):
         tag = 0
         for n, p in self.model.named_parameters():
             if p.requires_grad:
@@ -447,7 +573,7 @@ class MyOpt(object):
                 )
 
     @torch.no_grad()
-    def _bcast_best_to_group(self):
+    def _bcast_network_to_group(self):
         for n, p in self.model.named_parameters():
             if p.requires_grad:
                 try:

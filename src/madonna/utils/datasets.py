@@ -429,7 +429,10 @@ def mnist_val_data(config):
         transform = transforms.Compose([transforms.ToTensor(), mnist_normalize])
     val_dataset = datasets.MNIST(base_dir, train=False, transform=transform)
 
-    sampler = None
+    if dist.is_initialized() and dsconfig["distributed_sample_val"]:
+        sampler = datadist.DistributedSampler(val_dataset)
+    else:
+        sampler = None
 
     val_loader = torch.utils.data.DataLoader(
         dataset=val_dataset,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import wraps
 from typing import Any, Callable
+import torch.nn as nn
 
 import torch.distributed as dist
 
@@ -45,3 +46,10 @@ def print0(*args, sep=" ", end="\n", file=None):
         return
     else:
         print(*args, sep=sep, end=end, file=file)
+
+
+def change_batchnorm_tracking(model: nn.Module, tracking=False):
+    for child in model.children():
+        if hasattr(child, "track_running_stats"):
+            child.track_running_stats = tracking
+        change_batchnorm_tracking(child, tracking)
