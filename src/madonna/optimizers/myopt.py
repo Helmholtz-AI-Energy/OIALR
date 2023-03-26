@@ -139,7 +139,7 @@ class MyOpt(object):
                 self.prep_explore_phase()
             print("using individual model")
         return self.model
-    
+
     @torch.no_grad()
     def set_all_to_best(self):
         if self.current_phase == "contract1" or self.current_phase == "contract":
@@ -148,11 +148,11 @@ class MyOpt(object):
         try:
             dev = self.phases_dict["losses"][0].device
             dtp = self.phases_dict["losses"][0].dtype
-            losslist = [l.item() for l in self.phases_dict["losses"][-5:]]
+            losslist = [ls.item() for ls in self.phases_dict["losses"][-5:]]
         except IndexError:
             dev = self.backup_last_loss[0].device
             dtp = self.backup_last_loss[0].dtype
-            losslist = [l.item() for l in self.backup_last_loss]
+            losslist = [ls.item() for ls in self.backup_last_loss]
         # local_avg_loss = sum(losslist) / len(losslist)
 
         avg_losses = torch.zeros(self.global_size, device=dev, dtype=dtp)
@@ -194,20 +194,19 @@ class MyOpt(object):
                 else:
                     hold = p
 
-                trans=False
+                tran = False
                 if hold.shape[0] < hold.shape[1]:  # if the matrix is SF, transpose
                     trans = True
                     hold = hold.T
                 q, r = torch.linalg.qr(hold, mode="reduced")
                 if keepq:
-                    r *= 1 + self.uniform_n1_p1.sample(r.shape) * 0.01 # up to 5% changes of weights
+                    r *= 1 + self.uniform_n1_p1.sample(r.shape) * 0.01  # up to 5% changes of weights
                 else:  # keep r the same, shuffle Q
                     q = q[:, torch.randperm(q.shape[1], device=q.device)]
                 if trans:
                     p.set_((q @ r).T.reshape(shp))
                 else:
                     p.set_((q @ r).reshape(shp))
-
 
     def _generate_comm_groups(self, group_size=2, init_group_ddp=False):
         # create comm groups for the contractions
@@ -366,7 +365,7 @@ class MyOpt(object):
                 # grad = 0.1% of data * rand[-1, 1]
                 grads = p.data * 0.005 * self.uniform_n1_p1.sample(p.shape)
                 # grads = 1 + self.uniform_n1_p1.sample(p.shape) * 0.001
-                # grads = torch.randn_like(p.data) * 0.1 
+                # grads = torch.randn_like(p.data) * 0.1
                 if p.grad is None:
                     # print(p.data.min(), p.data.max(), grads.min(), grads.max())
                     p.grad = grads
@@ -468,14 +467,13 @@ class MyOpt(object):
 
     # ----------------------------- general contract step functions --------------------------------
 
-
     @torch.no_grad()
     def prep_contract_step_1(self):
         # both methods: set up the groups
         # get the best networks + communicate the best networks to the groups
         for p in self.model.parameters():
-                if not p.is_contiguous():
-                    p.set_(p.contiguous())
+            if not p.is_contiguous():
+                p.set_(p.contiguous())
         # self.sort_and_distributed_best_to_groups(current_loss)
         self.phases_dict["contract"]["step"] = 0
         # SGD optimization: do nothing else?? maybe find a way to change the LR??
@@ -491,8 +489,8 @@ class MyOpt(object):
         # both methods: set up the groups
         # get the best networks + communicate the best networks to the groups
         for p in self.model.parameters():
-                if not p.is_contiguous():
-                    p.set_(p.contiguous())
+            if not p.is_contiguous():
+                p.set_(p.contiguous())
         if current_loss is not None:
             self.sort_and_distributed_best_to_groups(current_loss)
         self.phases_dict["contract"]["step"] = 0
@@ -539,7 +537,7 @@ class MyOpt(object):
             device=best_ranks.device,
         ).tolist()
         # print(group_rank0s)
-        for send, dest in zip(best_ranks[:num_groups], group_rank0s):#, strict=True):
+        for send, dest in zip(best_ranks[:num_groups], group_rank0s):  # , strict=True):
             if send == dest:
                 continue
             if self.global_rank == send:
