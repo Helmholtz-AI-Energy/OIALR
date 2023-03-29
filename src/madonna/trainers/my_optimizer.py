@@ -94,14 +94,6 @@ def main(config):  # noqa: C901
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     target_model = optimizer.model
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
-        # if config["rank"] == 0:  # TODO: remove this?? logging LR, which isnt there...
-        #     # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-        #     # log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-        #     if not config.skip_tracking:
-        #         mlflow.log_metrics(
-        #             metrics={"lr": optimizer.param_groups[0]["lr"]},
-        #             step=epoch,
-        #         )
         if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
         madonna.utils.change_batchnorm_tracking(target_model, tracking=True)
@@ -114,28 +106,21 @@ def main(config):  # noqa: C901
             epoch,
             device,
             config,
-            log=log,
             scaler=scaler,
         )
         # move the best model to all ranks
         best_rank = optimizer.set_all_to_best()
+        target_model.eval()
         madonna.utils.change_batchnorm_tracking(target_model, tracking=False)
-        # if dist.get_rank() in [best_rank, 0]:
-        #     print(target_model)
-        # target_model.eval()
         # if dist.get_rank() in [best_rank, 0]:
         #     for n, p in target_model.named_parameters():
         #         # if p.requires_grad:
         #         print(f"{n}: {p.mean()}\t{p.min()}\t{p.max()}\t{p.std()}")
-        # for c in target_model.children():
-
 
         # save_selected_weights(model, epoch)
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        # losses, ranks = optimizer.get_sorted_losses(last_loss)
-        # print(losses, ranks)
         # best_rank = ranks[0]
         _, val_loss = validate(
             val_loader,
@@ -143,7 +128,6 @@ def main(config):  # noqa: C901
             criterion,
             config,
             epoch,
-            log=log,
             device=device,
             target_rank=best_rank,
         )
@@ -168,7 +152,6 @@ def train(
     config,
     lr_scheduler=None,
     warmup_scheduler=None,
-    log=None,
     scaler=None,
 ):
     batch_time = AverageMeter("Time", ":6.3f")
@@ -310,7 +293,7 @@ def save_selected_weights(network, epoch):
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, config, epoch, log, device, target_rank):
+def validate(val_loader, model, criterion, config, epoch, device, target_rank):
     # console.rule("validation")
 
     def run_validate(loader, base_progress=0):
@@ -338,7 +321,9 @@ def validate(val_loader, model, criterion, config, epoch, log, device, target_ra
                 batch_time.update(time.time() - end)
                 end = time.time()
 
-                if (i % config.training.print_freq == 0 or i == num_elem) and (rank == 0 or rank == target_rank):
+                if (i % config.training.print_freq == 0 or i == num_elem) and (
+                    rank == 0 or rank == target_rank
+                ):
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
