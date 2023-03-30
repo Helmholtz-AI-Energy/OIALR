@@ -14,10 +14,8 @@ ml purge
 
 # pmi2 cray_shasta
 BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
-export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
-TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
 TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
@@ -31,15 +29,10 @@ SRUN_PARAMS=(
   #--cpu-bind="ldoms"
   --gpu-bind="closest"
   --label
-  --container-name=torch
-  --container-writable
-  --container-mount-home
-  --container-mounts="${TOMOUNT}"
 )
 
 #export CUDA_AVAILABLE_DEVICES="0,1,2,3"
 SCRIPT_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
-# TODO: set up singularity as well?
 
 export UCX_MEMTYPE_CACHE=0
 export NCCL_IB_TIMEOUT=100
@@ -48,8 +41,21 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
+
+TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+TOMOUNT+="${EXT_DATA_PREFIX},"
+TOMOUNT+="${BASE_DIR},"
+TOMOUNT+="/scratch,/tmp,"
+TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets,"
+TOMOUNT+="${SCRIPT_DIR}"
+
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
+#echo "Loading data from ${DATA_PREFIX}"
+#echo "${SCRIPT_DIR}"
 export CONFIG_NAME="slime_train.yaml"
-
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${SCRIPT_DIR}madonna/scripts/train.py"
+srun "${SRUN_PARAMS[@]}" singularity exec --nv \
+  --bind "${TOMOUNT}" \
+  "${SINGULARITY_FILE}" \
+  bash -c "CONFIG_NAME=${CONFIG_NAME} python -u ${SCRIPT_DIR}madonna/scripts/train.py"

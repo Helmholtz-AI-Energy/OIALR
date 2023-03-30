@@ -169,7 +169,7 @@ class MyOpt(object):
         # TODO: change the re-init mode to work from the
         # TODO: change blurring to be based on a parameter!
 
-        blurring_factor = 0.01  # up to X% changes of weights up/down
+        blurring_factor = 0.1  # up to X% changes of weights up/down
 
         self.phases_dict["losses"] = []
         self.current_phase = "explore"
@@ -200,7 +200,13 @@ class MyOpt(object):
                 if keepq:
                     r *= 1 + self.uniform_n1_p1.sample(r.shape) * blurring_factor
                 else:  # keep r the same, shuffle Q
-                    q = q[:, torch.randperm(q.shape[1], device=q.device)]
+                    q = utils.roll_orthogonal_values(
+                        q.shape,
+                        dtype=q.dtype,
+                        device=q.device,
+                        scale_factor=1.0,
+                    )
+                    # q = q[:, torch.randperm(q.shape[1], device=q.device)]
                 if trans:
                     p.set_((q @ r).T.reshape(shp))
                 else:
