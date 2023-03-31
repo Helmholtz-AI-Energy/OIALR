@@ -30,7 +30,6 @@ init_opt_with_model: True
 optimizer:
   _target_: madonna.optimizers.myopt.MyOpt
   _partial_: True
-  reset_params: True
   contract_group_size: 4
   contract_method: "ddp"
 #  momentum: 0.9

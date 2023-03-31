@@ -36,4 +36,4 @@ name: "new-opt-debug"
 
 comm_method: "gloo"
 cpu_training: True
-skip_tracking: True
+skip_tracking: False
