@@ -398,24 +398,28 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     -------
     torch.distributed.ProcessGroup
     """
-    size = dist.get_world_size()
-    rank = dist.get_rank()
+    global_size = dist.get_world_size()
+    global_rank = dist.get_rank()
 
-    assert size % group_size == 0, f"global_size % group_size != 0 ({size}, {group_size})"
+    assert global_size % group_size == 0, f"global_size % group_size != 0 ({size}, {group_size})"
 
     global _pg_group_ranks
 
-    group_id = rank // group_size
-    group_rank = rank % group_size
-    time.sleep(rank * 0.01)
+    group_id = global_rank // group_size
+    group_rank = global_rank % group_size
+    time.sleep(global_rank * 0.01)
 
     mpi_comm = MPI.COMM_WORLD
     gp_ranks = [i for i in range(group_id * group_size, (group_id + 1) * group_size)]
+    # my_groups_rank0 = 
 
     group = mpi_comm.group.Incl(gp_ranks)
     mpi_group = mpi_comm.Create_group(group)
     master_address = socket.gethostname()
+    # if mpi_group.Get_rank() != 0:
+    # master_address = None
     master_address = mpi_group.bcast(master_address, root=0)
+    # print(master_address)
 
     # save env vars
     os.environ["MASTER_ADDR"] = master_address
@@ -423,7 +427,7 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     os.environ["MASTER_PORT"] = str(port)
     # print(master_address, port)
 
-    ranks = torch.arange(size).tolist()
+    ranks = torch.arange(global_size).tolist()
     grp_st, grp_sp = group_id * group_size, (group_id + 1) * group_size
     local_ranks = ranks[grp_st:grp_sp]
 
@@ -435,10 +439,11 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
         is_master=(group_rank == 0),
         timeout=dt.timedelta(seconds=3600),
     )
+    # pg = dist.new_group(ranks=local_ranks)
     pg = _new_process_group_helper(
         group_size,
         group_rank,
-        ranks,
+        local_ranks,
         backend="gloo",
         store=wireup_store,
         pg_options=None,
@@ -446,27 +451,8 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     )
 
     # Create the global rank to group rank mapping
-    _pg_group_ranks[pg] = {global_rank: group_rank for group_rank, global_rank in enumerate(ranks)}
-
-    # barrier at the end to ensure that once we return from this method, all
-    # process groups including global variables are updated correctly on all
-    # ranks.
-    # if backend == Backend.MPI:
-    #     # MPI doesn't have store.
-    #     barrier()
-    # else:
-    # Use store based barrier here since barrier() used a bunch of
-    # default devices and messes up NCCL internal state.
-    # _store_based_barrier(rank, default_store, timeout)
-    # Set sequence numbers for gloo and nccl process groups.
-    # if pg != dist.GroupMember.NON_GROUP_MEMBER and get_backend(pg) in [
-    #     Backend.GLOO,
-    #     Backend.NCCL,
-    # ]:
+    _pg_group_ranks[pg] = {global_rank: group_rank for group_rank, global_rank in enumerate(local_ranks)}
     pg._set_sequence_number_for_group()
-
-    # return dist.new_group(local_ranks)
-
     return pg
 
 

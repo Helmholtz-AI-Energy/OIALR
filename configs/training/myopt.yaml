@@ -39,4 +39,4 @@ optimizer:
 lr: null
 lr_schedule: null
 lr_warmup: null
-print_freq: 100
+print_freq: 10

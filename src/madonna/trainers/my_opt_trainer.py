@@ -82,7 +82,12 @@ def main(config):  # noqa: C901
     #         )
     #     else:
     #         print(f"=> no checkpoint found at: {config['resume']}")
-    #
+    
+    if optimizer.num_groups > 1:
+        dset_dict = madonna.utils.datasets.get_dataset(
+            config, group_size=optimizer.local_size, group_rank=optimizer.local_rank, num_groups=optimizer.num_groups
+        )
+
     dset_dict = madonna.utils.datasets.get_dataset(config)
     train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
     val_loader = dset_dict["val"]["loader"]
@@ -109,7 +114,10 @@ def main(config):  # noqa: C901
             scaler=scaler,
         )
         # move the best model to all ranks
-        best_rank = optimizer.set_all_to_best()
+        # best_rank = optimizer.set_all_to_best()
+        if optimizer.current_phase == "explore":
+            optimizer.sort_and_distributed_best_to_groups(last_loss)
+        # move best N models to the N groups
         target_model.eval()
         madonna.utils.change_batchnorm_tracking(target_model, tracking=False)
         # if dist.get_rank() in [best_rank, 0]:
@@ -129,12 +137,12 @@ def main(config):  # noqa: C901
             config,
             epoch,
             device=device,
-            target_rank=best_rank,
+            print_on_rank=optimizer.local_rank == 0,
         )
 
         # blur all of the models
-        if epoch != config.training["epochs"]:
-            optimizer.shuffle_positions(best_rank)
+        if epoch != config.training["epochs"] and optimizer.current_phase in ["explore", "contract1"]:
+            optimizer.shuffle_positions()
 
         if config.rank == 0:
             log.info(
@@ -211,7 +219,7 @@ def train(
         #         if batch_warmup_step:
         #             lr_scheduler.step()
 
-        if i % config.training.print_freq == 0 or i == len(train_loader) - 1:  # and config["rank"] == 0:
+        if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and optimizer.local_rank == 0:  # config["rank"] == 0:
             # console.rule(f"train step {i}")
             argmax = torch.argmax(output, dim=1).to(torch.float32)
             # console.print(
@@ -293,7 +301,7 @@ def save_selected_weights(network, epoch):
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, config, epoch, device, target_rank):
+def validate(val_loader, model, criterion, config, epoch, device, print_on_rank):
     # console.rule("validation")
 
     def run_validate(loader, base_progress=0):
@@ -321,9 +329,7 @@ def validate(val_loader, model, criterion, config, epoch, device, target_rank):
                 batch_time.update(time.time() - end)
                 end = time.time()
 
-                if (i % config.training.print_freq == 0 or i == num_elem) and (
-                    rank == 0 or rank == target_rank
-                ):
+                if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",

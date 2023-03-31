@@ -209,7 +209,7 @@ def imagenet_get_val_dataset_n_loader(
             val_dataset, 
             rank=group_rank, 
             num_replicas=group_size, 
-            seed=dist.get_rank // group_size
+            seed=dist.get_rank() // group_size
         )
     else:
         val_sampler = None
@@ -302,7 +302,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
             test_dataset, 
             rank=group_rank, 
             num_replicas=group_size, 
-            seed=dist.get_rank // group_size
+            seed=dist.get_rank() // group_size
         )
     else:
         sampler = None
@@ -393,7 +393,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
             test_dataset, 
             rank=group_rank, 
             num_replicas=group_size, 
-            seed=dist.get_rank // group_size
+            seed=dist.get_rank() // group_size
         )
     else:
         test_sampler = None
@@ -471,7 +471,7 @@ def mnist_val_data(config, group_size=None, group_rank=None, num_groups=None):
             val_dataset, 
             rank=group_rank, 
             num_replicas=group_size, 
-            seed=dist.get_rank // group_size
+            seed=dist.get_rank() // group_size
         )
     else:
         sampler = None

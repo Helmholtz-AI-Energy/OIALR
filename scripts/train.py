@@ -47,7 +47,7 @@ def main(config: DictConfig):
     elif config.training.trainer == "image-baseline":
         fn = madonna.trainers.images.baseline.main
     elif config.training.trainer == "MyOpt":
-        fn = madonna.trainers.my_optimizer.main
+        fn = madonna.trainers.my_opt_trainer.main
     else:
         raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
 
@@ -75,9 +75,6 @@ def main(config: DictConfig):
             madonna.utils.tracking.log_config(config)
             # hydra.utils.call(config.training.script, config)
             fn(config)
-    elif not config.skip_tracking:
-        # receive the name for the logs
-        pass
     else:
         # hydra.utils.call(config.training.script, config)
         fn(config)

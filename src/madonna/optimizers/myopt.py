@@ -52,13 +52,13 @@ class MyOpt(object):
         self.phases_dict = {
             "explore": {
                 "step": 0,
-                "num_iters": 100,
+                "num_iters": 500,
                 "patience": 1,
                 "last_best": 0,
             },  # index 0 -> step number. index 1-> limit of iterations
             "contract": {
                 "step": 0,
-                "num_iters": 50,
+                "num_iters": 10,
             },
             "losses": [],
         }
@@ -66,6 +66,7 @@ class MyOpt(object):
 
         self.contract_method = contract_method
         self.contract_group_size = contract_group_size
+        self.num_groups = self.global_size // self.contract_group_size
         self._generate_comm_groups(
             group_size=contract_group_size,
             init_group_ddp=self.contract_method == "ddp",
@@ -90,6 +91,7 @@ class MyOpt(object):
             self.topk_sigma = topk_sigma
             self.steps_between_population_updates = 5
 
+        # self.current_phase = "contract1"
         self.current_phase = "contract1"
         # self._prep_contract_step()
         self.prep_contract_step_1()
@@ -109,7 +111,7 @@ class MyOpt(object):
             self.backup_last_loss = self.phases_dict["losses"][-3:]
             self.phases_dict["losses"] = []
             if self.current_phase == "explore":
-                log.debug("Switching to contract")
+                log.info("Switching to contract")
                 self.current_phase = "contract"
                 # rollback network to best performing version...unsure if good plan
                 best_loss = self._rollback_network()
@@ -120,12 +122,12 @@ class MyOpt(object):
                     # log.debug("using DDP model")
                     return self.group_ddp_model
             elif self.current_phase == "contract1":
-                log.debug("Switching to explore")
+                log.info("Switching to explore from contract1")
                 self.current_phase = "explore"
                 self.phases_dict["contract"]["num_iters"] = 10
                 self.prep_explore_phase()
             else:  # elif self.current_phase == "contract": / "contract1"
-                log.debug("Switching to explore")
+                log.info("Switching to explore")
                 self.current_phase = "explore"
                 self.prep_explore_phase()
             # print("using individual model")
@@ -162,18 +164,21 @@ class MyOpt(object):
         return src
 
     @torch.no_grad()
-    def shuffle_positions(self, best_rank):
-        # at the end of each epoch, the networks are all joined into the best one
-        # need to reset all the networks, but we dont want to roll random
-        # idea: keep Q the same, and generate a new R matrix for half, other half, shuffle Q and keep R the same
-        # TODO: change the re-init mode to work from the
-        # TODO: change blurring to be based on a parameter!
+    def shuffle_positions(self):
+        # at the end of each epoch, each group will have one of the best networks
+        # need to reset all the networks which are not local rank 0, but we dont want to roll random
+        # idea: keep Q the same, and generate a new R matrix for half, other half, roll new Q and keep R the same
+        # TODO: change blurring to be based on a parameter!?
 
-        blurring_factor = 0.1  # up to X% changes of weights up/down
-
+        blurring_factor = 0.05  # up to X% changes of weights up/down
         self.phases_dict["losses"] = []
+        if self.current_phase != "explore":
+            log.info("Switching to phase: explore")
+        else:
+            return
+        log.info("Shuffling positions")
         self.current_phase = "explore"
-        if self.global_rank == best_rank:
+        if self.local_rank == 0:
             return
         keepq = torch.rand(1).item() >= 0.5
         if keepq:
@@ -218,6 +223,7 @@ class MyOpt(object):
         self.local_comm_group = comm.create_sub_groups(group_size)
         self.local_rank = dist.get_rank(self.local_comm_group)
         self.local_size = dist.get_world_size(self.local_comm_group)
+        self.group_rank0 = self.global_rank // self.local_size * self.local_size
 
         if init_group_ddp:
             self.group_ddp_model = nn.parallel.DistributedDataParallel(
@@ -225,7 +231,7 @@ class MyOpt(object):
                 process_group=self.local_comm_group,
                 # find_unused_parameters=False,
             )
-        log.debug("Finished Group Comm init")
+        log.info(f"Finished Group Comm init: local size {self.local_size}, local rank {self.local_rank}")
 
     # ============================== initialization functions ======================================
     @torch.no_grad()
@@ -251,14 +257,16 @@ class MyOpt(object):
         # continue to explore the local area
         # record the loss values and track them
         if self.best_local_loss is None or self.best_local_loss > current_loss:  # assume minimize
+            bll = f"{self.best_local_loss:.5f}" if self.best_local_loss is not None else "None"
             log.info(
-                f"New local best: {current_loss:.5f} v {self.best_local_loss:.5f}\t\t"
+                f"New local best: {current_loss:.5f} v {bll}\t\t"
                 f"step: {self.phases_dict['explore']['step']}",
             )
+            self.best_local_loss = current_loss
             self._store_best_network_in_buffers(current_loss)
 
         # if we are not improving, bail on a direction and test again
-        if current_loss > self.best_local_loss:
+        if current_loss > self.best_local_loss * 1.02:  # if the loss is more then 2% worse, change direction
             self._rollback_network()
             self._set_explore_grads()
 
@@ -269,7 +277,11 @@ class MyOpt(object):
         # change to the contract step after a set number
         # TODO: 'smart' version of changing between steps
         self.phases_dict["explore"]["step"] += 1
+        steps_remaining = self.phases_dict['explore']['num_iters'] - self.phases_dict['explore']['step']
+        if self.local_rank == 0 and steps_remaining % 10 == 0:
+            log.info(f"{steps_remaining} steps remaining until switch")
         if self.phases_dict["explore"]["step"] == self.phases_dict["explore"]["num_iters"]:
+            self.phases_dict["explore"]["step"] = 0
             return True
         return False
 
@@ -287,7 +299,6 @@ class MyOpt(object):
                 # p.data = nn.functional.normalize(p.data, dim=None, p=2.0)
 
     def _store_best_network_in_buffers(self, loss):
-        self.best_local_loss = loss
         self.phases_dict["explore"]["last_best"] = self.phases_dict["explore"]["step"] + 1
         for n, p in self.model.named_parameters():
             # if p.requires_grad:
@@ -410,21 +421,34 @@ class MyOpt(object):
 
     def sort_and_distributed_best_to_groups(self, loss):
         # get the best performing ranks (best networks)
-        _, sorted_ranks = self.get_sorted_losses(loss, group=None)
+        sorted_losses, sorted_ranks = self.get_sorted_losses(loss, group=None)
         self._distributed_best_params_to_groups(sorted_ranks)
         # for n, p in self.model.named_parameters():
         #     print(f"\t{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         # raise ValueError
+        msg = "Top ranks and losses - "
+        for ls, rn in zip(sorted_losses[:self.num_groups], sorted_ranks[:self.num_groups]):
+            msg += f"Rank: {rn.item()} - {ls:.4f}, "
+        if self.global_rank == 0:
+            log.info(msg)
 
-    @staticmethod
-    def get_sorted_losses(loss, group=None, use_average_loss: bool = False):
-        ws = dist.get_world_size(group=group)
-        rank = dist.get_rank(group=group)
-        losses = torch.zeros(ws, dtype=loss.dtype, device=loss.device)
-        losses[rank] = loss
-        dist.all_reduce(losses, group=group)  # sum op, NOT async operation
-        # TODO: this should be topk, not sort! sort is much slower...change later
-        sorted_losses, sorted_ranks = torch.sort(losses, descending=False)
+    # @staticmethod
+    def get_sorted_losses(self, loss, group=None, use_average_loss: bool = False):
+        if group is not None:
+            ws = group.get_world_size(group=group)
+            rank = group.get_rank(group=group)
+            losses = torch.zeros(ws, dtype=loss.dtype, device=loss.device)
+            losses[rank] = loss
+            group.all_reduce(losses, group=group)  # sum op, NOT async operation
+        else:
+            ws = dist.get_world_size(group=group)
+            rank = dist.get_rank(group=group)
+            losses = torch.zeros(ws, dtype=loss.dtype, device=loss.device)
+            losses[rank] = loss
+            dist.all_reduce(losses, group=group)  # sum op, NOT async operation
+        # sorted_losses, sorted_ranks = torch.sort(losses, descending=False)
+        # TODO: sort these??
+        sorted_losses, sorted_ranks = torch.topk(losses, k=self.num_groups, largest=False, sorted=False)
         return sorted_losses, sorted_ranks
 
     def _distributed_best_params_to_groups(self, best_ranks):
@@ -442,9 +466,10 @@ class MyOpt(object):
             dtype=best_ranks.dtype,
             device=best_ranks.device,
         ).tolist()
-        # print(group_rank0s)
+        # print(best_ranks[:num_groups], group_rank0s)
         for send, dest in zip(best_ranks[:num_groups], group_rank0s):  # , strict=True):
             if send == dest:
+                self._set_params_to_local()
                 continue
             if self.global_rank == send:
                 log.debug(f"sending to rank: {dest}")
@@ -460,9 +485,11 @@ class MyOpt(object):
     def _send_network(self, dest):
         tag = 0
         send_waits = []
-        for p in self.model.parameters():
+        for _n, p in self.model.named_parameters():
             # if p.requires_grad:
-            send_waits.append(dist.isend(p.data, dst=dest, tag=tag))
+            send_waits.append(dist.isend(p.data.contiguous(), dst=dest, tag=tag))
+            tag += 1
+
         for w in send_waits:
             w.wait()
 
@@ -475,6 +502,18 @@ class MyOpt(object):
                 src=src,
                 tag=tag,
             )
+            tag += 1
+        # waits should be taken care of in the bcast to follow
+
+    def _set_params_to_local(self):
+        for n, p in self.model.named_parameters():
+            # if p.requires_grad:
+            if self.best_parameters[n] is not None:
+                self.best_parameters[n].zero_()
+                self.best_parameters[n] += p
+            else:
+                self.best_parameters[n] = p.contiguous()
+
 
     @torch.no_grad()
     def _bcast_network_to_group(self):
@@ -486,11 +525,13 @@ class MyOpt(object):
                 self.best_parameters_waits[n].wait()
             except (AttributeError, KeyError):
                 pass
-
+            
+            # self.local_comm_group : dist.ProcessGroupGloo
             # send the network to the other networks
+            # self.best_parameters_waits[n] = self.local_comm_group.broadcast(
             self.best_parameters_waits[n] = dist.broadcast(
                 self.best_parameters[n],
-                src=0,
+                src=self.group_rank0,
                 group=self.local_comm_group,
                 async_op=True,
             )
@@ -582,15 +623,16 @@ class MyOpt(object):
             # this stuff it to make the evolutionary algo work with multiple forward steps
             # between each population update.
             # not sure if needed or necessary. Maybe remove later if performance is good
-            ws = dist.get_world_size(group=self.local_comm_group)
-            rank = dist.get_rank(group=self.local_comm_group)
+            # ws = dist.get_world_size(group=self.local_comm_group)
+            ws = self.local_size
+            rank = self.local_rank
             losses = torch.zeros(
                 (ws, *recent_losses.shape),
                 dtype=recent_losses.dtype,
                 device=recent_losses.device,
             )
             losses[rank] = recent_losses
-            dist.all_reduce(losses, group=self.local_comm_group)  # sum op, NOT async operation
+            self.local_comm_group.all_reduce(losses)  # sum op, NOT async operation
             flat_losses = losses.flatten()
 
             # if self.population

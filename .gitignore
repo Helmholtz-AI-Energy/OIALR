@@ -1,1 +1,12 @@
 testing.py
+logs/*
+mlruns/*
+*.log
+*.pyc
+src/madonna.egg-info/dependency_links.txt
+src/madonna.egg-info/entry_points.txt
+src/madonna.egg-info/not-zip-safe
+src/madonna.egg-info/PKG-INFO
+src/madonna.egg-info/requires.txt
+src/madonna.egg-info/SOURCES.txt
+src/madonna.egg-info/top_level.txt

@@ -45,8 +45,10 @@ BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
-TOMOUNT+="/scratch,/tmp,"
+TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
 TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
 
 salloc --partition=accelerated \
   -A hk-project-test-mlperf \
