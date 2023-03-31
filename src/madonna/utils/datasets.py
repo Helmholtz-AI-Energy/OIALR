@@ -36,9 +36,13 @@ mnist_normalize = transforms.Normalize(
 )
 
 
-def get_dataset(config: DictConfig) -> dict:
+def get_dataset(
+        config: DictConfig, 
+        group_size: int=None, 
+        group_rank: int=None, 
+        num_groups: int=None
+    ) -> dict:
     # get datasets
-
     options = {
         "imagenet": get_imagenet_datasets,
         "cifar10": get_cifar10_datasets,
@@ -48,14 +52,20 @@ def get_dataset(config: DictConfig) -> dict:
     if config.data.dataset not in options:
         raise ValueError("dataset not in options! add to utils.datasets")
 
-    dset_dict = options[config.data.dataset](config)
+    dset_dict = options[config.data.dataset](
+        config, group_size=group_size, group_rank=group_rank, num_groups=num_groups
+    )
 
     return dset_dict
 
 
-def get_imagenet_datasets(config):
-    train_dataset, train_loader, train_sampler = imagenet_train_dataset_plus_loader(config=config)
-    val_dataset, val_loader = imagenet_get_val_dataset_n_loader(config=config)
+def get_imagenet_datasets(config, group_size=None, group_rank=None, num_groups=None):
+    train_dataset, train_loader, train_sampler = imagenet_train_dataset_plus_loader(
+        config=config, group_size=group_size, group_rank=group_rank, num_groups=num_groups
+    )
+    val_dataset, val_loader = imagenet_get_val_dataset_n_loader(
+        config=config, group_size=group_size, group_rank=group_rank, num_groups=num_groups
+    )
     return {
         "train": {
             "dataset": train_dataset,
@@ -69,9 +79,9 @@ def get_imagenet_datasets(config):
     }
 
 
-def get_cifar10_datasets(config):
-    train_dataset, train_loader, train_sampler = cifar10_train_dataset_plus_loader(config)
-    val_dataset, val_loader = cifar10_val_dataset_n_loader(config)
+def get_cifar10_datasets(config, group_size=None, group_rank=None, num_groups=None):
+    train_dataset, train_loader, train_sampler = cifar10_train_dataset_plus_loader(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
+    val_dataset, val_loader = cifar10_val_dataset_n_loader(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
     return {
         "train": {
             "dataset": train_dataset,
@@ -85,9 +95,9 @@ def get_cifar10_datasets(config):
     }
 
 
-def get_cifar100_datasets(config):
-    train_dataset, train_loader, train_sampler = cifar100_train_dataset_plus_loader(config)
-    val_dataset, val_loader = cifar100_val_dataset_n_loader(config)
+def get_cifar100_datasets(config, group_size=None, group_rank=None, num_groups=None):
+    train_dataset, train_loader, train_sampler = cifar100_train_dataset_plus_loader(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
+    val_dataset, val_loader = cifar100_val_dataset_n_loader(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
     return {
         "train": {
             "dataset": train_dataset,
@@ -101,9 +111,9 @@ def get_cifar100_datasets(config):
     }
 
 
-def get_mnist_datasets(config):
-    train_dataset, train_loader, train_sampler = mnist_train_data(config)
-    val_dataset, val_loader = mnist_val_data(config)
+def get_mnist_datasets(config, group_size=None, group_rank=None, num_groups=None):
+    train_dataset, train_loader, train_sampler = mnist_train_data(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
+    val_dataset, val_loader = mnist_val_data(config, group_size=group_size, group_rank=group_rank, num_groups=num_groups)
     return {
         "train": {
             "dataset": train_dataset,
@@ -117,7 +127,9 @@ def get_mnist_datasets(config):
     }
 
 
-def imagenet_train_dataset_plus_loader(config):
+def imagenet_train_dataset_plus_loader(
+        config, group_size=None, group_rank=None, num_groups=None
+    ):
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
@@ -170,7 +182,9 @@ def imagenet_train_dataset_plus_loader(config):
     return train_dataset, train_loader, train_sampler
 
 
-def imagenet_get_val_dataset_n_loader(config):
+def imagenet_get_val_dataset_n_loader(
+        config, group_size=None, group_rank=None, num_groups=None
+    ):
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
@@ -190,6 +204,13 @@ def imagenet_get_val_dataset_n_loader(config):
     )
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         val_sampler = datadist.DistributedSampler(val_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        val_sampler = datadist.DistributedSampler(
+            val_dataset, 
+            rank=group_rank, 
+            num_replicas=group_size, 
+            seed=dist.get_rank // group_size
+        )
     else:
         val_sampler = None
 
@@ -206,7 +227,7 @@ def imagenet_get_val_dataset_n_loader(config):
     return val_dataset, val_loader
 
 
-def cifar10_train_dataset_plus_loader(config):
+def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, num_groups=None):
     # CIFAR-10 dataset
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
@@ -261,7 +282,7 @@ def cifar10_train_dataset_plus_loader(config):
     return train_dataset, train_loader, train_sampler
 
 
-def cifar10_val_dataset_n_loader(config):
+def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
@@ -276,6 +297,13 @@ def cifar10_val_dataset_n_loader(config):
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         sampler = datadist.DistributedSampler(test_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        sampler = datadist.DistributedSampler(
+            test_dataset, 
+            rank=group_rank, 
+            num_replicas=group_size, 
+            seed=dist.get_rank // group_size
+        )
     else:
         sampler = None
 
@@ -291,7 +319,7 @@ def cifar10_val_dataset_n_loader(config):
     return test_dataset, test_loader
 
 
-def cifar100_train_dataset_plus_loader(config):
+def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None, num_groups=None):
     # CIFAR-10 dataset
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
@@ -344,7 +372,7 @@ def cifar100_train_dataset_plus_loader(config):
     return train_dataset, train_loader, train_sampler
 
 
-def cifar100_val_dataset_n_loader(config):
+def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
@@ -360,6 +388,13 @@ def cifar100_val_dataset_n_loader(config):
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         test_sampler = datadist.DistributedSampler(test_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        test_sampler = datadist.DistributedSampler(
+            test_dataset, 
+            rank=group_rank, 
+            num_replicas=group_size, 
+            seed=dist.get_rank // group_size
+        )
     else:
         test_sampler = None
 
@@ -375,7 +410,7 @@ def cifar100_val_dataset_n_loader(config):
     return test_dataset, test_loader
 
 
-def mnist_train_data(config):
+def mnist_train_data(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
     base_dir = dsconfig["data_dir"]
@@ -410,7 +445,7 @@ def mnist_train_data(config):
     return train_dataset, train_loader, train_sampler
 
 
-def mnist_val_data(config):
+def mnist_val_data(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
     base_dir = dsconfig["data_dir"]
@@ -431,6 +466,13 @@ def mnist_val_data(config):
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         sampler = datadist.DistributedSampler(val_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        sampler = datadist.DistributedSampler(
+            val_dataset, 
+            rank=group_rank, 
+            num_replicas=group_size, 
+            seed=dist.get_rank // group_size
+        )
     else:
         sampler = None
 
