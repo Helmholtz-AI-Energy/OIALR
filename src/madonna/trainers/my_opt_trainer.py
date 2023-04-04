@@ -82,10 +82,13 @@ def main(config):  # noqa: C901
     #         )
     #     else:
     #         print(f"=> no checkpoint found at: {config['resume']}")
-    
+
     if optimizer.num_groups > 1:
         dset_dict = madonna.utils.datasets.get_dataset(
-            config, group_size=optimizer.local_size, group_rank=optimizer.local_rank, num_groups=optimizer.num_groups
+            config,
+            group_size=optimizer.local_size,
+            group_rank=optimizer.local_rank,
+            num_groups=optimizer.num_groups,
         )
 
     dset_dict = madonna.utils.datasets.get_dataset(config)
@@ -128,11 +131,10 @@ def main(config):  # noqa: C901
         # evaluate on validation set
         # best_rank = ranks[0]
         if epoch % 2 == 0 or epoch == config.training["epochs"] - 1:
-
-            tosort = False
+            # tosort = False
             if optimizer.current_phase == "explore":
                 optimizer.sort_and_distributed_best_to_groups()
-                tosort = True
+                # tosort = True
             _, val_loss = validate(
                 val_loader,
                 target_model,
@@ -236,7 +238,9 @@ def train(
         #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         #     raise ValueError
 
-        if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and optimizer.local_rank == 0:  # config["rank"] == 0:
+        if (
+            i % config.training.print_freq == 0 or i == len(train_loader) - 1
+        ) and optimizer.local_rank == 0:  # config["rank"] == 0:
             argmax = torch.argmax(output, dim=1).to(torch.float32)
             log.info(
                 f"Argmax outputs s "
@@ -320,7 +324,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
     # console.rule("validation")
 
     def run_validate(loader, base_progress=0):
-        rank = 0 if not dist.is_initialized() else dist.get_rank()
+        # rank = 0 if not dist.is_initialized() else dist.get_rank()
         with torch.no_grad():
             end = time.time()
             num_elem = len(loader) - 1

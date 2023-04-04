@@ -411,7 +411,7 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
 
     mpi_comm = MPI.COMM_WORLD
     gp_ranks = [i for i in range(group_id * group_size, (group_id + 1) * group_size)]
-    # my_groups_rank0 = 
+    # my_groups_rank0 =
 
     group = mpi_comm.group.Incl(gp_ranks)
     mpi_group = mpi_comm.Create_group(group)

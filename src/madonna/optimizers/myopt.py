@@ -130,7 +130,7 @@ class MyOpt(object):
                     # In this case, we need to have the group-local-ddp model
                     # log.debug("using DDP model")
                     return self.group_ddp_model
-                
+
             elif self.current_phase == "contract1":
                 log.info("Switching to explore from contract1")
                 self.current_phase = "explore"
@@ -310,7 +310,7 @@ class MyOpt(object):
         # change to the contract step after a set number
         # TODO: 'smart' version of changing between steps
         self.phases_dict["explore"]["step"] += 1
-        steps_remaining = self.phases_dict['explore']['num_iters'] - self.phases_dict['explore']['step']
+        steps_remaining = self.phases_dict["explore"]["num_iters"] - self.phases_dict["explore"]["step"]
         if self.local_rank == 0 and steps_remaining % 10 == 0:
             log.info(f"{steps_remaining} steps remaining until switch")
         if self.phases_dict["explore"]["step"] == self.phases_dict["explore"]["num_iters"]:
@@ -389,8 +389,9 @@ class MyOpt(object):
             perc_removed.append(replaced.item())
             p.set_(torch.where(torch.abs(p) > s_cutoff, p, 0))
             # p.set_(u @ torch.diag(s) @ vh)
-        log.debug(f"trimmed small values, removed {(sum(perc_removed) / len(perc_removed) * 100):.4f}% on average")
-        
+        log.debug(
+            f"trimmed small values, removed {(sum(perc_removed) / len(perc_removed) * 100):.4f}% on average",
+        )
 
     def _test_explore_stability(self):
         # test the stability of the direction of the network
@@ -469,7 +470,7 @@ class MyOpt(object):
         #     print(f"\t{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         # raise ValueError
         msg = "Top ranks and losses - "
-        for ls, rn in zip(sorted_losses[:self.num_groups], sorted_ranks[:self.num_groups]):
+        for ls, rn in zip(sorted_losses[: self.num_groups], sorted_ranks[: self.num_groups]):
             msg += f"Rank: {rn.item()} - {ls:.4f}, "
         if self.global_rank == 0:
             log.info(msg)
@@ -569,7 +570,7 @@ class MyOpt(object):
                 self.best_parameters_waits[n].wait()
             except (AttributeError, KeyError):
                 pass
-            
+
             # self.local_comm_group : dist.ProcessGroupGloo
             # send the network to the other networks
             # self.best_parameters_waits[n] = self.local_comm_group.broadcast(

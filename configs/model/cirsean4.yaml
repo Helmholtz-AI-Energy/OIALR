@@ -1,6 +1,6 @@
 model:
   _target_: madonna.models.components.simple_dense_net.SimpleDenseNet
-  input_size: 3072  # 784
+  input_size: 3072 # 784
   fc_sizes:
     - 2500
     - 2000

@@ -2,8 +2,8 @@
 
 defaults:
   - _self_
-  - data: cifar10.yaml  # mnist.yaml
-  - model: general_torchvision.yaml  # cirsean4.yaml
+  - data: cifar10.yaml # mnist.yaml
+  - model: general_torchvision.yaml # cirsean4.yaml
   - tracking: mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: myopt.yaml
   - log_dir: default.yaml
