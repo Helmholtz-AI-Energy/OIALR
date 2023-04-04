@@ -1,4 +1,5 @@
 model:
   _target_: madonna.models.get_tv_model
+  pretrained: False
   name: resnet18
 autocast: True

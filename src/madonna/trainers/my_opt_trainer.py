@@ -101,7 +101,7 @@ def main(config):  # noqa: C901
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if dist.is_initialized() and config.data.distributed_sample:
             train_sampler.set_epoch(epoch)
-        madonna.utils.change_batchnorm_tracking(target_model, tracking=True)
+        # madonna.utils.change_batchnorm_tracking(target_model, tracking=True)
 
         train_loss, target_model, last_loss = train(
             train_loader,
@@ -115,11 +115,8 @@ def main(config):  # noqa: C901
         )
         # move the best model to all ranks
         # best_rank = optimizer.set_all_to_best()
-        if optimizer.current_phase == "explore":
-            optimizer.sort_and_distributed_best_to_groups(last_loss)
         # move best N models to the N groups
-        target_model.eval()
-        madonna.utils.change_batchnorm_tracking(target_model, tracking=False)
+        # madonna.utils.change_batchnorm_tracking(target_model, tracking=False)
         # if dist.get_rank() in [best_rank, 0]:
         #     for n, p in target_model.named_parameters():
         #         # if p.requires_grad:
@@ -130,19 +127,25 @@ def main(config):  # noqa: C901
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
         # best_rank = ranks[0]
-        _, val_loss = validate(
-            val_loader,
-            target_model,
-            criterion,
-            config,
-            epoch,
-            device=device,
-            print_on_rank=optimizer.local_rank == 0,
-        )
+        if epoch % 2 == 0 or epoch == config.training["epochs"] - 1:
 
-        # blur all of the models
-        if epoch != config.training["epochs"] and optimizer.current_phase in ["explore", "contract1"]:
-            optimizer.shuffle_positions()
+            tosort = False
+            if optimizer.current_phase == "explore":
+                optimizer.sort_and_distributed_best_to_groups()
+                tosort = True
+            _, val_loss = validate(
+                val_loader,
+                target_model,
+                criterion,
+                config,
+                epoch,
+                device=device,
+                print_on_rank=optimizer.local_rank == 0,
+                pg=optimizer.local_comm_group,
+            )
+            # # blur all of the models
+            # if epoch != config.training["epochs"] - 1 and optimizer.current_phase in ["explore"]:
+            #     optimizer.shuffle_positions(tosort=tosort)
 
         if config.rank == 0:
             log.info(
@@ -181,6 +184,7 @@ def train(
     #     batch_warmup_step = False
     # switch to train mode
     model.train()
+    # madonna.utils.change_batchnorm_tracking(model, tracking=False)
     end = time.time()
     for i, (images, target) in enumerate(train_loader):
         # measure data loading time
@@ -218,11 +222,22 @@ def train(
         #     with warmup_scheduler.dampening():
         #         if batch_warmup_step:
         #             lr_scheduler.step()
+        # argmax = torch.argmax(output, dim=1).to(torch.float32)
+        # # log.info(
+        # #     f"Argmax outputs s "
+        # #     f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
+        # #     f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
+        # # )
+        # # progress.display(i + 1, log=log)
+
+        # if argmax.std() == 0:
+        #     log.error(f"ISSUE WITH NETWORK printing debugging info")
+        #     for n, p in model.named_parameters():
+        #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+        #     raise ValueError
 
         if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and optimizer.local_rank == 0:  # config["rank"] == 0:
-            # console.rule(f"train step {i}")
             argmax = torch.argmax(output, dim=1).to(torch.float32)
-            # console.print(
             log.info(
                 f"Argmax outputs s "
                 f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
@@ -301,7 +316,7 @@ def save_selected_weights(network, epoch):
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, config, epoch, device, print_on_rank):
+def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg):
     # console.rule("validation")
 
     def run_validate(loader, base_progress=0):
@@ -328,8 +343,21 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank)
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
+                # argmax = torch.argmax(output, dim=1).to(torch.float32)
+                # # print(
+                # #     f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
+                # #     f"min: {argmax.min().item()}, std: {argmax.std().item()}",
+                # # )
+                # # progress.display(i + 1, log=log)
 
-                if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
+                # if argmax.std() == 0:
+                #     log.error(f"ISSUE WITH NETWORK printing debugging info")
+                #     for n, p in model.named_parameters():
+                #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+                #     raise ValueError
+
+                # if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
+                if (i % 50 == 0 or i == num_elem) and print_on_rank:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
@@ -337,10 +365,16 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank)
                     )
                     progress.display(i + 1, log=log)
 
-    batch_time = AverageMeter("Time", ":6.3f", Summary.NONE)
-    losses = AverageMeter("Loss", ":.4f", Summary.NONE)
-    top1 = AverageMeter("Acc@1", ":6.2f", Summary.AVERAGE)
-    top5 = AverageMeter("Acc@5", ":6.2f", Summary.AVERAGE)
+                    # if argmax.std() == 0:
+                    #     log.error(f"ISSUE WITH NETWORK printing debugging info")
+                    #     for n, p in model.named_parameters():
+                    #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+                    #     raise ValueError
+
+    batch_time = AverageMeter("Time", ":6.3f", Summary.NONE, pg=pg)
+    losses = AverageMeter("Loss", ":.4f", Summary.AVERAGE, pg=pg)
+    top1 = AverageMeter("Acc@1", ":6.2f", Summary.AVERAGE, pg=pg)
+    top5 = AverageMeter("Acc@5", ":6.2f", Summary.AVERAGE, pg=pg)
     progress = ProgressMeter(
         len(val_loader) + (len(val_loader.sampler) * config["world_size"] < len(val_loader.dataset)),
         [batch_time, losses, top1, top5],
@@ -348,7 +382,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank)
     )
 
     # switch to evaluate mode
-    # model.eval()
+    model.eval()
 
     run_validate(val_loader)
     if dist.is_initialized():
@@ -370,7 +404,8 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank)
         )
         run_validate(aux_val_loader, len(val_loader))
 
-    progress.display_summary(log=log)
+    dist.barrier()
+    progress.display_summary(log=log, printing_rank=print_on_rank)
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -409,11 +444,12 @@ class Summary(Enum):
 class AverageMeter:
     """Computes and stores the average and current value"""
 
-    def __init__(self, name, fmt=":f", summary_type=Summary.AVERAGE):
+    def __init__(self, name, fmt=":f", summary_type=Summary.AVERAGE, pg=None):
         self.name = name
         self.fmt = fmt
         self.summary_type = summary_type
         self.reset()
+        self.pg = pg
 
     def reset(self):
         self.val = 0
@@ -435,7 +471,7 @@ class AverageMeter:
         else:
             device = torch.device("cpu")
         total = torch.tensor([self.sum, self.count], dtype=torch.float32, device=device)
-        dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
+        dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False, group=self.pg)
         self.sum, self.count = total.tolist()
         # self.avg = self.sum / self.count
         self.avg = total[0] / total[1]  # self.sum / self.count
@@ -474,10 +510,10 @@ class ProgressMeter:
         #     # log.info("\t".join(entries))
         log.info(" ".join(entries))
 
-    def display_summary(self, log):
+    def display_summary(self, log, printing_rank):
         entries = [" *"]
         entries += [meter.summary() for meter in self.meters]
-        if self.rank == 0:
+        if printing_rank:
             # print(" ".join(entries))
             # console.print(" ".join(entries))
             log.info(" ".join(entries))

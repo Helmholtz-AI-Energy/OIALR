@@ -10,3 +10,4 @@ src/madonna.egg-info/PKG-INFO
 src/madonna.egg-info/requires.txt
 src/madonna.egg-info/SOURCES.txt
 src/madonna.egg-info/top_level.txt
+*pycache*

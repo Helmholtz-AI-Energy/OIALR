@@ -62,6 +62,8 @@ def change_batchnorm_tracking(model: nn.Module, tracking=False):
     for child in model.children():
         if hasattr(child, "track_running_stats"):
             child.track_running_stats = tracking
+            # child.training = tracking
+            # child.affine = tracking
         change_batchnorm_tracking(child, tracking)
 
 

@@ -1,5 +1,5 @@
 dataset: cifar100
-data_location: "/hkfs/home/dataset/datasets/CIFAR100/"
+data_dir: "/hkfs/home/dataset/datasets/CIFAR100/"
 num_workers: 6
 pin_memory: True
 local_batch_size: 256 # 512 -> OOM error

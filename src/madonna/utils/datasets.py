@@ -245,8 +245,7 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
             std=(0.2023, 0.1994, 0.2010),
         )
     else:
-        transform = (
-            transforms.Compose(
+        transform = transforms.Compose(
                 [
                     transforms.Pad(4),
                     transforms.RandomHorizontalFlip(),
@@ -254,8 +253,7 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
                     transforms.ToTensor(),
                     cifar10_normalize,
                 ],
-            ),
-        )
+            )
 
     train_dataset = datasets.CIFAR10(
         root=str(train_dir),
@@ -265,8 +263,15 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
     )
 
     # Data loader
-    if dist.is_initialized():
+    if dist.is_initialized() and config.data.distributed_sample:
         train_sampler = datadist.DistributedSampler(train_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        train_sampler = datadist.DistributedSampler(
+            train_dataset, 
+            rank=group_rank, 
+            num_replicas=group_size, 
+            seed=dist.get_rank() // group_size
+        )
     else:
         train_sampler = None
 

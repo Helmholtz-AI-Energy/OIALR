@@ -401,7 +401,7 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     global_size = dist.get_world_size()
     global_rank = dist.get_rank()
 
-    assert global_size % group_size == 0, f"global_size % group_size != 0 ({size}, {group_size})"
+    assert global_size % group_size == 0, f"global_size % group_size != 0 ({global_size}, {group_size})"
 
     global _pg_group_ranks
 

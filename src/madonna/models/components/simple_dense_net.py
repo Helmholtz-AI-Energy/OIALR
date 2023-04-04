@@ -11,6 +11,7 @@ class SimpleDenseNet(nn.Module):
         output_size: int = 10,
         activation: str = "ReLU",
         batch_norm: bool = True,
+        bias: bool = True,
         activate_last_layer: bool = True,
     ):
         super().__init__()
@@ -21,13 +22,13 @@ class SimpleDenseNet(nn.Module):
         layers = []
         last_sz = input_size
         for sz in fc_sizes:
-            layers.append(nn.Linear(last_sz, sz))
+            layers.append(nn.Linear(last_sz, sz, bias=bias))
             if batch_norm:
                 layers.append(nn.BatchNorm1d(sz))
             layers.append(self.activation)
             last_sz = sz
 
-        layers.append(nn.Linear(fc_sizes[-1], output_size))
+        layers.append(nn.Linear(fc_sizes[-1], output_size, bias=bias))
         if activate_last_layer:
             layers.append(self.activation)
 

@@ -1,15 +1,16 @@
 model:
   _target_: madonna.models.components.simple_dense_net.SimpleDenseNet
-  input_size: 784
+  input_size: 3072  # 784
   fc_sizes:
     - 2500
-    # - 2000
+    - 2000
     - 1500
-    # - 1000
+    - 1000
     - 500
   output_size: 10
   activation: Tanh
-  batch_norm: True
+  batch_norm: False
+  bias: False
   activate_last_layer: False
 autocast: False
 mnist_channels: 1

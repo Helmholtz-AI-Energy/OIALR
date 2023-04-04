@@ -52,13 +52,13 @@ class MyOpt(object):
         self.phases_dict = {
             "explore": {
                 "step": 0,
-                "num_iters": 500,
+                "num_iters": 10,
                 "patience": 1,
                 "last_best": 0,
             },  # index 0 -> step number. index 1-> limit of iterations
             "contract": {
                 "step": 0,
-                "num_iters": 10,
+                "num_iters": 5,
             },
             "losses": [],
         }
@@ -71,8 +71,17 @@ class MyOpt(object):
             group_size=contract_group_size,
             init_group_ddp=self.contract_method == "ddp",
         )
-        # ============================= explore params ====================================
+        # ================================ explore params ========================================
         self.uniform_n1_p1 = torch.distributions.uniform.Uniform(-1, 1)
+        self.gaussian = torch.distributions.normal.Normal(0, 1)
+
+        self.grad_scale_factor = 10
+        self.shuffle_blurring = 0.01
+        self.shuffle_keep = 0.9
+        self.explore_improving_cutoff = 1.10
+        # if the loss is worse than the self.explore_improving_cutoff * best loss,
+        #   rollback and roll new grads
+        self.first_rollback = True
         # ============================= contract params - SGD ====================================
         if self.contract_method == "ddp":
             self.sgd_optimizer = optim.SGD(
@@ -99,7 +108,7 @@ class MyOpt(object):
 
     def step(self, loss: torch.Tensor) -> torch.nn.Module:
         # switch between the phases and call the step function for that phase
-        logging.debug(f"Optimizer step: {self.current_phase}")
+        log.debug(f"Optimizer step: {self.current_phase}")
 
         self.phases_dict["losses"].append(loss)
         if self.current_phase == "explore":
@@ -121,11 +130,14 @@ class MyOpt(object):
                     # In this case, we need to have the group-local-ddp model
                     # log.debug("using DDP model")
                     return self.group_ddp_model
+                
             elif self.current_phase == "contract1":
                 log.info("Switching to explore from contract1")
                 self.current_phase = "explore"
                 self.phases_dict["contract"]["num_iters"] = 10
+                self._store_best_network_in_buffers()
                 self.prep_explore_phase()
+
             else:  # elif self.current_phase == "contract": / "contract1"
                 log.info("Switching to explore")
                 self.current_phase = "explore"
@@ -136,7 +148,7 @@ class MyOpt(object):
     @torch.no_grad()
     def set_all_to_best(self):
         if self.current_phase.startswith("contract"):
-            return 1
+            return 0
         # set all networks to the best performing network over the most recent phase
         # TODO: should the losses thing but removed??
         try:
@@ -164,22 +176,23 @@ class MyOpt(object):
         return src
 
     @torch.no_grad()
-    def shuffle_positions(self):
+    def shuffle_positions(self, tosort=False):
         # at the end of each epoch, each group will have one of the best networks
         # need to reset all the networks which are not local rank 0, but we dont want to roll random
         # idea: keep Q the same, and generate a new R matrix for half, other half, roll new Q and keep R the same
         # TODO: change blurring to be based on a parameter!?
 
-        blurring_factor = 0.05  # up to X% changes of weights up/down
+        blurring_factor = self.shuffle_blurring  # up to X% changes of weights up/down
         self.phases_dict["losses"] = []
-        if self.current_phase != "explore":
-            log.info("Switching to phase: explore")
-        else:
-            return
-        log.info("Shuffling positions")
-        self.current_phase = "explore"
+        # if self.current_phase != "explore":
+        #     log.info("Switching to phase: explore")
+        # else:
+        #     return
+        if tosort:
+            self.sort_and_distributed_best_to_groups()
         if self.local_rank == 0:
             return
+        log.info("Shuffling positions")
         keepq = torch.rand(1).item() >= 0.5
         if keepq:
             log.debug("Shuffling: keeping Q fixed, modifying R")
@@ -188,8 +201,14 @@ class MyOpt(object):
         self.model.train()
         for p in self.model.parameters():
             if p.requires_grad:
+                if torch.rand(1).item() >= self.shuffle_keep:
+                    # give a chance to keep a layer's weights unchanged
+                    # TODO: make a form of evolutionary method to determine which layers are most important
+                    continue
+                # keepq = torch.rand(1).item() >= 0.5
                 if p.ndim == 1:  # if weights are 1D, blur them
                     p.mul_(1 + self.uniform_n1_p1.sample(p.shape) * blurring_factor)
+                    # p.mul_(1 + self.gaussian.sample(p.shape) * blurring_factor)
                     continue
                 shp = p.shape
                 if p.ndim > 2:
@@ -204,6 +223,7 @@ class MyOpt(object):
                 q, r = torch.linalg.qr(hold, mode="reduced")
                 if keepq:
                     r *= 1 + self.uniform_n1_p1.sample(r.shape) * blurring_factor
+                    # r *= 1 + self.gaussian.sample(r.shape) * blurring_factor
                 else:  # keep r the same, shuffle Q
                     q = utils.roll_orthogonal_values(
                         q.shape,
@@ -211,6 +231,7 @@ class MyOpt(object):
                         device=q.device,
                         scale_factor=1.0,
                     )
+                    # q = torch.randn_like(q)
                     # q = q[:, torch.randperm(q.shape[1], device=q.device)]
                 if trans:
                     p.set_((q @ r).T.reshape(shp))
@@ -242,7 +263,7 @@ class MyOpt(object):
                 c.track_running_stats = False
         self.model.train()
         utils.log0(msg=f"Model: \n {self.model}", level="debug")
-        for n, p in self.model.named_parameters():
+        for _n, p in self.model.named_parameters():
             if p.requires_grad:
                 # if p.data.ndim > 1:
                 #     nn.init.kaiming_uniform_(p)
@@ -253,6 +274,15 @@ class MyOpt(object):
         utils.log0(msg="Finished Model init", level="info")
 
     # ============================== Exploration functions =========================================
+    def prep_explore_phase(self):
+        # prepare for the exploration phase
+        # roll new orthogonal matrices for the gradients
+        self.phases_dict["explore"]["step"] = 0
+        # self.sort_and_distributed_best_to_groups()
+        # self.shuffle_positions()
+        self._trim_small_values()
+        self._set_explore_grads()
+
     def explore_step(self, current_loss):
         # continue to explore the local area
         # record the loss values and track them
@@ -263,10 +293,13 @@ class MyOpt(object):
                 f"step: {self.phases_dict['explore']['step']}",
             )
             self.best_local_loss = current_loss
-            self._store_best_network_in_buffers(current_loss)
+            self._store_best_network_in_buffers()
 
         # if we are not improving, bail on a direction and test again
-        if current_loss > self.best_local_loss * 1.02:  # if the loss is more then 2% worse, change direction
+        if current_loss > self.best_local_loss * self.explore_improving_cutoff:
+            # if the loss is more then X % worse, change direction
+            log.debug(f"rolling new grads: {current_loss} > {self.best_local_loss}")
+
             self._rollback_network()
             self._set_explore_grads()
 
@@ -298,7 +331,7 @@ class MyOpt(object):
                 p.set_(hold)
                 # p.data = nn.functional.normalize(p.data, dim=None, p=2.0)
 
-    def _store_best_network_in_buffers(self, loss):
+    def _store_best_network_in_buffers(self):
         self.phases_dict["explore"]["last_best"] = self.phases_dict["explore"]["step"] + 1
         for n, p in self.model.named_parameters():
             # if p.requires_grad:
@@ -307,7 +340,7 @@ class MyOpt(object):
 
     @torch.no_grad()
     def _rollback_network(self):
-        log.debug("Rolling back network")
+        # log.debug("Rolling back network")
         # NOT SURE IF NEEDED
         # roll back the network to the known best
         #   use the model buffers as a temporary place to store the good params
@@ -321,7 +354,7 @@ class MyOpt(object):
     @torch.no_grad()
     def _set_explore_grads(self):
         # scale gradients to be X% of the data at maximum
-        scale_factor = 0.005  # scale factor of above
+        scale_factor = self.grad_scale_factor  # scale factor of above
         for p in self.model.parameters():
             if p.requires_grad:
                 # only work on the parameters which are to be trained...
@@ -344,11 +377,20 @@ class MyOpt(object):
                     p.grad.zero_()
                     p.grad.add_(grads)
 
-    def prep_explore_phase(self):
-        # prepare for the exploration phase
-        # roll new orthogonal matrices for the gradients
-        self.phases_dict["explore"]["step"] = 0
-        self._set_explore_grads()
+    @torch.no_grad()
+    def _trim_small_values(self):
+        s_cutoff = 0.01
+        perc_removed = []
+        for _n, p in self.model.named_parameters():
+            # TODO: test if this should be all parameters or just those which require grads...
+
+            # u, s, vh = torch.linalg.svd(p, full_matrices=False)
+            replaced = (torch.abs(p) <= s_cutoff).sum() / p.numel()
+            perc_removed.append(replaced.item())
+            p.set_(torch.where(torch.abs(p) > s_cutoff, p, 0))
+            # p.set_(u @ torch.diag(s) @ vh)
+        log.debug(f"trimmed small values, removed {(sum(perc_removed) / len(perc_removed) * 100):.4f}% on average")
+        
 
     def _test_explore_stability(self):
         # test the stability of the direction of the network
@@ -409,7 +451,7 @@ class MyOpt(object):
             if not p.is_contiguous():
                 p.set_(p.contiguous())
         if current_loss is not None:
-            self.sort_and_distributed_best_to_groups(current_loss)
+            self.sort_and_distributed_best_to_groups()
         self.phases_dict["contract"]["step"] = 0
         # SGD optimization: do nothing else?? maybe find a way to change the LR??
         if self.contract_method == "ddp":
@@ -419,9 +461,9 @@ class MyOpt(object):
         # if self.contract_method == "svd-genetic":
         self.svd_generate_population()
 
-    def sort_and_distributed_best_to_groups(self, loss):
+    def sort_and_distributed_best_to_groups(self):
         # get the best performing ranks (best networks)
-        sorted_losses, sorted_ranks = self.get_sorted_losses(loss, group=None)
+        sorted_losses, sorted_ranks = self.get_sorted_losses(group=None)
         self._distributed_best_params_to_groups(sorted_ranks)
         # for n, p in self.model.named_parameters():
         #     print(f"\t{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
@@ -433,7 +475,8 @@ class MyOpt(object):
             log.info(msg)
 
     # @staticmethod
-    def get_sorted_losses(self, loss, group=None, use_average_loss: bool = False):
+    def get_sorted_losses(self, group=None, use_average_loss: bool = False):
+        loss = self.best_local_loss
         if group is not None:
             ws = group.get_world_size(group=group)
             rank = group.get_rank(group=group)
@@ -466,10 +509,11 @@ class MyOpt(object):
             dtype=best_ranks.dtype,
             device=best_ranks.device,
         ).tolist()
+        log.debug(f"rank pairs: {best_ranks[:num_groups]} {group_rank0s}")
         # print(best_ranks[:num_groups], group_rank0s)
         for send, dest in zip(best_ranks[:num_groups], group_rank0s):  # , strict=True):
             if send == dest:
-                self._set_params_to_local()
+                self._set_params_to_local_model()
                 continue
             if self.global_rank == send:
                 log.debug(f"sending to rank: {dest}")
@@ -485,7 +529,7 @@ class MyOpt(object):
     def _send_network(self, dest):
         tag = 0
         send_waits = []
-        for _n, p in self.model.named_parameters():
+        for n, p in self.model.named_parameters():
             # if p.requires_grad:
             send_waits.append(dist.isend(p.data.contiguous(), dst=dest, tag=tag))
             tag += 1
@@ -495,8 +539,9 @@ class MyOpt(object):
 
     def _recv_network(self, src):
         tag = 0
-        for n, p in self.model.named_parameters():
+        for n, _p in self.model.named_parameters():
             # if p.requires_grad:
+            self.best_parameters[n].zero_()
             self.best_parameters_waits[n] = dist.irecv(
                 self.best_parameters[n],
                 src=src,
@@ -505,7 +550,7 @@ class MyOpt(object):
             tag += 1
         # waits should be taken care of in the bcast to follow
 
-    def _set_params_to_local(self):
+    def _set_params_to_local_model(self):
         for n, p in self.model.named_parameters():
             # if p.requires_grad:
             if self.best_parameters[n] is not None:
@@ -513,7 +558,6 @@ class MyOpt(object):
                 self.best_parameters[n] += p
             else:
                 self.best_parameters[n] = p.contiguous()
-
 
     @torch.no_grad()
     def _bcast_network_to_group(self):
@@ -550,6 +594,7 @@ class MyOpt(object):
         # self.local_comm_group.barrier()
         loss.backward()
         self.sgd_optimizer.step()
+        self.best_local_loss = loss
 
     # ------------------------------ SVD functions -------------------------------------------------
 

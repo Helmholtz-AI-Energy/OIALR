@@ -1,8 +1,9 @@
-dataset: cifar100
-data_location: "/hkfs/home/dataset/datasets/CIFAR10/"
+dataset: cifar10
+data_dir: "/hkfs/home/dataset/datasets/CIFAR10/"
 num_workers: 4
 pin_memory: True
-local_batch_size: 256
-timm_transforms: True
+local_batch_size: 128
+timm_transforms: False
 persistent_workers: True
-distributed_sample: True
+distributed_sample: False
+distributed_sample_val: False
