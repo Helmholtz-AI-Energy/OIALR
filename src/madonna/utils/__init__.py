@@ -37,11 +37,10 @@ def get_optimizer(config, network):
     if config.training.init_opt_with_model:
         first = network
     else:
-        first = network.parameters
+        first = network.parameters()
 
     if config.training.lr is not None:
         kwargs["lr"] = config.training.lr
-
     return optimizer(first, **kwargs)
 
 

@@ -1,6 +1,7 @@
 import torchvision.models as models
 
 from . import components
+from .qr_fixing import QRFixingModel
 
 
 def get_tv_model(pretrained, name):

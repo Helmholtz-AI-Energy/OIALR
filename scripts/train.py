@@ -48,6 +48,8 @@ def main(config: DictConfig):
         fn = madonna.trainers.images.baseline.main
     elif config.training.trainer == "MyOpt":
         fn = madonna.trainers.my_opt_trainer.main
+    elif config.training.trainer == "qr_fix_train":
+        fn = madonna.trainers.qr_fix_train.main
     else:
         raise ValueError(f"unknonw trainer: {config.trainer.trainer}")
 
