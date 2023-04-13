@@ -343,6 +343,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
         root=str(val_dir),
         train=False,
         transform=transforms.Compose([transforms.ToTensor(), cifar10_normalize]),
+        download=True,
     )
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
@@ -401,7 +402,7 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
         root=str(train_dir),
         train=True,
         transform=transform,  # timm_transforms,
-        # download=True,
+        download=True,
     )
 
     # Data loader
@@ -433,7 +434,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
         root=str(val_dir),
         train=False,
         transform=transforms.Compose([transforms.ToTensor(), cifar10_normalize]),
-        # download=True,
+        download=True,
     )
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:

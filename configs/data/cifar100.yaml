@@ -1,5 +1,6 @@
 dataset: cifar100
-data_dir: "/hkfs/home/dataset/datasets/CIFAR100/"
+# data_dir: "/hkfs/home/dataset/datasets/CIFAR100/"
+data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar100"
 num_workers: 6
 pin_memory: True
 local_batch_size: 256 # 512 -> OOM error

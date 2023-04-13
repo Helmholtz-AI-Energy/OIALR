@@ -1,6 +1,7 @@
 import logging
 import math
 from typing import Optional, Union
+from copy import copy, deepcopy
 
 import torch
 import torch.nn as nn
@@ -11,7 +12,9 @@ log = logging.getLogger(__name__)
 
 
 class QRFixingModel(nn.Module):
-    def __init__(self, existing_model: nn.Module, stability_frequency: int = 10):
+    def __init__(
+            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100
+        ):
         super().__init__()
         self.track_stab_lst = {}
         self.target_model = self._replace_layers(existing_model)
@@ -20,12 +23,14 @@ class QRFixingModel(nn.Module):
         self.stability_frequency = stability_frequency
         self.call_count = 0
         self.skip_stability = False
+        self.delay = delay
 
     def _replace_layers(self, module, name=None, process_group=None):
-        module_output = module
+        module_output = deepcopy(module)
+        # module_output._modules = module._modules.copy()
         # this will remove all the BatchNorm layers from the network
 
-        for name, mod in module_output.named_modules():
+        for name, mod in module.named_modules():
             # print(name, mod)
             if len(mod._modules) == 0:
                 if isinstance(mod, nn.Linear):
@@ -74,8 +79,8 @@ class QRFixingModel(nn.Module):
                     log.info(f"Fixing Q for layer: {name}")
                 elif changing == 0:
                     log.debug(f"Training normally for layer: {name}")
-                else:
-                    log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
+                # else:
+                #     log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
         all_stable = True
         for layer in self.track_stab_lst:
             if self.track_stab_lst[layer] == 0:
@@ -90,6 +95,7 @@ class QRFixingModel(nn.Module):
         if (
             self.target_model.training
             and self.call_count % self.stability_frequency == self.stability_frequency - 1
+            and self.call_count >= self.delay
         ):
             self.test_basis_stability_all_layers(module=self.target_model)
         return self.target_model(inputs)
@@ -209,7 +215,7 @@ class QRLinear(nn.Module):
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
         self.q.set_(q)
-        if csmean > 0.99:  # todo: make this a class parameter!
+        if csmean > 0.9:  # todo: make this a class parameter!
             self.r.set_(r)
             self.q_fixed = True
             return 1
@@ -402,6 +408,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
             )
             self.trans = True
         self.q_fixed = False
+        self.cossim = nn.CosineSimilarity(dim=0)
 
     def _conv_forward(
         self,
@@ -435,13 +442,13 @@ class QRConv2d(nn.modules.conv._ConvNd):
             # with torch.no_grad():
             w = (self.q @ self.r).T if self.trans else self.q @ self.r
             if self.transposed:
-                self.weight = w.reshape(
+                w = w.reshape(
                     self.in_channels,
                     self.out_channels // self.groups,
                     *self.kernel_size,
                 )
             else:
-                self.weight = w.reshape(
+                w = w.reshape(
                     self.out_channels,
                     self.in_channels // self.groups,
                     *self.kernel_size,
@@ -458,10 +465,12 @@ class QRConv2d(nn.modules.conv._ConvNd):
 
         w = self.weight.view(self.weight.shape[0], -1)
         q, r = torch.linalg.qr(w.T if self.trans else w, mode="reduced")
+        # print(f"old: {self.q.mean():.4f} {self.q.min():.4f} {self.q.max():.4f} {self.q.std():.4f}")
+        # print(f"new: {q.mean():.4f} {q.min():.4f} {q.max():.4f} {q.std():.4f}")
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
         self.q.set_(q)
-        if csmean > 0.99:  # todo: make this a class parameter!
+        if csmean > 0.95:  # todo: make this a class parameter!
             self.r.set_(r)
             self.q_fixed = True
             return 1

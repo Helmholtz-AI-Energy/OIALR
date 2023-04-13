@@ -1,6 +1,7 @@
 dataset: mnist
-#data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/mnist" # data_dir is specified in config.yaml
-data_dir: "/home/daniel/git/mnist" # data_dir is specified in config.yaml
+#data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/mnist"
+# data_dir: "/home/daniel/git/mnist"
+data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/mnist/"
 num_workers: 1
 pin_memory: True
 local_batch_size: 128 #128

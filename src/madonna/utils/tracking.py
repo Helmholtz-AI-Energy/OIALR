@@ -56,10 +56,14 @@ def restart_mlflow_server(config: DictConfig):  # noqa: E302
     tmp = os.popen("ps -Af").read()
     proccount = tmp.count(processname)
     if proccount == 0:
+        # get location of MLFlow
+        loc = subprocess.run(["/usr/bin/which", "mlflow"], stdout=subprocess.PIPE)
+        mlflow_cmd = loc.stdout.decode('utf-8')[:-1]  # slice off \n
+
         subprocess.Popen(["pkill", "-f", "gunicorn"])
         print("Starting MLFlow server")
         mlflow_server_cmd = [
-            "/usr/local/bin/mlflow",
+            f"{mlflow_cmd}",
             "server",
             "--backend-store-uri",
             f"{config.tracking.mlflow.tracking_uri}",

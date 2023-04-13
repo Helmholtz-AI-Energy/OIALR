@@ -1,5 +1,6 @@
 dataset: cifar10
-data_dir: "/hkfs/home/dataset/datasets/CIFAR10/"
+# data_dir: "/hkfs/home/dataset/datasets/CIFAR10/"
+data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar10"
 num_workers: 4
 pin_memory: True
 local_batch_size: 128

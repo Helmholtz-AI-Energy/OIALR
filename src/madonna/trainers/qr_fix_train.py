@@ -45,7 +45,7 @@ def main(config):  # noqa: C901
     model = madonna.utils.get_model(config)
     if not config.cpu_training:
         model.cuda(gpu)
-    model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
+    # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
     # print(model)
 
     criterion = madonna.utils.get_criterion(config)
@@ -168,7 +168,7 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.lr_warmup._target_.split(".")[0] in [
+    if warmup_scheduler is not None and config.training.lr_warmup._target_.split(".")[0] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:

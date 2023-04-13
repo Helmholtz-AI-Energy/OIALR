@@ -1,5 +1,6 @@
 dataset: imagenet
-data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/imagenet/" # data_dir is specified in config.yaml
+# data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/imagenet/" # data_dir is specified in config.yaml
+data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/imagenet/"
 local_batch_size: 128
 num_workers: 6
 pin_memory: True

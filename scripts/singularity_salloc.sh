@@ -27,9 +27,13 @@ if [ -z "${TIMELIMIT}" ]; then TIMELIMIT="8:00:00"; fi
 if [ -z "${GPUS_PER_NODE}" ]; then GPUS_PER_NODE="4"; fi
 if [ -z "${SLURM_NNODES}" ]; then SLURM_NNODES="1"; fi
 
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+# BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+# BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 
-export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
+export PATH="$PATH:/home/kit/scc/qv2382/.local/bin"
+
+# export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
+export EXT_DATA_PREFIX="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 export UCX_MEMTYPE_CACHE=0
@@ -39,19 +43,20 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna"
 
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
-TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
 
 export TOMOUNT=$TOMOUNT
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
 
-salloc --partition=accelerated \
-  -A hk-project-test-mlperf \
+salloc \
+  --partition=gpu_4_h100 \
   -N "${SLURM_NNODES}" \
   --time "${TIMELIMIT}" \
-  --gres gpu:"${GPUS_PER_NODE}"
+  --gres gpu:"${GPUS_PER_NODE}" #\
+  # -A hk-project-test-mlperf \
