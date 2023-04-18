@@ -2,7 +2,7 @@
 
 defaults:
   - _self_
-  - data: cifar100.yaml  # mnist.yaml
+  - data: cifar10.yaml  # mnist.yaml
   - model: general_torchvision.yaml  # cirsean4.yaml
   - tracking: mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: qr_fix_trainer.yaml
@@ -32,8 +32,9 @@ test: False
 seed: 42
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
-name: "baseline"
+name: "qr-test"
+baseline: False
 
 comm_method: "nccl"
 cpu_training: False
-skip_tracking: False
+enable_tracking: True

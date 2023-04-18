@@ -56,7 +56,7 @@ def main(config: DictConfig):
     if rank == 0:
         pprint(dict(config))
 
-    if rank == 0 and not config.skip_tracking:
+    if rank == 0 and config.enable_tracking:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
 
         # run_id -> adaptive needs to be unique, roll random int?

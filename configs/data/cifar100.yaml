@@ -3,7 +3,8 @@ dataset: cifar100
 data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar100"
 num_workers: 6
 pin_memory: True
-local_batch_size: 256 # 512 -> OOM error
-timm_transforms: True
+local_batch_size: 512 # 512 -> OOM error
+timm_transforms: False
 persistent_workers: True
 distributed_sample: True
+distributed_sample_val: True

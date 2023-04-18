@@ -3,8 +3,8 @@ dataset: cifar10
 data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar10"
 num_workers: 4
 pin_memory: True
-local_batch_size: 128
+local_batch_size: 512
 timm_transforms: False
 persistent_workers: True
-distributed_sample: False
-distributed_sample_val: False
+distributed_sample: True
+distributed_sample_val: True

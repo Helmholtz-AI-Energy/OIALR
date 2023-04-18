@@ -45,7 +45,12 @@ def main(config):  # noqa: C901
     model = madonna.utils.get_model(config)
     if not config.cpu_training:
         model.cuda(gpu)
-    # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
+
+    if not config.baseline:
+        model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
+    elif dist.is_initialized():
+        from torch.nn.parallel import DistributedDataParallel as DDP
+        model = DDP(model, device_ids=[config.rank])
     # print(model)
 
     criterion = madonna.utils.get_criterion(config)
@@ -99,6 +104,13 @@ def main(config):  # noqa: C901
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
     #
+    if warmup_scheduler is not None and config.training.lr_warmup._target_.split(".")[0] in [
+        "CosineAnnealingWarmRestarts",
+        "CosineAnnealingLR",
+    ]:
+        batch_warmup_step = True
+    else:
+        batch_warmup_step = False
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
@@ -143,6 +155,13 @@ def main(config):  # noqa: C901
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
             )
+
+        if warmup_scheduler is not None:
+            with warmup_scheduler.dampening():
+                if not batch_warmup_step:
+                    scheduler.step()
+        elif scheduler is not None and not batch_warmup_step:
+            scheduler.step()
 
 
 def train(
@@ -257,7 +276,7 @@ def train(
         top1.all_reduce()
         top5.all_reduce()
 
-    if config["rank"] == 0 and not config.skip_tracking:
+    if config["rank"] == 0 and config.enable_tracking:
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
@@ -312,7 +331,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 #     raise ValueError
 
                 # if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
-                if (i % 50 == 0 or i == num_elem) and print_on_rank:
+                if (i % 50 == 0 or i == num_elem):# and print_on_rank:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
@@ -339,6 +358,10 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
 
     # switch to evaluate mode
     model.eval()
+    # if epoch == 5:
+    #     for n, p in model.named_parameters():
+    #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+    #     raise ValueError
 
     run_validate(val_loader)
 
@@ -363,15 +386,15 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
 
     progress.display_summary(log=log, printing_rank=print_on_rank)
 
-    if config["rank"] == 0 and not config.skip_tracking:
+    if config["rank"] == 0 and config.enable_tracking:
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
         mlflow.log_metrics(
             metrics={
-                "train loss": ls,
-                "train top1": t1,
-                "train top5": t5,
+                "val loss": ls,
+                "val top1": t1,
+                "val top5": t5,
             },
             step=epoch,
         )

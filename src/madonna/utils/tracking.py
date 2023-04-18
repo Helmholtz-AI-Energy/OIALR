@@ -24,7 +24,6 @@ def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None
     verbose: bool
         if this should print the mlflow server on rank0
     """
-    print("in SETUP_MLFLOW: TESTING TO MAKRE SURE THIS ONLY RUNS ON RANK 0! REMOVE WHEN CONFIRMED")
     # if rank is not None:
     #     if dist.is_initialized() and dist.get_rank() != 0:
     #         return

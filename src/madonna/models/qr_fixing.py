@@ -6,6 +6,8 @@ from copy import copy, deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch._torch_docs import reproducibility_notes
 
 log = logging.getLogger(__name__)
@@ -13,12 +15,19 @@ log = logging.getLogger(__name__)
 
 class QRFixingModel(nn.Module):
     def __init__(
-            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100
+            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100,
         ):
         super().__init__()
         self.track_stab_lst = {}
         self.target_model = self._replace_layers(existing_model)
-        # print(self.target_model)
+        if dist.is_initialized():
+            log.info("Initializing DDP")
+            self.target_model = DDP(self.target_model, find_unused_parameters=True)
+        try:
+            if dist.get_rank() == 0:
+                print(self.target_model)
+        except RuntimeError:  # dist is not initialized
+            print(self.target_model)
         # raise ValueError("")
         self.stability_frequency = stability_frequency
         self.call_count = 0
@@ -26,71 +35,64 @@ class QRFixingModel(nn.Module):
         self.delay = delay
 
     def _replace_layers(self, module, name=None, process_group=None):
-        module_output = deepcopy(module)
-        # module_output._modules = module._modules.copy()
+        module_output = module
         # this will remove all the BatchNorm layers from the network
+        # TODO: add warning that the replaced layers are slower than CUDnn (but that is expected)
+        if isinstance(module, nn.Linear):
+            module_output = QRLinear(
+                in_features=module.in_features,
+                out_features=module.out_features,
+                bias=module.bias is not None,
+            ).to(device=module.weight.device, dtype=module.weight.dtype)
+        elif isinstance(module, nn.Conv2d):
+            module_output = QRConv2d(
+                in_channels=module.in_channels,
+                out_channels=module.out_channels,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+                bias=module.bias is not None,
+                padding_mode=module.padding_mode,
+            ).to(device=module.weight.device, dtype=module.weight.dtype)
 
-        for name, mod in module.named_modules():
-            # print(name, mod)
-            if len(mod._modules) == 0:
-                if isinstance(mod, nn.Linear):
-                    lpmod = QRLinear(
-                        in_features=mod.in_features,
-                        out_features=mod.out_features,
-                        bias=mod.bias is not None,
-                    ).to(device=mod.weight.device, dtype=mod.weight.dtype)
-                    # del mod
-                    # module_output.add_module(name, lpmod)
-                    # setattr(module_output._modules, name, lpmod)
-                    module_output._modules[name] = lpmod
-                    self.track_stab_lst[name] = 0
-                    # self.reset_layers = [module, name]
-                elif isinstance(mod, nn.Conv2d):
-                    lpmod = QRConv2d(
-                        in_channels=mod.in_channels,
-                        out_channels=mod.out_channels,
-                        kernel_size=mod.kernel_size,
-                        stride=mod.stride,
-                        padding=mod.padding,
-                        dilation=mod.dilation,
-                        groups=mod.groups,
-                        bias=mod.bias is not None,
-                        padding_mode=mod.padding_mode,
-                    ).to(device=mod.weight.device, dtype=mod.weight.dtype)
-                    # del mod
-                    # setattr(module_output._modules, name, lpmod)
-                    module_output._modules[name] = lpmod
-                    self.track_stab_lst[name] = 0
-            # if len(mod._modules) == 0 and hasattr(mod, "test_q_stability"):
-            #     self.track_stab_lst.append([name, 0])
+        for n, child in module.named_children():
+            module_output.add_module(
+                f"{n}",
+                self._replace_layers(
+                    child,
+                    name=f"{n}",
+                    process_group=process_group,
+                ),
+            )
         del module
         return module_output
+
 
     def test_basis_stability_all_layers(self, module):
         if self.skip_stability:
             return
         log.info("Testing stability")
+        all_stable = True
         for name, mod in module.named_modules():
-            # print(name, mod)
+            # print(name, mod, )
             if hasattr(mod, "test_q_stability"):
                 changing = mod.test_q_stability()
-                self.track_stab_lst[name] = changing
+                # self.track_stab_lst[name] = changing
                 if changing == 1:
-                    log.info(f"Fixing Q for layer: {name}")
+                    log.info(f"Fixing Q for layer: {name} - step count: {self.call_count}")
                 elif changing == 0:
                     log.debug(f"Training normally for layer: {name}")
+                    all_stable = False
                 # else:
                 #     log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
-        all_stable = True
-        for layer in self.track_stab_lst:
-            if self.track_stab_lst[layer] == 0:
-                all_stable = False
-                break
         if all_stable:
             self.skip_stability = True
 
     def forward(self, inputs):
         self.call_count += 1
+        # print(self.call_count)
         # print(self.call_count % self.stability_frequency, self.call_count, self.stability_frequency)
         if (
             self.target_model.training
@@ -159,22 +161,18 @@ class QRLinear(nn.Module):
 
         if out_features >= in_features:  # simplest case (no transpose)
             self.q = nn.Parameter(
-                torch.empty((out_features, in_features), requires_grad=False, **factory_kwargs),
-                requires_grad=False,
+                torch.zeros((out_features, in_features), **factory_kwargs), requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.empty((in_features, in_features), requires_grad=False, **factory_kwargs),
-                requires_grad=True,
+                torch.zeros((in_features, in_features), **factory_kwargs), requires_grad=True,
             )
             self.trans = False
         else:
             self.q = nn.Parameter(
-                torch.empty((in_features, out_features), requires_grad=False, **factory_kwargs),
-                requires_grad=False,
+                torch.zeros((in_features, out_features), **factory_kwargs), requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.empty((out_features, out_features), requires_grad=False, **factory_kwargs),
-                requires_grad=True,
+                torch.zeros((out_features, out_features), **factory_kwargs), requires_grad=True,
             )
             self.trans = True
 
@@ -186,6 +184,11 @@ class QRLinear(nn.Module):
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.q_fixed = False
+        if dist.is_initialized():
+            self.voting_buffer = nn.Parameter(
+                torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
+                )
+        # del self.weight
 
     def reset_parameters(self) -> None:
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
@@ -197,16 +200,25 @@ class QRLinear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
+    def get_weight(self):
+        if self.q_fixed:
+            w = (self.q @ torch.triu(self.r)).T if self.trans else self.q @ torch.triu(self.r)
+        else:
+            w = self.weight
+        return w
+
+    # @torch.compile()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.q_fixed:
             # with torch.no_grad():
+            # r = torch.triu(self.r)
             self.q.requires_grad = False
-            w = (self.q @ self.r).T if self.trans else self.q @ self.r
-        else:
-            w = self.weight
+            # self.q.grad = None
+        w = self.get_weight()
         return F.linear(input, w, self.bias)
 
     @torch.no_grad()
+    # @torch.compile()
     def test_q_stability(self):
         if self.q_fixed:
             # only do the switch once!
@@ -214,12 +226,42 @@ class QRLinear(nn.Module):
         q, r = torch.linalg.qr(self.weight.T if self.trans else self.weight, mode="reduced")
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
-        self.q.set_(q)
-        if csmean > 0.9:  # todo: make this a class parameter!
+
+        self.q.set_(q)  # set q here so its used in the future
+
+        vote = csmean > 0.9
+        self.q_fixed = self._q_stability_voting(vote=vote)
+
+        if self.q_fixed and dist.is_initialized():
+            sz = dist.get_world_size()
+            q /= sz        
+            r /= sz
+            q = q.contiguous()
+            r = r.contiguous()
+            wq = dist.all_reduce(q, async_op=True)  # default op is SUM
+            dist.all_reduce(r, async_op=False)
+            # TODO: should this be normalized??
+            wq.wait()
+            q = nn.functional.normalize(q, dim=1)
+        if self.q_fixed:
             self.r.set_(r)
-            self.q_fixed = True
+            self.r.requires_grad = True
             return 1
+        # continue training normally
         return 0
+    
+    @torch.no_grad()
+    def _q_stability_voting(self, vote):
+        # if more than 75% of the processes have a stable Q, then average the Qs (renormalize as well)
+        # otherwise, continue training normally
+        if not dist.is_initialized():
+            return vote
+        self.voting_buffer *= 0
+        self.voting_buffer[dist.get_rank()] = vote
+        dist.all_reduce(self.voting_buffer)  # default op is SUM, want blocking
+        if self.voting_buffer.sum() / self.voting_buffer.numel() > 0.75:
+            return True
+        return False
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -227,6 +269,37 @@ class QRLinear(nn.Module):
             self.out_features,
             self.bias is not None,
         )
+    
+    def train(self: nn.Module, mode: bool = True) -> nn.Module:
+        r"""Sets the module in training mode.
+
+        This has any effect only on certain modules. See documentations of
+        particular modules for details of their behaviors in training/evaluation
+        mode, if they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
+        etc.
+
+        Args:
+            mode (bool): whether to set training mode (``True``) or evaluation
+                         mode (``False``). Default: ``True``.
+
+        Returns:
+            Module: self
+        """
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        
+        with torch.no_grad():
+            if dist.is_initialized():
+                self.r /= dist.get_world_size()
+                dist.all_reduce(self.r)
+            # self.r.triu_()
+            # self.weight.set_(self.get_weight())
+            # self.weight.set_((self.q @ self.r).T if self.trans else self.q @ self.r)
+
+        self.training = mode
+        for module in self.children():
+            module.train(mode)
+        return self
 
 
 class QRConv2d(nn.modules.conv._ConvNd):
@@ -389,26 +462,30 @@ class QRConv2d(nn.modules.conv._ConvNd):
         wsh1 = weight_shape[1] * weight_shape[2] * weight_shape[3]  # todo: smarter? only Conv2D ...
         if wsh0 >= wsh1:  # simplest case (no transpose)
             self.q = nn.Parameter(
-                torch.empty((wsh0, wsh1), requires_grad=False, **factory_kwargs),
+                torch.zeros((wsh0, wsh1), requires_grad=False, **factory_kwargs),
                 requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.empty((wsh1, wsh1), requires_grad=False, **factory_kwargs),
+                torch.zeros((wsh1, wsh1), requires_grad=False, **factory_kwargs),
                 requires_grad=True,
             )
             self.trans = False
         else:
             self.q = nn.Parameter(
-                torch.empty((wsh1, wsh0), requires_grad=False, **factory_kwargs),
+                torch.zeros((wsh1, wsh0), requires_grad=False, **factory_kwargs),
                 requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.empty((wsh0, wsh0), requires_grad=False, **factory_kwargs),
+                torch.zeros((wsh0, wsh0), requires_grad=False, **factory_kwargs),
                 requires_grad=True,
             )
             self.trans = True
         self.q_fixed = False
         self.cossim = nn.CosineSimilarity(dim=0)
+        if dist.is_initialized():
+            self.voting_buffer = nn.Parameter(
+                torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
+                )
 
     def _conv_forward(
         self,
@@ -436,11 +513,31 @@ class QRConv2d(nn.modules.conv._ConvNd):
             self.groups,
         )
 
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
+    # @torch.no_grad()
+    # def train_normally(self) -> None:
+    #     self.q_fixed = False
+    #     self.weight *= 0
+    #     self.r.triu_()
+    #     w = (self.q @ self.r).T if self.trans else self.q @ self.r
+    #     if self.transposed:
+    #         w = w.reshape(
+    #             self.in_channels,
+    #             self.out_channels // self.groups,
+    #             *self.kernel_size,
+    #         )
+    #     else:
+    #         w = w.reshape(
+    #             self.out_channels,
+    #             self.in_channels // self.groups,
+    #             *self.kernel_size,
+    #         )
+    #     self.weight += w
+    #     self.weight *= 0.01 * (torch.randn_like(self.weight) + 1)
+
+    def get_weight(self):
         if self.q_fixed:
-            self.q.requires_grad = False
-            # with torch.no_grad():
-            w = (self.q @ self.r).T if self.trans else self.q @ self.r
+            r = torch.triu(self.r)
+            w = (self.q @ r).T if self.trans else self.q @ r
             if self.transposed:
                 w = w.reshape(
                     self.in_channels,
@@ -455,23 +552,92 @@ class QRConv2d(nn.modules.conv._ConvNd):
                 )
         else:
             w = self.weight
-        return self._conv_forward(input, w, self.bias)
+        return w
 
+    # @torch.compile()
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # print('h', self.q_fixed, self)
+        if self.q_fixed:
+            # raise ValueError("I am in the conv forward function")
+            self.q.requires_grad = False
+        w = self.get_weight()
+        return self._conv_forward(input, w, self.bias)
+    
     @torch.no_grad()
     def test_q_stability(self):
         if self.q_fixed:
             # only do the switch once!
             return 2
-
-        w = self.weight.view(self.weight.shape[0], -1)
+        w = self.get_weight()
+        w = w.view(w.shape[0], -1)
         q, r = torch.linalg.qr(w.T if self.trans else w, mode="reduced")
-        # print(f"old: {self.q.mean():.4f} {self.q.min():.4f} {self.q.max():.4f} {self.q.std():.4f}")
-        # print(f"new: {q.mean():.4f} {q.min():.4f} {q.max():.4f} {q.std():.4f}")
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
-        self.q.set_(q)
-        if csmean > 0.95:  # todo: make this a class parameter!
+
+        self.q.set_(q)  # set q here so its used in the future
+
+        vote = csmean > 0.9
+        self.q_fixed = self._q_stability_voting(vote=vote)
+        
+        if self.q_fixed and dist.is_initialized():
+            sz = dist.get_world_size()
+            q /= sz
+            r /= sz
+            q = q.contiguous()
+            r = r.contiguous()
+            wq = dist.all_reduce(q, async_op=True)  # default op is SUM
+            dist.all_reduce(r, async_op=False)
+            # TODO: should this be normalized??
+            wq.wait()
+            q = nn.functional.normalize(q, dim=1)
+        if self.q_fixed:
             self.r.set_(r)
-            self.q_fixed = True
+            self.r.requires_grad = True
             return 1
+        # continue training normally
         return 0
+    
+    @torch.no_grad()
+    def _q_stability_voting(self, vote):
+        # if more than 75% of the processes have a stable Q, then average the Qs (renormalize as well)
+        # otherwise, continue training normally
+        if not dist.is_initialized():
+            return vote
+        self.voting_buffer *= 0
+        self.voting_buffer[dist.get_rank()] = vote
+        dist.all_reduce(self.voting_buffer)  # default op is SUM, want blocking
+        
+        if self.voting_buffer.sum() / self.voting_buffer.numel() > 0.75:
+            return True
+        return False
+    
+    def train(self: nn.Module, mode: bool = True) -> nn.Module:
+        r"""Sets the module in training mode.
+
+        This has any effect only on certain modules. See documentations of
+        particular modules for details of their behaviors in training/evaluation
+        mode, if they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
+        etc.
+
+        Args:
+            mode (bool): whether to set training mode (``True``) or evaluation
+                         mode (``False``). Default: ``True``.
+
+        Returns:
+            Module: self
+        """
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+        
+        with torch.no_grad():
+            if dist.is_initialized():
+                self.r /= dist.get_world_size()
+                dist.all_reduce(self.r)
+        # with torch.no_grad():
+        #     # self.r.triu_()
+        #     self.weight.set_(self.get_weight())
+
+        self.training = mode
+        for module in self.children():
+            module.train(mode)
+        return self

@@ -6,10 +6,12 @@
 #SBATCH --gres=gpu:4
 #SBATCH --time=04:00:00
 #SBATCH --job-name=madonna-test
-#SBATCH --partition=accelerated
+#SBATCH --partition=sdil
 #SBATCH --account=hk-project-test-mlperf
 #SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
 
+
+# gpu_4_h100 accelerated
 ml purge
 
 # pmi2 cray_shasta
@@ -48,7 +50,8 @@ TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
 TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets,"
-TOMOUNT+="${SCRIPT_DIR}"
+TOMOUNT+="${SCRIPT_DIR},"
+TOMOUNT+="/home/kit/scc/qv2382/"
 
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
@@ -58,4 +61,4 @@ export CONFIG_NAME="slime_train.yaml"
 srun "${SRUN_PARAMS[@]}" singularity exec --nv \
   --bind "${TOMOUNT}" \
   "${SINGULARITY_FILE}" \
-  bash -c "CONFIG_NAME=${CONFIG_NAME} python -u ${SCRIPT_DIR}madonna/scripts/train.py"
+  bash -c "export PATH=$PATH:/home/kit/scc/qv2382/.local/bin; CONFIG_NAME=${CONFIG_NAME} python -u ${SCRIPT_DIR}madonna/scripts/train.py"
