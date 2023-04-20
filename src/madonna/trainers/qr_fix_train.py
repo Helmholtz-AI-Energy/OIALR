@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+import torch.backends.cudnn as cudnn
 from torch.utils.data import Subset
 
 # import cProfile, pstats, io
@@ -26,6 +27,14 @@ log = logging.getLogger(__name__)
 
 def main(config):  # noqa: C901
     if config.seed is not None:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        # torch.manual_seed(args.local_rank)
+        torch.set_printoptions(precision=10)
+        # if dist.is_initialized():
+        #     scale = dist.get_rank() % 4
+        # else:
+        #     scale = 0
         random.seed(int(config["seed"]))
         torch.manual_seed(int(config["seed"]))
 
@@ -50,7 +59,7 @@ def main(config):  # noqa: C901
         model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
-        model = DDP(model, device_ids=[config.rank])
+        model = DDP(model)  # , device_ids=[config.rank])
     # print(model)
 
     criterion = madonna.utils.get_criterion(config)
@@ -120,7 +129,7 @@ def main(config):  # noqa: C901
             #     metrics={"lr": optimizer.param_groups[0]["lr"]},
             #     step=epoch,
             # )
-        if dist.is_initialized() and config.data.distributed_sample:
+        if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
         train_loss, last_loss = train(
@@ -134,7 +143,6 @@ def main(config):  # noqa: C901
             scaler=scaler,
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
-            # scaler = scaler,
         )
 
         if config.rank == 0:
@@ -198,33 +206,36 @@ def train(
     model.train()
     # madonna.utils.change_batchnorm_tracking(model, tracking=False)
     end = time.time()
-    for i, (images, target) in enumerate(train_loader):
+    for i, data in enumerate(train_loader):
+        optimizer.zero_grad()
+        if hasattr(config.data, "dali") and config.data.dali:
+            images = data[0]["data"]
+            target = data[0]["label"].squeeze(-1).long()
+        else:
+            images = data[0]
+            target = data[1]
         # measure data loading time
         data_time.update(time.time() - end)
 
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-        # with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
-        #     output = model(images)
-        #     loss = criterion(output, target)
-        # scaler.scale(loss).backward()
-        # scaler.step(optimizer)
-        # scaler.update()
-        optimizer.zero_grad()
-        output = model(images)
-        loss = criterion(output, target)
-        loss.backward()
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
+            output = model(images)
+            loss = criterion(output, target)
+        
         if torch.isnan(loss):
             for n, p in model.named_parameters():
                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
+        
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()
 
         # for n, p in model.named_parameters():
         #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}, {p.requires_grad}")
-
-        optimizer.step()
-
+        # optimizer.step()
         # measure accuracy and record loss
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
         losses.update(loss.item(), images.size(0))
@@ -270,6 +281,8 @@ def train(
             # dist.barrier()
         # if i == 60:
         #     raise RuntimeError
+    if config.rank == 0:
+        log.info(f"Data Loading Time avg: {data_time.avg}")
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -298,10 +311,18 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
         with torch.no_grad():
             end = time.time()
             num_elem = len(loader) - 1
-            for i, (images, target) in enumerate(loader):
+            for i, data in enumerate(loader):
+                if hasattr(config.data, "dali") and config.data.dali:
+                    images = data[0]["data"]
+                    target = data[0]["label"].squeeze(-1).long()
+                else:
+                    images = data[0]
+                    target = data[1]
                 i = base_progress + i
                 images = images.to(device, non_blocking=True)
                 target = target.to(device, non_blocking=True)
+
+                data_time.update(time.time() - end)
 
                 # compute output
                 output = model(images)
@@ -347,6 +368,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                     #     raise ValueError
 
     batch_time = AverageMeter("Time", ":6.3f", Summary.NONE, pg=pg)
+    data_time = AverageMeter("Data", ":6.3f", Summary.NONE, pg=pg)
     losses = AverageMeter("Loss", ":.4f", Summary.AVERAGE, pg=pg)
     top1 = AverageMeter("Acc@1", ":6.2f", Summary.AVERAGE, pg=pg)
     top5 = AverageMeter("Acc@5", ":6.2f", Summary.AVERAGE, pg=pg)
@@ -398,6 +420,8 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
             },
             step=epoch,
         )
+    if config.rank == 0:
+        log.info(f"Data loading time avg: {data_time.avg}")
 
     return top1.avg, losses.avg
 

@@ -12,7 +12,7 @@ resume_from_checkpoint: null
 criterion:
   _target_: torch.nn.CrossEntropyLoss
 
-lr: 0.1
+lr: 0.3
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR  # torch.optim.lr_scheduler.CosineAnnealingLR
   _partial_: True
@@ -22,7 +22,7 @@ lr_schedule:
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
-  warmup_period: 100
+  warmup_period: 10
 
 lr_warmup_step_frequency: "epoch"
 lr_warmup_step_args: null
@@ -45,3 +45,4 @@ print_freq: 10
 qr_fixing:
   stability_frequency: 20
   delay: 100
+  qthreshold: 0.999

@@ -1,11 +1,13 @@
 dataset: imagenet
 # data_dir: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/imagenet/" # data_dir is specified in config.yaml
-data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/imagenet/"
-local_batch_size: 128
-num_workers: 6
+data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
+local_batch_size: 256
+num_workers: 8
 pin_memory: True
-timm_transforms: True
+timm_transforms: False
 persistent_workers: True
 distributed_sample: True
+prefetch_factor: 4
 distributed_sample_val: True
-train_crop_size: 176
+train_crop_size: 224
+dali: False

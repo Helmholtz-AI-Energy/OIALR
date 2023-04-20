@@ -10,15 +10,18 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch._torch_docs import reproducibility_notes
 
+from ..utils import utils
+
 log = logging.getLogger(__name__)
 
 
 class QRFixingModel(nn.Module):
     def __init__(
-            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100,
+            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100, qthreshold: float = 0.999,
         ):
         super().__init__()
         self.track_stab_lst = {}
+        self.qthreshold = qthreshold
         self.target_model = self._replace_layers(existing_model)
         if dist.is_initialized():
             log.info("Initializing DDP")
@@ -33,6 +36,7 @@ class QRFixingModel(nn.Module):
         self.call_count = 0
         self.skip_stability = False
         self.delay = delay
+        self.stable_list = []
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
@@ -43,6 +47,7 @@ class QRFixingModel(nn.Module):
                 in_features=module.in_features,
                 out_features=module.out_features,
                 bias=module.bias is not None,
+                qthreshold=self.qthreshold,
             ).to(device=module.weight.device, dtype=module.weight.dtype)
         elif isinstance(module, nn.Conv2d):
             module_output = QRConv2d(
@@ -55,6 +60,7 @@ class QRFixingModel(nn.Module):
                 groups=module.groups,
                 bias=module.bias is not None,
                 padding_mode=module.padding_mode,
+                qthreshold=self.qthreshold,
             ).to(device=module.weight.device, dtype=module.weight.dtype)
 
         for n, child in module.named_children():
@@ -69,24 +75,37 @@ class QRFixingModel(nn.Module):
         del module
         return module_output
 
-
     def test_basis_stability_all_layers(self, module):
         if self.skip_stability:
             return
-        log.info("Testing stability")
+        rank = dist.get_rank()
+        if rank == 0:
+            log.info("Testing Stability")
         all_stable = True
-        for name, mod in module.named_modules():
+        num_stable, total = 0, 0
+        for c, (name, mod) in enumerate(module.named_modules()):
             # print(name, mod, )
             if hasattr(mod, "test_q_stability"):
+                total += 1
                 changing = mod.test_q_stability()
                 # self.track_stab_lst[name] = changing
+                # if len(self.stable_list) - 1 < c:  # if the list needs to be built for the first time
+                #     self.stable_list.append(changing)
+                # else:
+                #     self.stable_list[c] = changing
+
                 if changing == 1:
-                    log.info(f"Fixing Q for layer: {name} - step count: {self.call_count}")
+                    if rank == 0:
+                        log.info(f"Fixing Q for layer: {name} - step count: {self.call_count}")
+                    num_stable += 1
                 elif changing == 0:
                     log.debug(f"Training normally for layer: {name}")
                     all_stable = False
-                # else:
-                #     log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
+                else:
+                    num_stable += 1
+                    # log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
+        if dist.get_rank() == 0:
+            log.info(f"Stablity stats: {num_stable} of {total} layers with fixed Q -> {100 * num_stable / total:.4f}%")
         if all_stable:
             self.skip_stability = True
 
@@ -152,6 +171,7 @@ class QRLinear(nn.Module):
         bias: bool = True,
         device=None,
         dtype=None,
+        qthreshold: float = 0.9
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(QRLinear, self).__init__()
@@ -187,7 +207,8 @@ class QRLinear(nn.Module):
         if dist.is_initialized():
             self.voting_buffer = nn.Parameter(
                 torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
-                )
+            )
+        self.qthreshold = qthreshold
         # del self.weight
 
     def reset_parameters(self) -> None:
@@ -229,7 +250,7 @@ class QRLinear(nn.Module):
 
         self.q.set_(q)  # set q here so its used in the future
 
-        vote = csmean > 0.9
+        vote = csmean > self.qthreshold
         self.q_fixed = self._q_stability_voting(vote=vote)
 
         if self.q_fixed and dist.is_initialized():
@@ -436,6 +457,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
         padding_mode: str = "zeros",  # TODO: refine this type
         device=None,
         dtype=None,
+        qthreshold: float = 0.999
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = nn.modules.utils._pair(kernel_size)
@@ -485,7 +507,8 @@ class QRConv2d(nn.modules.conv._ConvNd):
         if dist.is_initialized():
             self.voting_buffer = nn.Parameter(
                 torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
-                )
+            )
+        self.qthreshold = qthreshold
 
     def _conv_forward(
         self,
@@ -576,7 +599,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
 
         self.q.set_(q)  # set q here so its used in the future
 
-        vote = csmean > 0.9
+        vote = csmean > self.qthreshold
         self.q_fixed = self._q_stability_voting(vote=vote)
         
         if self.q_fixed and dist.is_initialized():

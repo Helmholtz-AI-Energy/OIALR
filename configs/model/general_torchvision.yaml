@@ -1,6 +1,6 @@
 model:
   _target_: madonna.models.get_tv_model
   pretrained: False
-  name: vit_b_16
-name: vit_b_16
+  name: resnet50
+name: resnet50
 autocast: True

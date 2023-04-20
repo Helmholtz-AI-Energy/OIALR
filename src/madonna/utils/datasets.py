@@ -12,6 +12,19 @@ import torchvision.transforms as transforms
 from omegaconf import DictConfig
 from timm.data.transforms_factory import create_transform
 
+import logging
+log = logging.getLogger(__name__)
+
+try:
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
+    from nvidia.dali.pipeline import pipeline_def
+    import nvidia.dali.types as types
+    import nvidia.dali.fn as fn
+    has_dali = True
+except ImportError:
+    has_dali = False
+    
+
 __all__ = ["get_dataset"]
 # from timm.data import
 
@@ -166,6 +179,129 @@ def get_mnist_datasets(config, group_size=None, group_rank=None, num_groups=None
     }
 
 
+if has_dali:
+    @pipeline_def
+    def create_dali_pipeline(data_dir, crop, size, shard_id, num_shards, dali_cpu=False, is_training=True):
+        images, labels = fn.readers.file(
+            file_root=data_dir,
+            shard_id=shard_id,
+            num_shards=num_shards,
+            random_shuffle=is_training,
+            pad_last_batch=True,
+            name="Reader"
+        )
+        dali_device = 'cpu' if dali_cpu else 'gpu'
+        decoder_device = 'cpu' if dali_cpu else 'mixed'
+        # ask nvJPEG to preallocate memory for the biggest sample in ImageNet for CPU and GPU to avoid reallocations in runtime
+        device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
+        host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
+        # ask HW NVJPEG to allocate memory ahead for the biggest image in the data set to avoid reallocations in runtime
+        preallocate_width_hint = 5980 if decoder_device == 'mixed' else 0
+        preallocate_height_hint = 6430 if decoder_device == 'mixed' else 0
+        if is_training:
+            images = fn.decoders.image_random_crop(
+                images,
+                device=decoder_device, output_type=types.RGB,
+                device_memory_padding=device_memory_padding,
+                host_memory_padding=host_memory_padding,
+                preallocate_width_hint=preallocate_width_hint,
+                preallocate_height_hint=preallocate_height_hint,
+                random_aspect_ratio=[0.8, 1.25],
+                random_area=[0.1, 1.0],
+                num_attempts=100
+            )
+            images = fn.resize(
+                images,
+                device=dali_device,
+                resize_x=crop,
+                resize_y=crop,
+                interp_type=types.INTERP_TRIANGULAR
+            )
+            mirror = fn.random.coin_flip(probability=0.5)
+        else:
+            images = fn.decoders.image(
+                images,
+                device=decoder_device,
+                output_type=types.RGB
+            )
+            images = fn.resize(
+                images,
+                device=dali_device,
+                size=size,
+                mode="not_smaller",
+                interp_type=types.INTERP_TRIANGULAR
+            )
+            mirror = False
+
+        images = fn.crop_mirror_normalize(
+            images.gpu(),
+            dtype=types.FLOAT,
+            output_layout="CHW",
+            crop=(crop, crop),
+            mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
+            std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
+            mirror=mirror
+        )
+        labels = labels.gpu()
+        return images, labels
+
+    def _imagenet_dali_train(config):
+        dsconfig = config["data"]
+        base_dir = dsconfig["data_dir"]
+        batch_size = dsconfig["local_batch_size"]
+        workers = dsconfig["num_workers"]
+
+        train_dir = Path(base_dir) / "train"
+
+        # TODO: figure out the timm transform stuff
+        log.info("TODO: add timm transform options")
+
+        train_crop_size = config.data.train_crop_size
+        pipe = create_dali_pipeline(batch_size=batch_size,
+                                    num_threads=workers,
+                                    device_id=config.rank % 4,
+                                    seed=12 + config.rank,
+                                    data_dir=str(train_dir),
+                                    crop=train_crop_size,
+                                    size=train_crop_size,
+                                    dali_cpu=False,
+                                    shard_id=config.rank,
+                                    num_shards=config.world_size,
+                                    is_training=True)
+        pipe.build()
+        train_loader = DALIClassificationIterator(pipe, reader_name="Reader", last_batch_policy=LastBatchPolicy.PARTIAL)
+
+        return None, train_loader, None
+
+    def _imagenet_dali_val(config):
+        dsconfig = config["data"]
+        base_dir = dsconfig["data_dir"]
+        batch_size = dsconfig["local_batch_size"]
+        workers = dsconfig["num_workers"]
+
+        val_dir = Path(base_dir) / "val"
+
+        # TODO: figure out the timm transform stuff
+        log.info("TODO: add timm transform options")
+
+        train_crop_size = config.data.train_crop_size
+        pipe = create_dali_pipeline(batch_size=batch_size,
+                                    num_threads=workers,
+                                    device_id=config.rank % 4,
+                                    seed=12 + config.rank,
+                                    data_dir=str(val_dir),
+                                    crop=train_crop_size,
+                                    size=train_crop_size,
+                                    dali_cpu=False,
+                                    shard_id=config.rank,
+                                    num_shards=config.world_size,
+                                    is_training=False)
+        pipe.build()
+        val_loader = DALIClassificationIterator(pipe, reader_name="Reader", last_batch_policy=LastBatchPolicy.PARTIAL)
+
+        return None, val_loader
+
+
 def imagenet_train_dataset_plus_loader(
     config,
     group_size=None,
@@ -176,6 +312,11 @@ def imagenet_train_dataset_plus_loader(
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
+
+    if config.data.dali and has_dali:
+        return _imagenet_dali_train(config)
+    elif config.data.dali:
+        raise ImportError("Attempt to use DALI but DALI not installed")
 
     train_dir = Path(base_dir) / "train"
 
@@ -190,21 +331,24 @@ def imagenet_train_dataset_plus_loader(
             std=(0.229, 0.224, 0.225),
         )
     else:
-        transform = (
-            transforms.Compose(
-                [
-                    transforms.RandomResizedCrop(train_crop_size),
-                    transforms.RandomHorizontalFlip(),
-                    transforms.ToTensor(),
-                    imagenet_normalize,
-                ],
-            ),
+        transform = transforms.Compose(
+            [
+                transforms.RandomResizedCrop(train_crop_size),
+                transforms.RandomHorizontalFlip(),
+                transforms.ToTensor(),
+                imagenet_normalize,
+            ],
         )
 
     train_dataset = datasets.ImageFolder(
         str(train_dir),
         transform,
     )
+    # train_dataset = datasets.ImageNet(
+    #     str(base_dir),
+    #     split="train",
+    #     transform=transform,
+    # )
 
     if dist.is_initialized() and dsconfig["distributed_sample"]:
         train_sampler = datadist.DistributedSampler(train_dataset)
@@ -219,6 +363,7 @@ def imagenet_train_dataset_plus_loader(
         pin_memory=dsconfig["num_workers"],
         sampler=train_sampler,
         persistent_workers=dsconfig["persistent_workers"],
+        prefetch_factor=dsconfig.prefetch_factor,
     )
 
     return train_dataset, train_loader, train_sampler
@@ -235,18 +380,35 @@ def imagenet_get_val_dataset_n_loader(
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
+    if config.data.dali and has_dali:
+        return _imagenet_dali_val(config)
+    elif config.data.dali:
+        raise ImportError("Attempt to use DALI but DALI not installed")
+
     val_dir = Path(base_dir) / "val"
     val_dataset = datasets.ImageFolder(
         str(val_dir),
         transforms.Compose(
             [
                 transforms.Resize(256),
-                transforms.CenterCrop(232),
+                transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 imagenet_normalize,
             ],
         ),
     )
+    # val_dataset = datasets.ImageNet(
+    #     str(base_dir),
+    #     split="val",
+    #     transform=transforms.Compose(
+    #         [
+    #             transforms.Resize(256),
+    #             transforms.CenterCrop(232),
+    #             transforms.ToTensor(),
+    #             imagenet_normalize,
+    #         ],
+    #     )
+    # )
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         val_sampler = datadist.DistributedSampler(val_dataset)
     elif dist.is_initialized() and group_size is not None and group_size > 1:
