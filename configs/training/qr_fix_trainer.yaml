@@ -14,7 +14,7 @@ criterion:
 
 lr: 0.0001
 lr_schedule:
-  _target_: torch.optim.lr_scheduler.StepLR  # torch.optim.lr_scheduler.CosineAnnealingLR
+  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR
   _partial_: True
   step_size: 300
   gamma: 0.1

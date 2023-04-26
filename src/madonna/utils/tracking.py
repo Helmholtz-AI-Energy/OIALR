@@ -57,7 +57,7 @@ def restart_mlflow_server(config: DictConfig):  # noqa: E302
     if proccount == 0:
         # get location of MLFlow
         loc = subprocess.run(["/usr/bin/which", "mlflow"], stdout=subprocess.PIPE)
-        mlflow_cmd = loc.stdout.decode('utf-8')[:-1]  # slice off \n
+        mlflow_cmd = loc.stdout.decode("utf-8")[:-1]  # slice off \n
 
         subprocess.Popen(["pkill", "-f", "gunicorn"])
         print("Starting MLFlow server")

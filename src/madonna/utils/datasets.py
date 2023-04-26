@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import torch.distributed as dist
@@ -10,16 +11,17 @@ import torch.utils.data.distributed as datadist
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from omegaconf import DictConfig
-from timm.data.transforms_factory import create_transform
 from PIL import ImageFile
-import logging
+from timm.data.transforms_factory import create_transform
+
 log = logging.getLogger(__name__)
 
 try:
-    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
-    from nvidia.dali.pipeline import pipeline_def
-    import nvidia.dali.types as types
     import nvidia.dali.fn as fn
+    import nvidia.dali.types as types
+    from nvidia.dali.pipeline import pipeline_def
+    from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
+
     has_dali = True
 except ImportError:
     has_dali = False
@@ -177,6 +179,7 @@ def get_mnist_datasets(config, group_size=None, group_rank=None, num_groups=None
 
 
 if has_dali:
+
     @pipeline_def
     def create_dali_pipeline(data_dir, crop, size, shard_id, num_shards, dali_cpu=False, is_training=True):
         images, labels = fn.readers.file(
@@ -185,48 +188,49 @@ if has_dali:
             num_shards=num_shards,
             random_shuffle=is_training,
             pad_last_batch=True,
-            name="Reader"
+            name="Reader",
         )
-        dali_device = 'cpu' if dali_cpu else 'gpu'
-        decoder_device = 'cpu' if dali_cpu else 'mixed'
+        dali_device = "cpu" if dali_cpu else "gpu"
+        decoder_device = "cpu" if dali_cpu else "mixed"
         # ask nvJPEG to preallocate memory for the biggest sample in ImageNet for CPU and GPU to avoid reallocations in runtime
-        device_memory_padding = 211025920 if decoder_device == 'mixed' else 0
-        host_memory_padding = 140544512 if decoder_device == 'mixed' else 0
+        device_memory_padding = 211025920 if decoder_device == "mixed" else 0
+        host_memory_padding = 140544512 if decoder_device == "mixed" else 0
         # ask HW NVJPEG to allocate memory ahead for the biggest image in the data set to avoid reallocations in runtime
-        preallocate_width_hint = 5980 if decoder_device == 'mixed' else 0
-        preallocate_height_hint = 6430 if decoder_device == 'mixed' else 0
+        preallocate_width_hint = 5980 if decoder_device == "mixed" else 0
+        preallocate_height_hint = 6430 if decoder_device == "mixed" else 0
         if is_training:
             images = fn.decoders.image_random_crop(
                 images,
-                device=decoder_device, output_type=types.RGB,
+                device=decoder_device,
+                output_type=types.RGB,
                 device_memory_padding=device_memory_padding,
                 host_memory_padding=host_memory_padding,
                 preallocate_width_hint=preallocate_width_hint,
                 preallocate_height_hint=preallocate_height_hint,
                 random_aspect_ratio=[0.8, 1.25],
                 random_area=[0.1, 1.0],
-                num_attempts=100
+                num_attempts=100,
             )
             images = fn.resize(
                 images,
                 device=dali_device,
                 resize_x=crop,
                 resize_y=crop,
-                interp_type=types.INTERP_TRIANGULAR
+                interp_type=types.INTERP_TRIANGULAR,
             )
             mirror = fn.random.coin_flip(probability=0.5)
         else:
             images = fn.decoders.image(
                 images,
                 device=decoder_device,
-                output_type=types.RGB
+                output_type=types.RGB,
             )
             images = fn.resize(
                 images,
                 device=dali_device,
                 size=size,
                 mode="not_smaller",
-                interp_type=types.INTERP_TRIANGULAR
+                interp_type=types.INTERP_TRIANGULAR,
             )
             mirror = False
 
@@ -237,7 +241,7 @@ if has_dali:
             crop=(crop, crop),
             mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
             std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
-            mirror=mirror
+            mirror=mirror,
         )
         labels = labels.gpu()
         return images, labels
@@ -254,19 +258,25 @@ if has_dali:
         log.info("TODO: add timm transform options")
 
         train_crop_size = config.data.train_crop_size
-        pipe = create_dali_pipeline(batch_size=batch_size,
-                                    num_threads=workers,
-                                    device_id=config.rank % 4,
-                                    seed=12 + config.rank,
-                                    data_dir=str(train_dir),
-                                    crop=train_crop_size,
-                                    size=train_crop_size,
-                                    dali_cpu=False,
-                                    shard_id=config.rank,
-                                    num_shards=config.world_size,
-                                    is_training=True)
+        pipe = create_dali_pipeline(
+            batch_size=batch_size,
+            num_threads=workers,
+            device_id=config.rank % 4,
+            seed=12 + config.rank,
+            data_dir=str(train_dir),
+            crop=train_crop_size,
+            size=train_crop_size,
+            dali_cpu=False,
+            shard_id=config.rank,
+            num_shards=config.world_size,
+            is_training=True,
+        )
         pipe.build()
-        train_loader = DALIClassificationIterator(pipe, reader_name="Reader", last_batch_policy=LastBatchPolicy.PARTIAL)
+        train_loader = DALIClassificationIterator(
+            pipe,
+            reader_name="Reader",
+            last_batch_policy=LastBatchPolicy.PARTIAL,
+        )
 
         return None, train_loader, None
 
@@ -282,19 +292,25 @@ if has_dali:
         log.info("TODO: add timm transform options")
 
         train_crop_size = config.data.train_crop_size
-        pipe = create_dali_pipeline(batch_size=batch_size,
-                                    num_threads=workers,
-                                    device_id=config.rank % 4,
-                                    seed=12 + config.rank,
-                                    data_dir=str(val_dir),
-                                    crop=train_crop_size,
-                                    size=train_crop_size,
-                                    dali_cpu=False,
-                                    shard_id=config.rank,
-                                    num_shards=config.world_size,
-                                    is_training=False)
+        pipe = create_dali_pipeline(
+            batch_size=batch_size,
+            num_threads=workers,
+            device_id=config.rank % 4,
+            seed=12 + config.rank,
+            data_dir=str(val_dir),
+            crop=train_crop_size,
+            size=train_crop_size,
+            dali_cpu=False,
+            shard_id=config.rank,
+            num_shards=config.world_size,
+            is_training=False,
+        )
         pipe.build()
-        val_loader = DALIClassificationIterator(pipe, reader_name="Reader", last_batch_policy=LastBatchPolicy.PARTIAL)
+        val_loader = DALIClassificationIterator(
+            pipe,
+            reader_name="Reader",
+            last_batch_policy=LastBatchPolicy.PARTIAL,
+        )
 
         return None, val_loader
 
@@ -447,10 +463,12 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
         if is_vit:
             trans_list.append(transforms.Resize(224))
 
-        trans_list.extend([
-            transforms.ToTensor(),
-            cifar10_normalize,
-        ])
+        trans_list.extend(
+            [
+                transforms.ToTensor(),
+                cifar10_normalize,
+            ],
+        )
         transform = transforms.Compose(trans_list)
 
     train_dataset = datasets.CIFAR10(
@@ -492,7 +510,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [transforms.ToTensor(), ]
+    trans = [transforms.ToTensor()]
     if config.model.name.startswith("vit"):
         trans.append(transforms.Resize(224))
     trans.append(cifar10_normalize)
@@ -559,10 +577,12 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
         if is_vit:
             trans_list.append(transforms.Resize(224))
 
-        trans_list.extend([
-            transforms.ToTensor(),
-            cifar10_normalize,
-        ])
+        trans_list.extend(
+            [
+                transforms.ToTensor(),
+                cifar10_normalize,
+            ],
+        )
         transform = transforms.Compose(trans_list)
 
     train_dataset = datasets.CIFAR100(
@@ -597,7 +617,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [transforms.ToTensor(), ]
+    trans = [transforms.ToTensor()]
     if config.model.name.startswith("vit"):
         trans.append(transforms.Resize(224))
     trans.append(cifar10_normalize)

@@ -1,14 +1,14 @@
 import logging
 import math
-from typing import Optional, Union
 from copy import copy, deepcopy
+from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch._torch_docs import reproducibility_notes
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from ..utils import utils
 
@@ -17,7 +17,11 @@ log = logging.getLogger(__name__)
 
 class QRFixingModel(nn.Module):
     def __init__(
-            self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100, qthreshold: float = 0.999,
+        self,
+        existing_model: nn.Module,
+        stability_frequency: int = 10,
+        delay: int = 100,
+        qthreshold: float = 0.999,
     ):
         super().__init__()
         self.track_stab_lst = {}
@@ -105,7 +109,9 @@ class QRFixingModel(nn.Module):
             #     # if rank == 0:
             #     #     log.info(f"Syncing params of {name}")
         if dist.get_rank() == 0:
-            log.info(f"Stablity stats: {num_stable} of {total} layers with fixed Q -> {100 * num_stable / total:.4f}%")
+            log.info(
+                f"Stablity stats: {num_stable} of {total} layers with fixed Q -> {100 * num_stable / total:.4f}%",
+            )
         if all_stable:
             self.skip_stability = True
 
@@ -183,7 +189,7 @@ class QRLinear(nn.Module):
         bias: bool = True,
         device=None,
         dtype=None,
-        qthreshold: float = 0.9
+        qthreshold: float = 0.9,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(QRLinear, self).__init__()
@@ -193,18 +199,22 @@ class QRLinear(nn.Module):
 
         if out_features >= in_features:  # simplest case (no transpose)
             self.q = nn.Parameter(
-                torch.zeros((out_features, in_features), **factory_kwargs), requires_grad=False,
+                torch.zeros((out_features, in_features), **factory_kwargs),
+                requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.zeros((in_features, in_features), **factory_kwargs), requires_grad=True,
+                torch.zeros((in_features, in_features), **factory_kwargs),
+                requires_grad=True,
             )
             self.trans = False
         else:
             self.q = nn.Parameter(
-                torch.zeros((in_features, out_features), **factory_kwargs), requires_grad=False,
+                torch.zeros((in_features, out_features), **factory_kwargs),
+                requires_grad=False,
             )
             self.r = nn.Parameter(
-                torch.zeros((out_features, out_features), **factory_kwargs), requires_grad=True,
+                torch.zeros((out_features, out_features), **factory_kwargs),
+                requires_grad=True,
             )
             self.trans = True
 
@@ -218,7 +228,8 @@ class QRLinear(nn.Module):
         self.q_fixed = False
         if dist.is_initialized():
             self.voting_buffer = nn.Parameter(
-                torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
+                torch.zeros(dist.get_world_size(), dtype=torch.float),
+                requires_grad=False,
             )
         self.qthreshold = qthreshold
         # del self.weight
@@ -276,10 +287,10 @@ class QRLinear(nn.Module):
         # if dist.is_initialized():
         #     self.voting_buffer.to(dtype=csmean.dtype, device=csmean.device)
         #     # rank = dist.get_rank()
-            
+
         #     csmean /= sz
         #     dist.all_reduce(csmean)  # blocking SUM
-            
+
         #     if csmean > self.qthreshold:
         #         self.q_fixed = 1
         #         q /= sz
@@ -320,7 +331,7 @@ class QRLinear(nn.Module):
             self.out_features,
             self.bias is not None,
         )
-    
+
     def train(self: nn.Module, mode: bool = True) -> nn.Module:
         r"""Sets the module in training mode.
 
@@ -338,7 +349,7 @@ class QRLinear(nn.Module):
         """
         if not isinstance(mode, bool):
             raise ValueError("training mode is expected to be boolean")
-        
+
         with torch.no_grad():
             if dist.is_initialized():
                 self.r /= dist.get_world_size()
@@ -487,7 +498,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
         padding_mode: str = "zeros",  # TODO: refine this type
         device=None,
         dtype=None,
-        qthreshold: float = 0.999
+        qthreshold: float = 0.999,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = nn.modules.utils._pair(kernel_size)
@@ -536,7 +547,8 @@ class QRConv2d(nn.modules.conv._ConvNd):
         self.cossim = nn.CosineSimilarity(dim=0)
         if dist.is_initialized():
             self.voting_buffer = nn.Parameter(
-                torch.zeros(dist.get_world_size(), dtype=torch.float), requires_grad=False
+                torch.zeros(dist.get_world_size(), dtype=torch.float),
+                requires_grad=False,
             )
         self.qthreshold = qthreshold
 
@@ -627,7 +639,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
         #     sz = dist.get_world_size()
         #     csmean /= sz
         #     dist.all_reduce(csmean)  # blocking SUM
-            
+
         #     if csmean > self.qthreshold:
         #         self.q_fixed = 1
         #         q /= sz
@@ -666,7 +678,7 @@ class QRConv2d(nn.modules.conv._ConvNd):
         """
         if not isinstance(mode, bool):
             raise ValueError("training mode is expected to be boolean")
-        
+
         with torch.no_grad():
             if dist.is_initialized():
                 self.r /= dist.get_world_size()

@@ -10,10 +10,10 @@ from pathlib import Path
 
 import mlflow.pytorch
 import torch
+import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
-import torch.backends.cudnn as cudnn
 from torch.utils.data import Subset
 
 # import cProfile, pstats, io
@@ -59,6 +59,7 @@ def main(config):  # noqa: C901
         model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
+
         model = DDP(model)  # , device_ids=[config.rank])
     # print(model)
 
@@ -225,12 +226,12 @@ def train(
         #         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
         #             output = model(images)
         #             loss = criterion(output, target)
-            
+
         #         if torch.isnan(loss):
         #             for n, p in model.named_parameters():
         #                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         #             raise ValueError("NaN loss")
-                
+
         #         scaler.scale(loss).backward()
         #         scaler.step(optimizer)
         #         scaler.update()
@@ -238,12 +239,12 @@ def train(
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
-    
+
         if torch.isnan(loss):
             for n, p in model.named_parameters():
                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
-        
+
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()

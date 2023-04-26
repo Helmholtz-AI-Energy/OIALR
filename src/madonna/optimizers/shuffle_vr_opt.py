@@ -13,15 +13,23 @@ from ..utils import comm, utils
 log = logging.getLogger(__name__)
 
 
-class MATSVDOpt(object):
+class ShuffleVhROpt(object):
     def __init__(
         self,
         model: nn.Module,
         sync_frequency: int = 100,
     ):
         """
-        based of the merge and trunkate distributed SVD algorithm from
-        https://arxiv.org/pdf/1710.02812.pdf
+        based of the idea of shuffling the R (of QR) or Vh (of SVD) to slightly shift the network in
+        the loss space to find better gradients.
+
+        TODO:
+            - [ ] determine how often to shuffle
+            - [ ] should the networks be trained together? or apart?
+            - [ ] if apart, should the networks be synchronized
+            - [ ] since the networks are now in different places, should they have have averaged
+            gradients? would be similar to blurring the network
+            - [ ] should the network be overwritten to enable fixing the Q/U and not training it
 
         Parameters
         ----------
