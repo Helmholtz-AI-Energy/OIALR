@@ -11,7 +11,7 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from omegaconf import DictConfig
 from timm.data.transforms_factory import create_transform
-
+from PIL import ImageFile
 import logging
 log = logging.getLogger(__name__)
 
@@ -23,13 +23,10 @@ try:
     has_dali = True
 except ImportError:
     has_dali = False
-    
+
 
 __all__ = ["get_dataset"]
 # from timm.data import
-
-
-from PIL import ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
