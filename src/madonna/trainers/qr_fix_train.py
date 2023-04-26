@@ -56,7 +56,8 @@ def main(config):  # noqa: C901
         model.cuda(gpu)
 
     if not config.baseline:
-        model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
+        # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
+        model = madonna.models.QROrthoFixingModel(model, **config.training.qr_fixing)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -300,8 +301,8 @@ def train(
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
 
-    if not config.baseline:
-        model.sync_models()
+    # if not config.baseline:
+    #     model.sync_models()
 
     if dist.is_initialized():
         losses.all_reduce()

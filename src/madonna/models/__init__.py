@@ -1,6 +1,7 @@
 import torchvision.models as models
 
 from . import components
+from .ortho import QROrthoFixingModel
 from .qr_fixing import QRFixingModel
 
 
