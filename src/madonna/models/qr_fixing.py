@@ -18,14 +18,14 @@ log = logging.getLogger(__name__)
 class QRFixingModel(nn.Module):
     def __init__(
             self, existing_model: nn.Module, stability_frequency: int = 10, delay: int = 100, qthreshold: float = 0.999,
-        ):
+    ):
         super().__init__()
         self.track_stab_lst = {}
         self.qthreshold = qthreshold
         self.target_model = self._replace_layers(existing_model)
-        if dist.is_initialized():
-            log.info("Initializing DDP")
-            self.target_model = DDP(self.target_model, find_unused_parameters=True)
+        # if dist.is_initialized():
+        #     log.info("Initializing DDP")
+        #     self.target_model = DDP(self.target_model, find_unused_parameters=True)
         try:
             if dist.get_rank() == 0:
                 print(self.target_model)
@@ -75,7 +75,9 @@ class QRFixingModel(nn.Module):
         del module
         return module_output
 
+    @torch.no_grad()
     def test_basis_stability_all_layers(self, module):
+        self.sync_models()
         if self.skip_stability:
             return
         rank = dist.get_rank()
@@ -84,26 +86,24 @@ class QRFixingModel(nn.Module):
         all_stable = True
         num_stable, total = 0, 0
         for c, (name, mod) in enumerate(module.named_modules()):
-            # print(name, mod, )
             if hasattr(mod, "test_q_stability"):
                 total += 1
                 changing = mod.test_q_stability()
-                # self.track_stab_lst[name] = changing
-                # if len(self.stable_list) - 1 < c:  # if the list needs to be built for the first time
-                #     self.stable_list.append(changing)
-                # else:
-                #     self.stable_list[c] = changing
 
                 if changing == 1:
                     if rank == 0:
                         log.info(f"Fixing Q for layer: {name} - step count: {self.call_count}")
                     num_stable += 1
-                elif changing == 0:
-                    log.debug(f"Training normally for layer: {name}")
+                elif changing < 1:
+                    if rank == 0:
+                        log.info(f"Training normally for layer: {name}, stabiltiy: {changing}")
                     all_stable = False
                 else:
                     num_stable += 1
                     # log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
+            # else:
+            #     # if rank == 0:
+            #     #     log.info(f"Syncing params of {name}")
         if dist.get_rank() == 0:
             log.info(f"Stablity stats: {num_stable} of {total} layers with fixed Q -> {100 * num_stable / total:.4f}%")
         if all_stable:
@@ -111,15 +111,27 @@ class QRFixingModel(nn.Module):
 
     def forward(self, inputs):
         self.call_count += 1
-        # print(self.call_count)
-        # print(self.call_count % self.stability_frequency, self.call_count, self.stability_frequency)
         if (
             self.target_model.training
             and self.call_count % self.stability_frequency == self.stability_frequency - 1
             and self.call_count >= self.delay
         ):
             self.test_basis_stability_all_layers(module=self.target_model)
+            # self.train()
         return self.target_model(inputs)
+
+    @torch.no_grad()
+    def sync_models(self):
+        if not dist.is_initialized():
+            return
+        sz = dist.get_world_size()
+        waits = []
+        for n, p in self.target_model.named_parameters():
+            if p.requires_grad:
+                p /= sz
+                waits.append(dist.all_reduce(p, async_op=True))  # sum
+        for w in waits:
+            w.wait()
 
 
 class QRLinear(nn.Module):
@@ -223,7 +235,7 @@ class QRLinear(nn.Module):
 
     def get_weight(self):
         if self.q_fixed:
-            w = (self.q @ torch.triu(self.r)).T if self.trans else self.q @ torch.triu(self.r)
+            w = (self.q @ self.r).T if self.trans else self.q @ self.r
         else:
             w = self.weight
         return w
@@ -243,46 +255,64 @@ class QRLinear(nn.Module):
     def test_q_stability(self):
         if self.q_fixed:
             # only do the switch once!
+            # TODO: testing syncing R only here. remove later?
+            # if dist.is_initialized():
+            #     sz = dist.get_world_size()
+            #     self.r /= sz
+            #     dist.all_reduce(self.r, async_op=False)
             return 2
+        # sync weights before
+        if dist.is_initialized():
+            sz = dist.get_world_size()
+            self.weight /= sz
+            dist.all_reduce(self.weight)
+
         q, r = torch.linalg.qr(self.weight.T if self.trans else self.weight, mode="reduced")
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
 
-        self.q.set_(q)  # set q here so its used in the future
+        self.q.set_(q.contiguous())  # set q here so its used in the future
 
-        vote = csmean > self.qthreshold
-        self.q_fixed = self._q_stability_voting(vote=vote)
+        # if dist.is_initialized():
+        #     self.voting_buffer.to(dtype=csmean.dtype, device=csmean.device)
+        #     # rank = dist.get_rank()
+            
+        #     csmean /= sz
+        #     dist.all_reduce(csmean)  # blocking SUM
+            
+        #     if csmean > self.qthreshold:
+        #         self.q_fixed = 1
+        #         q /= sz
+        #         r /= sz
+        #         q = q.contiguous()
+        #         r = r.contiguous()
+        #         wq = dist.all_reduce(q, async_op=True)  # default op is SUM
+        #         dist.all_reduce(r, async_op=False)
+        #         # TODO: should this be normalized??
+        #         wq.wait()
+        #         q = nn.functional.normalize(q, dim=1)
+        if csmean > self.qthreshold:
+            self.q_fixed = 1
 
-        if self.q_fixed and dist.is_initialized():
-            sz = dist.get_world_size()
-            q /= sz        
-            r /= sz
-            q = q.contiguous()
-            r = r.contiguous()
-            wq = dist.all_reduce(q, async_op=True)  # default op is SUM
-            dist.all_reduce(r, async_op=False)
-            # TODO: should this be normalized??
-            wq.wait()
-            q = nn.functional.normalize(q, dim=1)
         if self.q_fixed:
-            self.r.set_(r)
+            self.r.set_(r.contiguous())
             self.r.requires_grad = True
             return 1
         # continue training normally
-        return 0
-    
-    @torch.no_grad()
-    def _q_stability_voting(self, vote):
-        # if more than 75% of the processes have a stable Q, then average the Qs (renormalize as well)
-        # otherwise, continue training normally
-        if not dist.is_initialized():
-            return vote
-        self.voting_buffer *= 0
-        self.voting_buffer[dist.get_rank()] = vote
-        dist.all_reduce(self.voting_buffer)  # default op is SUM, want blocking
-        if self.voting_buffer.sum() / self.voting_buffer.numel() > 0.75:
-            return True
-        return False
+        return csmean
+
+    # @torch.no_grad()
+    # def _q_stability_voting(self, stabilty):
+    #     # if more than 75% of the processes have a stable Q, then average the Qs (renormalize as well)
+    #     # otherwise, continue training normally
+    #     if not dist.is_initialized():
+    #         return vote
+    #     self.voting_buffer *= 0
+    #     self.voting_buffer[dist.get_rank()] = vote
+    #     dist.all_reduce(self.voting_buffer)  # default op is SUM, want blocking
+    #     if self.voting_buffer.sum() / self.voting_buffer.numel() > 0.75:
+    #         return True
+    #     return False
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -536,30 +566,10 @@ class QRConv2d(nn.modules.conv._ConvNd):
             self.groups,
         )
 
-    # @torch.no_grad()
-    # def train_normally(self) -> None:
-    #     self.q_fixed = False
-    #     self.weight *= 0
-    #     self.r.triu_()
-    #     w = (self.q @ self.r).T if self.trans else self.q @ self.r
-    #     if self.transposed:
-    #         w = w.reshape(
-    #             self.in_channels,
-    #             self.out_channels // self.groups,
-    #             *self.kernel_size,
-    #         )
-    #     else:
-    #         w = w.reshape(
-    #             self.out_channels,
-    #             self.in_channels // self.groups,
-    #             *self.kernel_size,
-    #         )
-    #     self.weight += w
-    #     self.weight *= 0.01 * (torch.randn_like(self.weight) + 1)
-
     def get_weight(self):
         if self.q_fixed:
-            r = torch.triu(self.r)
+            # r = torch.triu(self.r)
+            r = self.r
             w = (self.q @ r).T if self.trans else self.q @ r
             if self.transposed:
                 w = w.reshape(
@@ -585,55 +595,60 @@ class QRConv2d(nn.modules.conv._ConvNd):
             self.q.requires_grad = False
         w = self.get_weight()
         return self._conv_forward(input, w, self.bias)
-    
+
     @torch.no_grad()
     def test_q_stability(self):
         if self.q_fixed:
             # only do the switch once!
+            # TODO: testing syncing R only here. remove later?
+            # if dist.is_initialized():
+            #     sz = dist.get_world_size()
+            #     self.r /= sz
+            #     dist.all_reduce(self.r, async_op=False)
             return 2
         w = self.get_weight()
+        if dist.is_initialized():
+            sz = dist.get_world_size()
+            w /= sz
+            if not w.is_contiguous():
+                w = w.contiguous()
+            dist.all_reduce(w)
+
         w = w.view(w.shape[0], -1)
         q, r = torch.linalg.qr(w.T if self.trans else w, mode="reduced")
         csim = self.cossim(q, self.q)
         csmean, _ = csim.mean(), csim.std()
 
-        self.q.set_(q)  # set q here so its used in the future
+        self.q.set_(q.contiguous())  # set q here so its used in the future
 
-        vote = csmean > self.qthreshold
-        self.q_fixed = self._q_stability_voting(vote=vote)
-        
-        if self.q_fixed and dist.is_initialized():
-            sz = dist.get_world_size()
-            q /= sz
-            r /= sz
-            q = q.contiguous()
-            r = r.contiguous()
-            wq = dist.all_reduce(q, async_op=True)  # default op is SUM
-            dist.all_reduce(r, async_op=False)
-            # TODO: should this be normalized??
-            wq.wait()
-            q = nn.functional.normalize(q, dim=1)
+        # if dist.is_initialized():
+        #     self.voting_buffer.to(dtype=csmean.dtype, device=csmean.device)
+        #     # rank = dist.get_rank()
+        #     sz = dist.get_world_size()
+        #     csmean /= sz
+        #     dist.all_reduce(csmean)  # blocking SUM
+            
+        #     if csmean > self.qthreshold:
+        #         self.q_fixed = 1
+        #         q /= sz
+        #         r /= sz
+        #         q = q.contiguous()
+        #         r = r.contiguous()
+        #         wq = dist.all_reduce(q, async_op=True)  # default op is SUM
+        #         dist.all_reduce(r, async_op=False)
+        #         # TODO: should this be normalized??
+        #         wq.wait()
+        #         q = nn.functional.normalize(q, dim=1)
+        if csmean > self.qthreshold:
+            self.q_fixed = 1
+
         if self.q_fixed:
-            self.r.set_(r)
+            self.r.set_(r.contiguous())
             self.r.requires_grad = True
             return 1
         # continue training normally
-        return 0
-    
-    @torch.no_grad()
-    def _q_stability_voting(self, vote):
-        # if more than 75% of the processes have a stable Q, then average the Qs (renormalize as well)
-        # otherwise, continue training normally
-        if not dist.is_initialized():
-            return vote
-        self.voting_buffer *= 0
-        self.voting_buffer[dist.get_rank()] = vote
-        dist.all_reduce(self.voting_buffer)  # default op is SUM, want blocking
-        
-        if self.voting_buffer.sum() / self.voting_buffer.numel() > 0.75:
-            return True
-        return False
-    
+        return csmean
+
     def train(self: nn.Module, mode: bool = True) -> nn.Module:
         r"""Sets the module in training mode.
 

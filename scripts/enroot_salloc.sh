@@ -42,16 +42,23 @@ export NCCL_COLLNET_ENABLE=0
 
 BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 
-TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
-TOMOUNT+="${EXT_DATA_PREFIX},"
-TOMOUNT+="${BASE_DIR},"
-TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
-TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+# TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+# TOMOUNT+="${EXT_DATA_PREFIX},"
+# TOMOUNT+="${BASE_DIR},"
+# TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
+# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+
+TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+TOMOUNT+='/etc/slurm/:/etc/slurm/,'
+# TOMOUNT+="${EXT_DATA_PREFIX},"
+# TOMOUNT+="${BASE_DIR},"
+# TOMOUNT+="/sys,/tmp,"
+export TOMOUNT+="/home/kit/scc/qv2382/"
 
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
+  # -A hk-project-test-mlperf \
 
-salloc --partition=accelerated \
-  -A hk-project-test-mlperf \
+salloc --partition=sdil \
   -N "${SLURM_NNODES}" \
   --time "${TIMELIMIT}" \
   --gres gpu:"${GPUS_PER_NODE}" \

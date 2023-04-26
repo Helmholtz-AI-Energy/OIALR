@@ -12,29 +12,29 @@ resume_from_checkpoint: null
 criterion:
   _target_: torch.nn.CrossEntropyLoss
 
-lr: 0.3
+lr: 0.0001
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR  # torch.optim.lr_scheduler.CosineAnnealingLR
   _partial_: True
-  step_size: 30
+  step_size: 300
   gamma: 0.1
   # T_max: 25
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
-  warmup_period: 10
+  warmup_period: 1
 
 lr_warmup_step_frequency: "epoch"
 lr_warmup_step_args: null
 
 optimizer:
-  _target_: torch.optim.SGD
-  _partial_: True
-  momentum: 0.9
-  weight_decay: 1.0e-5
-  nesterov: True
-  # _target_: torch.optim.Adam
+  # _target_: torch.optim.SGD
   # _partial_: True
+  # momentum: 0.9
+  # weight_decay: 1.0e-5
+  # nesterov: True
+  _target_: torch.optim.Adam
+  _partial_: True
   # momentum: 0.9
   # weight_decay: 1.0e-5
   # nesterov: True
@@ -45,4 +45,4 @@ print_freq: 10
 qr_fixing:
   stability_frequency: 20
   delay: 100
-  qthreshold: 0.999
+  qthreshold: 0.99

@@ -220,10 +220,25 @@ def train(
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        # if not config.baseline and dist.is_initialized():
+        #     with model.target_model.no_sync():
+        #         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
+        #             output = model(images)
+        #             loss = criterion(output, target)
+            
+        #         if torch.isnan(loss):
+        #             for n, p in model.named_parameters():
+        #                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+        #             raise ValueError("NaN loss")
+                
+        #         scaler.scale(loss).backward()
+        #         scaler.step(optimizer)
+        #         scaler.update()
+        # else:
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
-        
+    
         if torch.isnan(loss):
             for n, p in model.named_parameters():
                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
@@ -283,6 +298,9 @@ def train(
         #     raise RuntimeError
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
+
+    if not config.baseline:
+        model.sync_models()
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -352,7 +370,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 #     raise ValueError
 
                 # if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
-                if (i % 50 == 0 or i == num_elem):# and print_on_rank:
+                if (i % 50 == 0 or i == num_elem) and print_on_rank:
                     argmax = torch.argmax(output, dim=1).to(torch.float32)
                     print(
                         f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
