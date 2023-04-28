@@ -12,7 +12,7 @@ resume_from_checkpoint: null
 criterion:
   _target_: torch.nn.CrossEntropyLoss
 
-lr: 0.0001
+lr: 0.001
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR
   _partial_: True
@@ -44,5 +44,5 @@ print_freq: 10
 
 qr_fixing:
   stability_frequency: 20
-  delay: 100
+  delay: 50
   qthreshold: 0.99

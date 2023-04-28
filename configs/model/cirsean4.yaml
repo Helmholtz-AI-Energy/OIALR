@@ -10,7 +10,7 @@ model:
   output_size: 10
   activation: Tanh
   batch_norm: True
-  bias: False
+  bias: True
   activate_last_layer: False
 autocast: False
 mnist_channels: 1

@@ -37,6 +37,8 @@ class QROrthoFixingModel(nn.Module):
                 print(self.target_model)
         except RuntimeError:  # dist is not initialized
             print(self.target_model)
+
+        # self.target_model = torch.compile(self.target_model)
         # raise ValueError("")
         self.stability_frequency = stability_frequency
         self.call_count = 0
@@ -53,12 +55,13 @@ class QROrthoFixingModel(nn.Module):
                 bias=module.bias is not None,
                 qthreshold=self.qthreshold,
             ).to(device=module.weight.device, dtype=module.weight.dtype)
-            module_output = parametrizations.orthogonal(module_output, name="q")
+            # module_output = parametrizations.orthogonal(module_output, name="q")
             module_output = parametrize.register_parametrization(
                 module_output,
                 tensor_name="r",
                 parametrization=Triu(),
             )
+            # module_output = torch.compile(module_output)
         # SKIPPING CONV2D Layers!!
         for n, child in module.named_children():
             module_output.add_module(
@@ -74,7 +77,7 @@ class QROrthoFixingModel(nn.Module):
 
     @torch.no_grad()
     def test_basis_stability_all_layers(self, module):
-        self.sync_models()
+        # self.sync_models()
         if self.skip_stability:
             return
         rank = dist.get_rank()
@@ -229,11 +232,10 @@ class QROrthoLinear(nn.Module):
         # nn.init.uniform_(self.r)
         nn.init.orthogonal_(self.q)
         nn.init.kaiming_uniform_(self.r, a=math.sqrt(5))
-        self.r.triu_()
         # nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
         if self.bias is not None:
-            w = (self.qlayer @ self.r).T if self.trans else self.qlayer @ self.r
+            w = (self.q @ self.r).T if self.trans else self.q @ self.r
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(w)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
@@ -242,9 +244,12 @@ class QROrthoLinear(nn.Module):
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.q_fixed:
             # with torch.no_grad():
-            self.q.requires_grad = False
+            # self.q.requires_grad = False
+            q = self.q.detach()
             # self.q.grad = None
-        w = (self.q @ self.r).T if self.trans else self.q @ self.r
+        else:
+            q = self.q
+        w = (q @ self.r).T if self.trans else q @ self.r
         return F.linear(input, w, self.bias)
 
     @torch.no_grad()
@@ -263,7 +268,7 @@ class QROrthoLinear(nn.Module):
             self.q_prev = self.q.data.clone().detach()
             return 0
 
-        csim = self.cossim(self.q_prev, self.qlayer.weight)
+        csim = self.cossim(self.q_prev, self.q.data)
         csmean, _ = csim.mean(), csim.std()
 
         if csmean > self.qthreshold:

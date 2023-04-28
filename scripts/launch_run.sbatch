@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Slurm job configuration
-#SBATCH --nodes=2
+#SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
 #SBATCH --time=02:00:00
