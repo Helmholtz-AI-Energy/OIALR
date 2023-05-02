@@ -111,6 +111,21 @@ class QROrthoFixingModel(nn.Module):
         if all_stable:
             self.skip_stability = True
 
+    @torch.no_grad()
+    def test_basis_ortho(self, module):
+        rank = dist.get_rank()
+        if rank == 0:
+            log.info("Testing Orthogonality")
+        for c, (name, mod) in enumerate(module.named_modules()):
+            if hasattr(mod, "test_q_stability"):
+                ret = mod.q.T @ mod.q
+                isortho = torch.allclose(
+                    ret, torch.eye(ret.shape[0], dtype=ret.dtype, device=ret.device), atol=1e-5, rtol=1e-5
+                )
+
+                if rank == 0:
+                    log.info(f"Q.T @ Q == I: {name} - {isortho} -> {ret.mean():.4f} {ret.min():.4f} {ret.max():.4f} ")
+
     def forward(self, inputs):
         self.call_count += 1
         if (
@@ -120,6 +135,10 @@ class QROrthoFixingModel(nn.Module):
         ):
             self.test_basis_stability_all_layers(module=self.target_model)
             # self.train()
+        # if self.call_count % 10 == 9:
+        #     # test if the matrix is orthogonal
+        #     self.test_basis_ortho(module=self.target_model)
+
         return self.target_model(inputs)
 
     # @torch.no_grad()
@@ -217,6 +236,8 @@ class QROrthoLinear(nn.Module):
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
+        w = (self.q @ self.r).T if self.trans else self.q @ self.r
+        self.weight = w.detach()
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.q_fixed = False
@@ -243,13 +264,14 @@ class QROrthoLinear(nn.Module):
     # @torch.compile()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if self.q_fixed:
-            # with torch.no_grad():
-            # self.q.requires_grad = False
+        #     # with torch.no_grad():
+        #     # self.q.requires_grad = False
             q = self.q.detach()
-            # self.q.grad = None
+        #     # self.q.grad = None
         else:
             q = self.q
         w = (q @ self.r).T if self.trans else q @ self.r
+        self.weight = w.detach()
         return F.linear(input, w, self.bias)
 
     @torch.no_grad()
@@ -284,33 +306,36 @@ class QROrthoLinear(nn.Module):
             self.bias is not None,
         )
 
-    # def train(self: nn.Module, mode: bool = True) -> nn.Module:
-    #     r"""Sets the module in training mode.
-    #
-    #     This has any effect only on certain modules. See documentations of
-    #     particular modules for details of their behaviors in training/evaluation
-    #     mode, if they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
-    #     etc.
-    #
-    #     Args:
-    #         mode (bool): whether to set training mode (``True``) or evaluation
-    #                      mode (``False``). Default: ``True``.
-    #
-    #     Returns:
-    #         Module: self
-    #     """
-    #     if not isinstance(mode, bool):
-    #         raise ValueError("training mode is expected to be boolean")
-    #
-    #     # with torch.no_grad():
-    #     #     if dist.is_initialized():
-    #     #         self.r /= dist.get_world_size()
-    #     #         dist.all_reduce(self.r)
-    #     #     # self.r.triu_()
-    #     #     # self.weight.set_(self.get_weight())
-    #     #     # self.weight.set_((self.q @ self.r).T if self.trans else self.q @ self.r)
-    #
-    #     self.training = mode
-    #     for module in self.children():
-    #         module.train(mode)
-    #     return self
+    def train(self: nn.Module, mode: bool = True) -> nn.Module:
+        r"""Sets the module in training mode.
+    
+        This has any effect only on certain modules. See documentations of
+        particular modules for details of their behaviors in training/evaluation
+        mode, if they are affected, e.g. :class:`Dropout`, :class:`BatchNorm`,
+        etc.
+    
+        Args:
+            mode (bool): whether to set training mode (``True``) or evaluation
+                         mode (``False``). Default: ``True``.
+    
+        Returns:
+            Module: self
+        """
+        if not isinstance(mode, bool):
+            raise ValueError("training mode is expected to be boolean")
+    
+        # with torch.no_grad():
+        #     if dist.is_initialized():
+        #         self.r /= dist.get_world_size()
+        #         dist.all_reduce(self.r)
+        #     # self.r.triu_()
+        #     # self.weight.set_(self.get_weight())
+        #     # self.weight.set_((self.q @ self.r).T if self.trans else self.q @ self.r)
+        with torch.no_grad():
+            w = (self.q @ self.r).T if self.trans else self.q @ self.r
+            self.weight = w.detach()
+
+        self.training = mode
+        for module in self.children():
+            module.train(mode)
+        return self
