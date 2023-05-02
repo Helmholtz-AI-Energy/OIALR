@@ -70,7 +70,7 @@ TOMOUNT+="/home/kit/scc/qv2382/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 #echo "Loading data from ${DATA_PREFIX}"
 #echo "${SCRIPT_DIR}"
-export CONFIG_NAME="qr_fix_train.yaml"
+export CONFIG_NAME="ortho_train.yaml"
 PATH=$PATH:/home/kit/scc/qv2382/.local/bin srun "${SRUN_PARAMS[@]}" singularity exec --nv \
   --bind "${TOMOUNT}" \
   "${SINGULARITY_FILE}" \

@@ -60,6 +60,6 @@ export NCCL_COLLNET_ENABLE=0
 
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 # export CUDA_VISIBLE_DEVICES="0,1,2,3"
-export CONFIG_NAME="qr_fix_train.yaml"
+export CONFIG_NAME="ortho_train.yaml"
 
 srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}scripts/train.py"
