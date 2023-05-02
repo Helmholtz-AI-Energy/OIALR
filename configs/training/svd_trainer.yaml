@@ -47,6 +47,10 @@ fixing_method:
   _partial_: True
   stability_frequency: 20
   delay: 50
-  qthreshold: 0.99
-  triu_fixed: True
-  ortho_q_fixed: False
+  uvthreshold: 0.99
+  sigma_cutoff_fraction: 0.1
+  sync_usv: False
+  train_full_first: False
+  full_rank_sigma: False
+#  triu_fixed: True
+#  ortho_q_fixed: False

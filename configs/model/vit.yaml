@@ -1,0 +1,71 @@
+# see: https://github.com/pytorch/vision/blob/main/torchvision/models/vision_transformer.py
+# for more details + default values
+
+model: # vit_b_16
+  _target_: torchvision.models.VisionTransformer
+  image_size: null, # get this from datasets!! see train_crop_size in dataset!
+  patch_size: 8, # default: 16
+  num_layers: 12, # default: 12
+  num_heads: 12, # default: 12
+  hidden_dim: 768, # default: 768
+  mlp_dim: 3072, # default: 3072
+#  dropout: 0.0,
+#  attention_dropout: 0.0,
+#  num_classes: 1000,
+name: vit_b_16
+autocast: True
+#model:  # vit_b_32
+#  _target_: torchvision.models.VisionTransformer
+#  image_size: null,  # get this from datasets!! see train_crop_size in dataset!
+#  patch_size: ,  # default: 32
+#  num_layers: ,  # default: 12
+#  num_heads: ,  # default: 12
+#  hidden_dim: ,  # default: 768
+#  mlp_dim: ,  # default: 3078
+#  dropout: 0.0,
+#  attention_dropout: 0.0,
+#  num_classes: 1000,
+#name: vit_b_32
+#autocast: True
+
+#model:  # vit_l_16
+#  _target_: torchvision.models.VisionTransformer
+#  image_size: null,  # get this from datasets!! see train_crop_size in dataset!
+#  patch_size: ,  # default: 16
+#  num_layers: ,  # default: 24
+#  num_heads: ,  # default: 16
+#  hidden_dim: ,  # default: 1024
+#  mlp_dim: ,  # default: 4096
+#  dropout: 0.0,
+#  attention_dropout: 0.0,
+#  num_classes: 1000,
+#name: vit_b_32
+#autocast: True
+
+#model:  # vit_l_32
+#  _target_: torchvision.models.VisionTransformer
+#  image_size: null,  # get this from datasets!! see train_crop_size in dataset!
+#  patch_size: ,  # default: 32
+#  num_layers: ,  # default: 24
+#  num_heads: ,  # default: 16
+#  hidden_dim: ,  # default: 1024
+#  mlp_dim: ,  # default: 4096
+#  dropout: 0.0,
+#  attention_dropout: 0.0,
+#  num_classes: 1000,
+#name: vit_b_32
+#autocast: True
+
+#model:  # vit_h_14
+#  _target_: torchvision.models.VisionTransformer
+#  image_size: null,  # get this from datasets!! see train_crop_size in dataset!
+#  patch_size: ,  # default: 14
+#  num_layers: ,  # default: 32
+#  num_heads: ,  # default: 16
+#  hidden_dim: ,  # default: 1280
+#  mlp_dim: ,  # default: 5120
+#  dropout: 0.0,
+#  attention_dropout: 0.0,
+#  num_classes: 1000,
+#name: vit_b_32
+#autocast: True

@@ -16,21 +16,24 @@ from ..utils import utils
 log = logging.getLogger(__name__)
 
 
-class QROrthoFixingModel(nn.Module):
+class SVDFixingModel(nn.Module):
     def __init__(
         self,
         existing_model: nn.Module,
         stability_frequency: int = 10,
         delay: int = 100,
-        qthreshold: float = 0.999,
-        triu_fixed: bool = True,
-        ortho_q_enforced: bool = False,
+        uvthreshold: float = 0.999,
+        sigma_cutoff_fraction: float = 0.1,
+        sync_usv: bool = False,
+        train_full_first: bool = False,
+        full_rank_sigma: bool = False,
     ):
         super().__init__()
-        self.track_stab_lst = {}
-        self.qthreshold = qthreshold
-        self.triu_fixed = triu_fixed
-        self.ortho_q_enforced = ortho_q_enforced
+        self.uvthreshold = uvthreshold
+        self.sigma_cutoff_fraction = sigma_cutoff_fraction
+        self.sync_usv = sync_usv
+        self.train_full_first = train_full_first
+        self.full_rank_sigma = full_rank_sigma
         self.target_model = self._replace_layers(existing_model)
         if dist.is_initialized():
             if dist.get_rank() == 0:
@@ -53,20 +56,18 @@ class QROrthoFixingModel(nn.Module):
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
         if isinstance(module, nn.Linear):
-            module_output = QROrthoLinear(
+            module_output = SVDLinear(
                 in_features=module.in_features,
                 out_features=module.out_features,
                 bias=module.bias is not None,
-                qthreshold=self.qthreshold,
+                uvthreshold=self.uvthreshold,
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                sync_usv=self.sync_usv,
+                train_full_first=self.train_full_first,
+                full_rank_sigma=self.full_rank_sigma,
             ).to(device=module.weight.device, dtype=module.weight.dtype)
-            if self.ortho_q_enforced:
-                module_output = parametrizations.orthogonal(module_output, name="q")
-            if self.triu_fixed:
-                module_output = parametrize.register_parametrization(
-                    module_output,
-                    tensor_name="r",
-                    parametrization=Triu(),
-                )
+            # module_output = parametrizations.orthogonal(module_output, name="u")
+            # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
             # module_output = torch.compile(module_output)
         # SKIPPING CONV2D Layers!!
         for n, child in module.named_children():
@@ -94,48 +95,22 @@ class QROrthoFixingModel(nn.Module):
         for c, (name, mod) in enumerate(module.named_modules()):
             if hasattr(mod, "test_q_stability"):
                 total += 1
-                changing = mod.test_q_stability()
+                uchanging, vhchaning, k = mod.test_stability()
 
-                if changing == 1:
-                    if rank == 0:
-                        log.info(f"Fixing Q for layer: {name} - step count: {self.call_count}")
+                if rank == 0:
+                    log.info(f"Layer: {name}: U: {uchanging}, Vh: {vhchaning}, k: {k}")
+                if uchanging >= 1 and vhchaning >= 1:
                     num_stable += 1
-                elif changing < 1:
-                    if rank == 0:
-                        log.info(f"Training normally for layer: {name}, stabiltiy: {changing}")
-                    all_stable = False
                 else:
-                    num_stable += 1
-                    # log.debug(f"Q was fixed previously for layer: {name}")  # TODO: remove!
-            # else:
-            #     # if rank == 0:
-            #     #     log.info(f"Syncing params of {name}")
+                    all_stable = False
+
         if dist.get_rank() == 0:
             log.info(
-                f"Stablity stats: {num_stable} of {total} layers with fixed Q -> {100 * num_stable / total:.4f}%",
+                f"Stablity stats: {num_stable} of {total} layers with fixed U + Vh -> "
+                f"{100 * num_stable / total:.4f}%",
             )
         if all_stable:
             self.skip_stability = True
-
-    @torch.no_grad()
-    def test_basis_ortho(self, module):
-        rank = dist.get_rank()
-        if rank == 0:
-            log.info("Testing Orthogonality")
-        for c, (name, mod) in enumerate(module.named_modules()):
-            if hasattr(mod, "test_q_stability"):
-                ret = mod.q.T @ mod.q
-                isortho = torch.allclose(
-                    ret,
-                    torch.eye(ret.shape[0], dtype=ret.dtype, device=ret.device),
-                    atol=1e-5,
-                    rtol=1e-5,
-                )
-
-                if rank == 0:
-                    log.info(
-                        f"Q.T @ Q == I: {name} - {isortho} -> {ret.mean():.4f} {ret.min():.4f} {ret.max():.4f} ",
-                    )
 
     def forward(self, inputs):
         self.call_count += 1
@@ -146,24 +121,23 @@ class QROrthoFixingModel(nn.Module):
         ):
             self.test_basis_stability_all_layers(module=self.target_model)
             # self.train()
-        # if self.call_count % 10 == 9:
-        #     # test if the matrix is orthogonal
-        #     self.test_basis_ortho(module=self.target_model)
-
         return self.target_model(inputs)
 
-    # @torch.no_grad()
-    # def sync_models(self):
-    #     if not dist.is_initialized():
-    #         return
-    #     sz = dist.get_world_size()
-    #     waits = []
-    #     for n, p in self.target_model.named_parameters():
-    #         if p.requires_grad:
-    #             p /= sz
-    #             waits.append(dist.all_reduce(p, async_op=True))  # sum
-    #     for w in waits:
-    #         w.wait()
+    @torch.no_grad()
+    def sync_models(self):
+        if not dist.is_initialized():
+            return
+        rank = dist.get_rank()
+        if rank == 0:
+            log.info("Syncing layer.weight on all layers")
+        sz = dist.get_world_size()
+        waits = []
+        for n, p in self.target_model.named_parameters():
+            if p.requires_grad:
+                p /= sz
+                waits.append(dist.all_reduce(p, async_op=True))  # sum
+        for w in waits:
+            w.wait()
 
 
 class Triu(nn.Module):
@@ -172,7 +146,7 @@ class Triu(nn.Module):
         return a
 
 
-class QROrthoLinear(nn.Module):
+class SVDLinear(nn.Module):
     r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
 
     This module supports :ref:`TensorFloat32<tf32_on_ampere>`.
@@ -221,40 +195,65 @@ class QROrthoLinear(nn.Module):
         bias: bool = True,
         device=None,
         dtype=None,
-        qthreshold: float = 0.9,
+        uvthreshold: float = 0.9,
+        sigma_cutoff_fraction: float = 0.1,
+        sync_usv: bool = False,
+        train_full_first: bool = False,
+        full_rank_sigma: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
-        super(QROrthoLinear, self).__init__()
+        super(SVDLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        # self.weight = nn.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
-        # IDEA: replace Q and R with normal torch layers
-        #           y = xA.T + b
-        #           y = x * (Q * R).T + b
-        #           y = x * R * Q + b
-        # if most things are TS, should I even worry about the SF case?
+        self.full_rank_sigma = full_rank_sigma
+
+        self.weight = torch.empty((out_features, in_features), **factory_kwargs)
         if out_features >= in_features:  # simplest case (no transpose)
-            self.q = nn.Parameter(torch.zeros((out_features, in_features), **factory_kwargs))
-            self.r = nn.Parameter(torch.zeros((in_features, in_features), **factory_kwargs))
+            self.u = torch.zeros((out_features, in_features), **factory_kwargs)
+            if full_rank_sigma:
+                self.s = torch.zeros((in_features, in_features), **factory_kwargs)
+            else:
+                self.s = torch.zeros(in_features, **factory_kwargs)
+            self.vh = torch.zeros((in_features, in_features), **factory_kwargs)
             self.trans = False
         else:
-            self.q = nn.Parameter(torch.zeros((in_features, out_features), **factory_kwargs))
-            self.r = nn.Parameter(torch.zeros((out_features, out_features), **factory_kwargs))
+            self.u = torch.zeros((in_features, out_features), **factory_kwargs)
+            if full_rank_sigma:
+                self.s = torch.zeros((out_features, out_features), **factory_kwargs)
+            else:
+                self.s = torch.zeros(out_features, **factory_kwargs)
+            self.vh = torch.zeros((out_features, out_features), **factory_kwargs)
             self.trans = True
+
+        # if train_full_first:
+        #     self.weight = nn.Parameter(self.weight)
+        #     self.s = nn.Parameter(self.s)
+        #     self.vh = nn.Parameter(self.vh)
+        # else:
+        # TODO: set up training without full rank weights
+        self.weight = nn.Parameter(self.weight)
+        self.u = nn.Parameter(self.u)
+        self.s = nn.Parameter(self.s)
+        self.vh = nn.Parameter(self.vh)
 
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
             self.register_parameter("bias", None)
         self.reset_parameters()
-        w = (self.q @ self.r).T if self.trans else self.q @ self.r
-        self.weight = w.detach()
 
         self.cossim = nn.CosineSimilarity(dim=0)
-        self.q_fixed = False
-        self.q_prev = None
-        self.qthreshold = qthreshold
-        # del self.weight
+        self.sigma_cutoff_fraction = sigma_cutoff_fraction
+        self.sync_usv = sync_usv
+        self.u_fixed = False
+        self.u_prev = None
+        self.vh_fixed = False
+        self.vh_prev = None
+        self.k = min(in_features, out_features)
+        self.uthreshold = uvthreshold
+        self.vhthreshold = uvthreshold
+        # if not train_full_first:
+        #     del self.weight
 
     def reset_parameters(self) -> None:
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
@@ -262,53 +261,82 @@ class QROrthoLinear(nn.Module):
         # https://github.com/pytorch/pytorch/issues/57109
 
         # nn.init.uniform_(self.r)
-        nn.init.orthogonal_(self.q)
-        nn.init.kaiming_uniform_(self.r, a=math.sqrt(5))
-        # nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        nn.init.orthogonal_(self.u)
+        nn.init.orthogonal_(self.vh.T)
+        nn.init.kaiming_uniform_(self.s, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
         if self.bias is not None:
-            w = (self.q @ self.r).T if self.trans else self.q @ self.r
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(w)
+            # w = (self.q @ self.r).T if self.trans else self.q @ self.r
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
+    def get_weight(self):
+        if not (self.u_fixed and self.vh_fixed):  # if both are not fixed -> normal training
+            return self.weight
+        # detach sets 'requires grad' to False
+        u = self.u.detach() if self.u_fixed else self.u
+        vh = self.vh.detach() if self.vh_fixed else self.vh
+        if not self.full_rank_sigma:
+            w = u[:, self.k] @ torch.diag(self.s[: self.k]) @ vh[: self.k]
+        else:
+            w = u[:, self.k] @ self.s[: self.k, : self.k] @ vh[: self.k]
+        return w.T if self.trans else w
+
     # @torch.compile()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
-        if self.q_fixed:
-            #     # with torch.no_grad():
-            #     # self.q.requires_grad = False
-            q = self.q.detach()
-        #     # self.q.grad = None
-        else:
-            q = self.q
-        w = (q @ self.r).T if self.trans else q @ self.r
-        self.weight = w.detach()
+        w = self.get_weight()
         return F.linear(input, w, self.bias)
 
     @torch.no_grad()
     # @torch.compile()
-    def test_q_stability(self):
-        if self.q_fixed:
-            # only do the switch once!
-            # TODO: testing syncing R only here. remove later?
-            # if dist.is_initialized():
-            #     sz = dist.get_world_size()
-            #     self.r /= sz
-            #     dist.all_reduce(self.r, async_op=False)
-            return 2
+    def test_stability(self):
+        # TODO: should we make sure to have S be the same across processes?
+        rank = dist.get_rank() if dist.is_initialized() else 0
 
-        if self.q_prev is None:
-            self.q_prev = self.q.data.clone().detach()
-            return 0
+        if self.u_fixed and self.vh_fixed:
+            return 2, 2, self.k
 
-        csim = self.cossim(self.q_prev, self.q.data)
-        csmean, _ = csim.mean(), csim.std()
+        # TODO: should the weights be synced before this?
+        u, s, vh = torch.linalg.svd(self.weight, full_matrices=False)
 
-        if csmean > self.qthreshold:
-            self.q_fixed = 1
+        if not self.u_fixed:
+            # can test columns here since U has orthogonal columns
+            if self.u_prev is None:
+                self.u_prev = u.clone().detach()
+                retu = 0
+            else:
+                ucsim = self.cossim(self.u_prev, u)
+                ucsmean, _ = ucsim.mean(), ucsim.std()
+                retu = ucsmean
+                self.u_prev = u.clone().detach()
+                if ucsmean > self.uthreshold:
+                    self.u_fixed = 1
+        else:
+            retu = 1
+        if not self.vh_fixed:
+            # need to test on transpose here since ROWS of V.H are orthogonal
+            if self.vh_prev is None:
+                self.vh_prev = vh.clone().detach()
+                retvh = 0
+            else:
+                vhcsim = self.cossim(self.vh_prev.T, vh.T)
+                vhcsmean, _ = vhcsim.mean(), vhcsim.std()
+                retvh = vhcsmean
+                self.vh_prev = vh.clone().detach()
+                if vhcsmean > self.vhthreshold:
+                    self.vh_fixed = 1
+        else:
+            retvh = 1
 
-        # continue training normally
-        return csmean
+        # once everything is fixed, adjust K
+        if self.u_fixed and self.vh_fixed:
+            cutoff = s[0] * self.sigma_cutoff_fraction
+            self.k = torch.nonzero(s < cutoff)[0].item()
+            if rank == 0:
+                log.info("Fixing K in linear layer (name unknown)")
+        return retu, retvh, self.k
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -335,16 +363,20 @@ class QROrthoLinear(nn.Module):
         if not isinstance(mode, bool):
             raise ValueError("training mode is expected to be boolean")
 
-        # with torch.no_grad():
-        #     if dist.is_initialized():
-        #         self.r /= dist.get_world_size()
-        #         dist.all_reduce(self.r)
-        #     # self.r.triu_()
-        #     # self.weight.set_(self.get_weight())
-        #     # self.weight.set_((self.q @ self.r).T if self.trans else self.q @ self.r)
-        with torch.no_grad():
-            w = (self.q @ self.r).T if self.trans else self.q @ self.r
-            self.weight = w.detach()
+        if dist.is_initialized() and self.sync_usv and (self.u_fixed or self.vh_fixed):
+            with torch.no_grad():
+                self.u /= dist.get_world_size()
+                uwait = dist.all_reduce(self.u, async_op=True)
+                self.vh /= dist.get_world_size()
+                vhwait = dist.all_reduce(self.vh, async_op=True)
+                self.s /= dist.get_world_size()
+                swait = dist.all_reduce(self.s, async_op=True)
+                uwait.wait()
+                vhwait.wait()
+                swait.wait()
+            # self.r.triu_()
+            # self.weight.set_(self.get_weight())
+            # self.weight.set_((self.q @ self.r).T if self.trans else self.q @ self.r)
 
         self.training = mode
         for module in self.children():

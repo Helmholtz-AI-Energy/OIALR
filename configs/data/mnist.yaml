@@ -8,3 +8,4 @@ local_batch_size: 128 #128
 resize: False
 distributed_sample: True
 distributed_sample_val: True
+train_crop_size: 28

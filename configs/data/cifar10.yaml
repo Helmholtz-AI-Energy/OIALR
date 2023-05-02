@@ -8,3 +8,4 @@ timm_transforms: False
 persistent_workers: False
 distributed_sample: True
 distributed_sample_val: True
+train_crop_size: 32

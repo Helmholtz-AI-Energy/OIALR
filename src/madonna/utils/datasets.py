@@ -334,8 +334,6 @@ def imagenet_train_dataset_plus_loader(
     train_dir = Path(base_dir) / "train"
 
     train_crop_size = config.data.train_crop_size
-    if config.model.name.startswith("vit"):
-        train_crop_size = 224
 
     if dsconfig["timm_transforms"]:
         transform = create_transform(
@@ -441,14 +439,11 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
     workers = dsconfig["num_workers"]
 
     train_dir = Path(base_dir) / "train"
-
-    is_vit = False
-    if config.model.name.startswith("vit"):
-        is_vit = True
+    train_crop_size = config.data.train_crop_size
 
     if dsconfig["timm_transforms"]:
         transform = create_transform(
-            32 if not is_vit else 224,
+            train_crop_size,
             is_training=True,
             auto_augment="rand-m9-mstd0.5",
             mean=(0.4914, 0.4822, 0.4465),
@@ -458,16 +453,12 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
         trans_list = [
             transforms.Pad(4),
             transforms.RandomHorizontalFlip(),
-            transforms.RandomCrop(32),
+            transforms.RandomCrop(train_crop_size),
+            transforms.ToTensor(),
+            cifar10_normalize,
         ]
-        if is_vit:
-            trans_list.append(transforms.Resize(224))
-
         trans_list.extend(
-            [
-                transforms.ToTensor(),
-                cifar10_normalize,
-            ],
+            [],
         )
         transform = transforms.Compose(trans_list)
 
@@ -510,10 +501,11 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [transforms.ToTensor()]
-    if config.model.name.startswith("vit"):
-        trans.append(transforms.Resize(224))
-    trans.append(cifar10_normalize)
+    trans = [
+        transforms.ToTensor(),
+        transforms.Resize(config.data.train_crop_size),
+        cifar10_normalize,
+    ]
     trans = transforms.Compose(trans)
 
     test_dataset = datasets.CIFAR10(
@@ -556,13 +548,9 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
 
     train_dir = Path(base_dir) / "train"
 
-    is_vit = False
-    if config.model.name.startswith("vit"):
-        is_vit = True
-
     if dsconfig["timm_transforms"]:
         transform = create_transform(
-            32 if not is_vit else 224,
+            config.data.train_crop_size,
             is_training=True,
             auto_augment="rand-m9-mstd0.5",
             mean=(0.4914, 0.4822, 0.4465),
@@ -573,16 +561,10 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
             transforms.Pad(4),
             transforms.RandomHorizontalFlip(),
             transforms.RandomCrop(32),
+            transforms.Resize(config.data.train_crop_size),
+            transforms.ToTensor(),
+            cifar10_normalize,
         ]
-        if is_vit:
-            trans_list.append(transforms.Resize(224))
-
-        trans_list.extend(
-            [
-                transforms.ToTensor(),
-                cifar10_normalize,
-            ],
-        )
         transform = transforms.Compose(trans_list)
 
     train_dataset = datasets.CIFAR100(
@@ -617,9 +599,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
     workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [transforms.ToTensor()]
-    if config.model.name.startswith("vit"):
-        trans.append(transforms.Resize(224))
+    trans = [transforms.ToTensor(), transforms.Resize(config.data.train_crop_size)]
     trans.append(cifar10_normalize)
     trans = transforms.Compose(trans)
 
@@ -664,7 +644,7 @@ def mnist_train_data(config, group_size=None, group_rank=None, num_groups=None):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Resize(size=32),
+                transforms.Resize(config.data.train_crop_size),
                 transforms.Grayscale(channels),
                 mnist_normalize,
             ],
@@ -699,7 +679,7 @@ def mnist_val_data(config, group_size=None, group_rank=None, num_groups=None):
         transform = transforms.Compose(
             [
                 transforms.ToTensor(),
-                transforms.Resize(size=32),
+                transforms.Resize(config.data.train_crop_size),
                 transforms.Grayscale(channels),
                 mnist_normalize,
             ],

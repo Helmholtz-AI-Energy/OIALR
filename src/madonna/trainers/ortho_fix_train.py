@@ -8,6 +8,7 @@ import time
 from enum import Enum
 from pathlib import Path
 
+import hydra
 import mlflow.pytorch
 import torch
 import torch.backends.cudnn as cudnn
@@ -57,7 +58,9 @@ def main(config):  # noqa: C901
 
     if not config.baseline:
         # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
-        model = madonna.models.QROrthoFixingModel(model, **config.training.qr_fixing)
+        model_hold = hydra.utils.instantiate(config.training.fixing_method)
+        model = model_hold(model).to(device)
+        # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
 
