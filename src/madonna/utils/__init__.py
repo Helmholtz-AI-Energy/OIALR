@@ -12,7 +12,7 @@ def get_model(config):
     if config.model is None:
         raise ValueError("model must be specified")
     if config.model.name.startswith("vit"):
-        config.model.image_size = config.data.train_crop_size
+        config.model.model.image_size = config.data.train_crop_size
     model: nn.Module = hydra.utils.instantiate(config.model.model)
     # send model to devices
     if torch.cuda.is_available() and not config.cpu_training:

@@ -51,10 +51,11 @@ def main(config):  # noqa: C901
             gpu = 0
         torch.cuda.set_device(gpu)
         device = torch.device(f"cuda:{gpu}")
-
+    # print('before get model')
     model = madonna.utils.get_model(config)
     if not config.cpu_training:
         model.cuda(gpu)
+    # print('before model wrapping')
 
     if not config.baseline:
         # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
@@ -63,9 +64,9 @@ def main(config):  # noqa: C901
         # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
-
         model = DDP(model)  # , device_ids=[config.rank])
-    # print(model)
+        if dist.get_rank() == 0:
+            print(model)
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
@@ -118,22 +119,24 @@ def main(config):  # noqa: C901
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
     #
-    if warmup_scheduler is not None and config.training.lr_warmup._target_.split(".")[0] in [
+    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[0] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
         batch_warmup_step = True
     else:
         batch_warmup_step = False
+    # print(config.training.lr_warmup._target_.split("."), batch_warmup_step)
+
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
             log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            # mlflow.log_metrics(
-            #     metrics={"lr": optimizer.param_groups[0]["lr"]},
-            #     step=epoch,
-            # )
+            mlflow.log_metrics(
+                metrics={"lr": optimizer.param_groups[0]["lr"]},
+                step=epoch,
+            )
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -149,6 +152,11 @@ def main(config):  # noqa: C901
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
         )
+
+        # if model.skip_stability:
+        # for n, p in model.named_parameters():
+        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+        # model.sync_models()
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
@@ -168,6 +176,12 @@ def main(config):  # noqa: C901
             log.info(
                 f"Average val loss across process space: {val_loss} " f"-> diff: {train_loss - val_loss}",
             )
+
+        # log the percentage of params in use
+        if config.rank == 0 and config.enable_tracking and not config.baseline:
+            if hasattr(model, "get_perc_params_all_layers"):
+                perc, _num_active, _num_normal = model.get_perc_params_all_layers(module=model.ddp_model)
+                mlflow.log_metric("perc_parmas", perc, step=epoch)
 
         if warmup_scheduler is not None:
             with warmup_scheduler.dampening():
@@ -200,7 +214,7 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.training.lr_warmup._target_.split(".")[0] in [
+    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[0] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
@@ -240,7 +254,7 @@ def train(
         #         scaler.step(optimizer)
         #         scaler.update()
         # else:
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
 
@@ -292,6 +306,10 @@ def train(
                 f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
             )
             progress.display(i + 1, log=log)
+            # if argmax.std() == 0:
+            #     for n, p in model.named_parameters():
+            #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+            #     raise ValueError("Std == 0")
 
             # if argmax.std() == 0:
             #     log.error(f"ISSUE WITH NETWORK printing debugging info")

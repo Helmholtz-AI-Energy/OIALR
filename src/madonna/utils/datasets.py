@@ -531,10 +531,10 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
         test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=workers,
+        num_workers=0,
         pin_memory=dsconfig["num_workers"],
         sampler=sampler,
-        persistent_workers=dsconfig["persistent_workers"],
+        # persistent_workers=dsconfig["persistent_workers"],
     )
     return test_dataset, test_loader
 

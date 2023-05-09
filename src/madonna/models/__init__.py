@@ -3,6 +3,8 @@ import torchvision.models as models
 from . import components
 from .ortho import QROrthoFixingModel
 from .qr_fixing import QRFixingModel
+from .svd import SVDFixingModel
+from .xox import XOXModel
 
 
 def get_tv_model(pretrained, name):
