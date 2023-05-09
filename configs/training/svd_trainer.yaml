@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 90
+epochs: 200
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -11,8 +11,9 @@ resume_from_checkpoint: null
 
 criterion:
   _target_: torch.nn.CrossEntropyLoss
+  label_smoothing: 0.1
 
-lr: 0.001
+lr: 0.0001
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR
   _partial_: True
@@ -22,7 +23,7 @@ lr_schedule:
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
-  warmup_period: 1
+  warmup_period: 200
 
 lr_warmup_step_frequency: "epoch"
 lr_warmup_step_args: null
@@ -35,9 +36,6 @@ optimizer:
   # nesterov: True
   _target_: torch.optim.Adam
   _partial_: True
-  # momentum: 0.9
-  # weight_decay: 1.0e-5
-  # nesterov: True
 
 init_opt_with_model: False
 print_freq: 10
@@ -45,12 +43,13 @@ print_freq: 10
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 20
-  delay: 50
-  uvthreshold: 0.99
-  sigma_cutoff_fraction: 0.1
+  stability_frequency: 100
+  delay: 10
+  uvthreshold: 0.9
+  sigma_cutoff_fraction: 0.4
   sync_usv: False
-  train_full_first: False
-  full_rank_sigma: False
+  full_rank_sigma: True
+  keep_fist_layer: True
+  # full_last_layer: True
 #  triu_fixed: True
 #  ortho_q_fixed: False
