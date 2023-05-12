@@ -38,3 +38,34 @@ baseline: False
 comm_method: "nccl"
 cpu_training: False
 enable_tracking: True
+
+
+
+# Saving stuff ============================================
+# save_weights: False
+# save_frequency: 1
+# save_layers: null
+# save_parent_folder: /pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/saved_weights
+
+# saving for cicarean:
+# - local_model.model.0.weight
+# - local_model.model.3.weight
+# - local_model.model.6.weight
+# - local_model.model.9.weight
+# - local_model.model.12.weight
+# - local_model.model.15.weight
+
+# saving for ViT
+# - encoder.layers.encoder_layer_0.self_attention.in_proj_weight
+# - encoder.layers.encoder_layer_0.self_attention.out_proj.weight
+# - encoder.layers.encoder_layer_0.mlp.0.weight
+# - encoder.layers.encoder_layer_0.mlp.3.weight
+# - encoder.layers.encoder_layer_2.self_attention.in_proj_weight
+# - encoder.layers.encoder_layer_2.self_attention.out_proj.weight
+# - encoder.layers.encoder_layer_2.mlp.0.weight
+# - encoder.layers.encoder_layer_2.mlp.3.weight
+# - encoder.layers.encoder_layer_5.self_attention.in_proj_weight
+# - encoder.layers.encoder_layer_5.self_attention.out_proj.weight
+# - encoder.layers.encoder_layer_5.mlp.0.weight
+# - encoder.layers.encoder_layer_5.mlp.3.weight
+# - heads.head.weight

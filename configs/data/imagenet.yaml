@@ -4,7 +4,7 @@ data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/i
 local_batch_size: 256
 num_workers: 8
 pin_memory: True
-timm_transforms: False
+timm_transforms: True
 persistent_workers: True
 distributed_sample: True
 prefetch_factor: 4
