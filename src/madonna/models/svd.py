@@ -1,12 +1,14 @@
 import logging
 import math
 from copy import copy, deepcopy
-from typing import Optional, Union
+from typing import Optional, Union, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch import Tensor
+from torch.nn import Parameter
 from torch._torch_docs import reproducibility_notes
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
@@ -26,7 +28,8 @@ class SVDFixingModel(nn.Module):
         sigma_cutoff_fraction: float = 0.1,
         sync_usv: bool = False,
         full_rank_sigma: bool = False,
-        keep_fist_layer: bool = False,
+        keep_first_layer: bool = False,
+        keep_last_layer: bool = True,
     ):
         super().__init__()
         self.uvthreshold = uvthreshold
@@ -34,8 +37,12 @@ class SVDFixingModel(nn.Module):
         self.sync_usv = sync_usv
         self.full_rank_sigma = full_rank_sigma
         # print('before replace layers')
-        self.first_layer = keep_fist_layer
+        self.first_layer = keep_first_layer
+        self.keep_last_layer = keep_last_layer
+        self.last_layer = None
         self.local_model = self._replace_layers(existing_model)
+        if keep_last_layer:
+            self._reset_last_layer(self.local_model)
         if dist.is_initialized():
             if dist.get_rank() == 0:
                 log.info("Initializing DDP")
@@ -54,6 +61,8 @@ class SVDFixingModel(nn.Module):
         self.skip_stability = False
         self.delay = delay
         self.stable_list = []
+        # for n, p in self.local_model.named_parameters():
+        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
@@ -68,10 +77,13 @@ class SVDFixingModel(nn.Module):
                     sigma_cutoff_fraction=self.sigma_cutoff_fraction,
                     sync_usv=self.sync_usv,
                     full_rank_sigma=self.full_rank_sigma,
+                    start_weight=module.weight,
+                    start_bias=module.bias,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 # module_output = parametrizations.orthogonal(module_output, name="u")
                 # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
                 # module_output = torch.compile(module_output)
+                self.last_layer = [module, name]
             else:
                 self.first_layer = False
         # SKIPPING CONV2D Layers!!
@@ -85,6 +97,19 @@ class SVDFixingModel(nn.Module):
                 ),
             )
         del module
+        return module_output
+    
+    def _reset_last_layer(self, module, name=None):
+        # if dist.get_rank() == 0:
+        #     print("replace", name)
+        module_output = module
+        if name == self.last_layer[1]:
+            device = module.weight.device
+            dtype = module.weight.dtype
+            module_output = self.last_layer[0].to(device=device, dtype=dtype)
+        for name, child in module.named_children():
+            module_output.add_module(name, self._reset_last_layer(child, name))
+        # del module
         return module_output
 
     @torch.no_grad()
@@ -106,11 +131,11 @@ class SVDFixingModel(nn.Module):
                 uchanging, k, perc, stable = mod.test_stability()
                 total += 1
                 if rank == 0:
-                    log.info(f"Layer: {name}: UVh: {uchanging:.3f}, k: {k}, % params: {perc*100:.3f}")
+                    log.info(f"Layer: {name}: UVh: {uchanging:.3f}, k: {k}, % active params: {perc*100:.3f}")
                 if stable:
                     num_stable += 1
 
-        if rank == 0:
+        if rank == 0 and total > 0:
             log.info(
                 f"Stablity stats: {num_stable} of {total} layers with fixed U + Vh -> "
                 f"{100 * num_stable / total:.4f}%",
@@ -138,7 +163,10 @@ class SVDFixingModel(nn.Module):
             else:
                 # TODO: need to get the parameters of the other modules??
                 pass
-
+        
+        if full_normal == 0:
+            full_normal = 1
+            full_active = 1
         if rank == 0:
             log.info(
                 f"Active Params: {100 * (full_active / full_normal):.4f}%",
@@ -232,6 +260,8 @@ class SVDLinear(nn.Module):
         sigma_cutoff_fraction: float = 0.1,
         sync_usv: bool = False,
         full_rank_sigma: bool = False,
+        start_weight=None,
+        start_bias=None,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinear, self).__init__()
@@ -239,7 +269,12 @@ class SVDLinear(nn.Module):
         self.out_features = out_features
         self.full_rank_sigma = full_rank_sigma
 
-        self.weight = torch.empty((out_features, in_features), **factory_kwargs)
+        if start_weight is not None:
+            self.weight = start_weight
+        else:
+            self.weight = torch.empty((out_features, in_features), **factory_kwargs)
+        self.weight = nn.Parameter(self.weight)
+
         if out_features >= in_features:  # simplest case (no transpose)
             self.trans = False
             w = self.weight
@@ -249,27 +284,24 @@ class SVDLinear(nn.Module):
             
         # u, s, vh = torch.linalg.svd(w, full_matrices=False)
         k = min(tuple(w.shape))
-        self.u = torch.empty((w.shape[0], k), **factory_kwargs)
-        self.vh = torch.empty((k, w.shape[1]), **factory_kwargs)
-        self.s = torch.empty((k, k) if self.full_rank_sigma else k, **factory_kwargs)
-        # print(f"first shapes w: {tuple(w.shape)} u: {tuple(self.u.shape)} s: {tuple(self.s.shape)} vh: {tuple(self.vh.shape)}")
+        self.u = torch.zeros((w.shape[0], k), **factory_kwargs)
+        self.vh = torch.zeros((k, w.shape[1]), **factory_kwargs)
+        self.s = torch.zeros((k, k) if self.full_rank_sigma else k, **factory_kwargs)
 
-        # if train_full_first:
-        #     self.weight = nn.Parameter(self.weight)
-        #     self.s = nn.Parameter(self.s)
-        #     self.vh = nn.Parameter(self.vh)
-        # else:
-        # TODO: set up training without full rank weights
-        self.weight = nn.Parameter(self.weight)
         self.u = nn.Parameter(self.u)
-        self.s = nn.Parameter(self.s)
+        self.s = nn.Parameter(self.s, requires_grad=False)
         self.vh = nn.Parameter(self.vh)
 
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            if start_bias is None:
+                self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            else:
+                self.bias = nn.Parameter(start_bias)
         else:
             self.register_parameter("bias", None)
-        self.reset_parameters()
+        
+        if start_weight is None:
+            self.reset_parameters()
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -351,7 +383,7 @@ class SVDLinear(nn.Module):
         set_usvh = True
         if self.full_rank_sigma and self.u_fixed:
             if rank == 0:
-                log.info(f"in full rank sigma update of usvh")
+                log.info("in full rank sigma update of usvh")
             self._update_usv()
             retu, retvh = 2, 2
             # self.u_fixed = False
@@ -388,6 +420,7 @@ class SVDLinear(nn.Module):
         csim = self.cossim(self.prev_uvh, uvh)
         self.prev_uvh = uvh
         csmean, _ = csim.mean(), csim.std()
+        retu = csmean
         if csmean > self.uthreshold:
             # if dist.get_rank() == 0:
             #     udiff = u - self.u
@@ -413,39 +446,42 @@ class SVDLinear(nn.Module):
             #     print(f"u: {self.u.mean():.4f}, {self.u.min():.4f}, {self.u.max():.4f}, {self.u.std():.4f}")
             #     print(f"s: {self.s.mean():.4f}, {self.s.min():.4f}, {self.s.max():.4f}, {self.s.std():.4f}")
             #     print(f"vh: {self.vh.mean():.4f}, {self.vh.min():.4f}, {self.vh.max():.4f}, {self.vh.std():.4f}")
-        retu = csmean
-        # retvh = csmean
 
-        self._update_k()
+            # self.u[torch.abs(self.u) < 1e-5] *= 0
+            # self.vh[torch.abs(self.vh) < 1e-5] *= 0
+            # self.s[torch.abs(self.s) < 1e-6] *= 0
+
+            self._update_k()
         self.s_prev = self.s.data.clone()
         perc_params, _, _ = self.get_perc_params()
         
         return retu, self.k, perc_params, self.u_fixed
     
     @torch.no_grad()
+    @torch.compile()
     def _update_usv(self):
         if not self.full_rank_sigma and not self.u_fixed:
             raise ValueError("this function is only for full-rank sigma with usvh is fixed")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
         usig, sig, vhsig = torch.linalg.svd(self.s)  # square mat, full mat arg doesnt matter
-        usig[torch.abs(usig) < 1e-5] *= 0
-        vhsig[torch.abs(vhsig) < 1e-5] *= 0
-        sig[torch.abs(sig) < 1e-6] *= 0
+        # usig[torch.abs(usig) < 1e-5] *= 0
+        # vhsig[torch.abs(vhsig) < 1e-5] *= 0
+        # sig[torch.abs(sig) < 1e-6] *= 0
 
-        # cutoff vectors with only small changes --------------------------------------
-        # in this case, remove the irrelevant vectors here not after multi!
-        cutoff = sig[0] * self.sigma_cutoff_fraction
-        nz = torch.nonzero(sig < cutoff)
-        if len(nz) == 0:
-            # In this case ALL of the basis vectors are useful
-            k = sig.shape[0]
-        else:
-            k = nz[0].item()
+        # # cutoff vectors with only small changes --------------------------------------
+        # # in this case, remove the irrelevant vectors here not after multi!
+        # cutoff = sig[0] * self.sigma_cutoff_fraction
+        # nz = torch.nonzero(sig < cutoff)
+        # if len(nz) == 0:
+        #     # In this case ALL of the basis vectors are useful
+        #     k = sig.shape[0]
+        # else:
+        #     k = nz[0].item()
 
-        usig[:, k:].mul_(0)
-        vhsig[k:].mul_(0)
-        sig[k:].mul_(0)
-        # -----------------------------------------------------------------------------
+        # usig[:, k:].mul_(0)
+        # vhsig[k:].mul_(0)
+        # sig[k:].mul_(0)
+        # # -----------------------------------------------------------------------------
 
         holdu = self.u @ usig
         self.u.zero_()
@@ -470,14 +506,20 @@ class SVDLinear(nn.Module):
     def _update_k(self):
         # adjust K to slice of less important singular values
         s = torch.diag(self.s) if self.full_rank_sigma else self.s
+        prevk = self.k
         if self.u_fixed and self.vh_fixed:
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
             if len(nz) == 0:
                 # In this case ALL of the basis vectors are useful
-                self.k = s.shape[0]
+                newk = s.shape[0]
             else:
-                self.k = nz[0].item()
+                newk = nz[0].item()
+        if newk < 0.75 * prevk:
+            self.k = int(prevk * 0.75)
+            print(s[:5])
+        else:
+            self.k = newk
 
         self.u[:, self.k:] *= 0
         self.vh[self.k:] *= 0
@@ -528,11 +570,600 @@ class SVDLinear(nn.Module):
             module.train(mode)
         return self
 
+    @torch.compile()
     def get_perc_params(self):
         normal_params = self.weight.numel()
         if self.u_fixed and self.vh_fixed:
-            active_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.vh.shape[1])
+            # active_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.vh.shape[1])
+            trainable_params = self.k ** 2
         else:
-            active_params = normal_params
-        perc_params = active_params / normal_params
-        return perc_params, active_params, normal_params
+            trainable_params = normal_params
+        perc_params = trainable_params / normal_params
+        return perc_params, trainable_params, normal_params
+
+
+
+class SVDMultiheadAttention(nn.Module):
+    r"""
+    Almost all of this class is based on the torch standard MultiheadAttention class
+    I have changed things to work with the SVD abstractions, but that is it.
+
+
+    Allows the model to jointly attend to information
+    from different representation subspaces as described in the paper:
+    `Attention Is All You Need <https://arxiv.org/abs/1706.03762>`_.
+
+    Multi-Head Attention is defined as:
+
+    .. math::
+        \text{MultiHead}(Q, K, V) = \text{Concat}(head_1,\dots,head_h)W^O
+
+    where :math:`head_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)`.
+
+    ``forward()`` will use the optimized implementations of
+    ``scaled_dot_product_attention()``.
+
+    In addition to support for the new ``scaled_dot_product_attention()``
+    function, for speeding up Inference, MHA will use
+    fastpath inference with support for Nested Tensors, iff:
+
+    - self attention is being computed (i.e., ``query``, ``key``, and ``value`` are the same tensor.
+    - inputs are batched (3D) with ``batch_first==True``
+    - Either autograd is disabled (using ``torch.inference_mode`` or ``torch.no_grad``) or no tensor argument ``requires_grad``
+    - training is disabled (using ``.eval()``)
+    - ``add_bias_kv`` is ``False``
+    - ``add_zero_attn`` is ``False``
+    - ``batch_first`` is ``True`` and the input is batched
+    - ``kdim`` and ``vdim`` are equal to ``embed_dim``
+    - if a `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_ is passed, neither ``key_padding_mask``
+      nor ``attn_mask`` is passed
+    - autocast is disabled
+
+    If the optimized inference fastpath implementation is in use, a
+    `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_ can be passed for
+    ``query``/``key``/``value`` to represent padding more efficiently than using a
+    padding mask. In this case, a `NestedTensor <https://pytorch.org/docs/stable/nested.html>`_
+    will be returned, and an additional speedup proportional to the fraction of the input
+    that is padding can be expected.
+
+    Args:
+        embed_dim: Total dimension of the model.
+        num_heads: Number of parallel attention heads. Note that ``embed_dim`` will be split
+            across ``num_heads`` (i.e. each head will have dimension ``embed_dim // num_heads``).
+        dropout: Dropout probability on ``attn_output_weights``. Default: ``0.0`` (no dropout).
+        bias: If specified, adds bias to input / output projection layers. Default: ``True``.
+        add_bias_kv: If specified, adds bias to the key and value sequences at dim=0. Default: ``False``.
+        add_zero_attn: If specified, adds a new batch of zeros to the key and value sequences at dim=1.
+            Default: ``False``.
+        kdim: Total number of features for keys. Default: ``None`` (uses ``kdim=embed_dim``).
+        vdim: Total number of features for values. Default: ``None`` (uses ``vdim=embed_dim``).
+        batch_first: If ``True``, then the input and output tensors are provided
+            as (batch, seq, feature). Default: ``False`` (seq, batch, feature).
+
+    Examples::
+
+        >>> # xdoctest: +SKIP
+        >>> multihead_attn = nn.MultiheadAttention(embed_dim, num_heads)
+        >>> attn_output, attn_output_weights = multihead_attn(query, key, value)
+
+    .. _`FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness`:
+         https://arxiv.org/abs/2205.14135
+
+    """
+
+    __constants__ = ['batch_first']
+    bias_k: Optional[torch.Tensor]
+    bias_v: Optional[torch.Tensor]
+
+    def __init__(
+            self,
+            embed_dim,
+            num_heads,
+            dropout=0.,
+            bias=True,
+            add_bias_kv=False,
+            add_zero_attn=False,
+            kdim=None,
+            vdim=None,
+            batch_first=False,
+            device=None,
+            dtype=None,
+            uvh_threshold=0.9,
+            sigma_cutoff_fraction=0.1,
+            sync_usv=False,  # TODO: should this even be here? are we letting them drift?
+            full_rank_sigma=True,
+            start_q=None,
+            start_k=None,
+            start_v=None,
+            start_in_proj=None,
+            start_k_bias=None,
+            start_v_bias=None,
+            start_in_proj_bias=None,
+    ) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.kdim = kdim if kdim is not None else embed_dim
+        self.vdim = vdim if vdim is not None else embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
+
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.batch_first = batch_first
+        self.head_dim = embed_dim // num_heads
+        self.full_rank_sigma = full_rank_sigma
+        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+
+        if not self._qkv_same_embed_dim:
+            self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            self.qu = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            if self.full_rank_sigma:
+                self.qs = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            else:
+                self.qs = Parameter(torch.empty((embed_dim), **factory_kwargs))
+            self.qvh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+
+            self.k_proj_weight = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
+            if self.kdim > embed_dim:
+                # u - kdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x kdim
+                self.ktrans = True
+                self.ku = Parameter(torch.empty((self.kdim, embed_dim), **factory_kwargs))
+                if self.full_rank_sigma:
+                    self.ks = Parameter(torch.empty((embed_dim), **factory_kwargs))
+                else:
+                    self.ks = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                self.kvh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            else:
+                # u - embed x kdim, s - kdim x kdim, vh - kdim x kdim
+                self.ktrans = False
+                self.ku = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
+                if self.full_rank_sigma:
+                    self.ks = Parameter(torch.empty((self.kdim), **factory_kwargs))
+                else:
+                    self.ks = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs))
+                self.kvh = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs))
+
+            self.v_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+            if self.vdim > embed_dim:
+                # u - vdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x vdim
+                self.vtrans = True
+                self.vu = Parameter(torch.empty((self.vdim, embed_dim), **factory_kwargs))
+                if self.full_rank_sigma:
+                    self.vs = Parameter(torch.empty((embed_dim), **factory_kwargs))
+                else:
+                    self.vs = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                self.vvh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            else:
+                # u - embed x vdim, s - vdim x vdim, vh - vdim x vdim
+                self.vtrans = False
+                self.vu = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+                if self.full_rank_sigma:
+                    self.vs = Parameter(torch.empty((self.vdim), **factory_kwargs))
+                else:
+                    self.vs = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
+                self.vvh = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
+            self.register_parameter('in_proj_weight', None)
+        else:
+            self.in_proj_weight = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
+            # in_proj is always TS
+            self.inu = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
+            if self.full_rank_sigma:
+                self.ins = Parameter(torch.empty((embed_dim), **factory_kwargs))
+            else:
+                self.ins = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            self.invh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+
+            self.register_parameter('q_proj_weight', None)
+            self.register_parameter('k_proj_weight', None)
+            self.register_parameter('v_proj_weight', None)
+
+        if bias:
+            self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim, **factory_kwargs))
+        else:
+            self.register_parameter('in_proj_bias', None)
+        self.out_proj = nn.NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
+
+        if add_bias_kv:
+            self.bias_k = nn.Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
+            self.bias_v = nn.Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
+        else:
+            self.bias_k = self.bias_v = None
+
+        self.add_zero_attn = add_zero_attn
+
+        self._reset_parameters()
+        
+        self.uvh_fixed_q = False
+        self.uvh_fixed_k = False
+        self.uvh_fixed_v = False
+        self.uvh_fixed_in = False
+        if not self._qkv_same_embed_dim:
+            self.prev_uvh_q = None
+            self.prev_uvh_k = None
+            self.prev_uvh_v = None
+        else:
+            self.prev_uvh_in = None
+
+        with torch.no_grad():  # set class params from existing
+            if not self._qkv_same_embed_dim:  # in this case, have q, k, v and bias_k and bias_v
+                if start_q is not None:
+                    self.q_proj_weight.zero_()
+                    self.q_proj_weight.add_(start_q)
+                if start_k is not None:
+                    self.k_proj_weight.zero_()
+                    self.k_proj_weight.add_(start_k)
+                if start_v is not None:
+                    self.v_proj_weight.zero_()
+                    self.v_proj_weight.add_(start_v)
+                if add_bias_kv:
+                    self.bias_k.zero_()
+                    self.bias_k.add_(start_k_bias)
+                    self.bias_v.zero_()
+                    self.bias_v.add_(start_v_bias)
+            else:
+                if start_in_proj is not None:
+                    self.in_proj_weight.zero_()
+                    self.in_proj_weight.add_(start_in_proj)
+            if bias and start_in_proj_bias is not None:
+                self.in_proj_bias.zero_()
+                self.in_proj_bias.add_(start_in_proj_bias)
+
+    def _reset_parameters(self):
+        if self._qkv_same_embed_dim:
+            nn.init.xavier_uniform_(self.in_proj_weight)
+        else:
+            nn.init.xavier_uniform_(self.q_proj_weight)
+            nn.init.xavier_uniform_(self.k_proj_weight)
+            nn.init.xavier_uniform_(self.v_proj_weight)
+
+        if self.in_proj_bias is not None:
+            nn.init.constant_(self.in_proj_bias, 0.)
+            nn.init.constant_(self.out_proj.bias, 0.)
+        if self.bias_k is not None:
+            nn.init.xavier_normal_(self.bias_k)
+        if self.bias_v is not None:
+            nn.init.xavier_normal_(self.bias_v)
+
+    def __setstate__(self, state):
+        # Support loading old MultiheadAttention checkpoints generated by v1.1.0
+        if '_qkv_same_embed_dim' not in state:
+            state['_qkv_same_embed_dim'] = True
+
+        super().__setstate__(state)
+
+    @torch.comiple()
+    def _get_q(self):
+        if self.q_proj_weight is None:
+            return self.q_proj_weight
+        if not self.uvh_fixed_q:
+            return self.q_proj_weight
+        u = self.qu.detach()
+        vh = self.qvh.detach()
+
+        s = self.qs if self.full_rank_sigma else torch.diag(self.qs)
+
+        w = torch.linalg.multi_dot([u, s, vh])
+        ret = w.T if self.qtrans else w
+        with torch.no_grad():
+            self.q_proj_weight *= 0
+            self.q_proj_weight += ret
+        return ret
+    
+    @torch.comiple()
+    def _get_k(self):
+        if self.k_proj_weight is None:
+            return self.k_proj_weight
+        if not self.uvh_fixed_k:
+            return self.k_proj_weight
+        u = self.ku.detach()
+        vh = self.kvh.detach()
+
+        s = self.ks if self.full_rank_sigma else torch.diag(self.ks)
+
+        w = torch.linalg.multi_dot([u, s, vh])
+        ret = w.T if self.ktrans else w
+        with torch.no_grad():
+            self.k_proj_weight *= 0
+            self.k_proj_weight += ret
+        return ret
+    
+    @torch.comiple()
+    def _get_v(self):
+        if self.v_proj_weight is None:
+            return self.v_proj_weight
+        if not self.uvh_fixed_v:
+            return self.v_proj_weight
+        u = self.vu.detach()
+        vh = self.vvh.detach()
+
+        s = self.vs if self.full_rank_sigma else torch.diag(self.vs)
+
+        w = torch.linalg.multi_dot([u, s, vh])
+        ret = w.T if self.vtrans else w
+        with torch.no_grad():
+            self.v_proj_weight *= 0
+            self.v_proj_weight += ret
+        return ret
+    
+    @torch.comiple()
+    def _get_in_proj(self):
+        if not self.uvh_fixed_in:
+            return self.in_proj_weight
+        u = self.inu.detach()
+        vh = self.invh.detach()
+
+        s = self.ins if self.full_rank_sigma else torch.diag(self.ins)
+
+        ret = torch.linalg.multi_dot([u, s, vh])
+        # No need for transpose, in_proj is always TS (be definition)
+        with torch.no_grad():
+            self.in_proj_weight *= 0
+            self.in_proj_weight += ret
+        return ret
+    
+    @torch.compile()
+    def get_weight(self):
+        if not self._qkv_same_embed_dim:  # get qkv
+            q = self._get_q()
+            k = self._get_k()
+            v = self._get_v()
+            return q, k, v
+        else:
+            return self._get_in_proj()
+
+
+    def forward(
+            self,
+            query: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+            key_padding_mask: Optional[torch.Tensor] = None,
+            need_weights: bool = True,
+            attn_mask: Optional[torch.Tensor] = None,
+            average_attn_weights: bool = True,
+            is_causal: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        r"""
+        Args:
+            query: Query embeddings of shape :math:`(L, E_q)` for unbatched input, :math:`(L, N, E_q)` when ``batch_first=False``
+                or :math:`(N, L, E_q)` when ``batch_first=True``, where :math:`L` is the target sequence length,
+                :math:`N` is the batch size, and :math:`E_q` is the query embedding dimension ``embed_dim``.
+                Queries are compared against key-value pairs to produce the output.
+                See "Attention Is All You Need" for more details.
+            key: Key embeddings of shape :math:`(S, E_k)` for unbatched input, :math:`(S, N, E_k)` when ``batch_first=False``
+                or :math:`(N, S, E_k)` when ``batch_first=True``, where :math:`S` is the source sequence length,
+                :math:`N` is the batch size, and :math:`E_k` is the key embedding dimension ``kdim``.
+                See "Attention Is All You Need" for more details.
+            value: Value embeddings of shape :math:`(S, E_v)` for unbatched input, :math:`(S, N, E_v)` when
+                ``batch_first=False`` or :math:`(N, S, E_v)` when ``batch_first=True``, where :math:`S` is the source
+                sequence length, :math:`N` is the batch size, and :math:`E_v` is the value embedding dimension ``vdim``.
+                See "Attention Is All You Need" for more details.
+            key_padding_mask: If specified, a mask of shape :math:`(N, S)` indicating which elements within ``key``
+                to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`, shape should be :math:`(S)`.
+                Binary and float masks are supported.
+                For a binary mask, a ``True`` value indicates that the corresponding ``key`` value will be ignored for
+                the purpose of attention. For a float mask, it will be directly added to the corresponding ``key`` value.
+            need_weights: If specified, returns ``attn_output_weights`` in addition to ``attn_outputs``.
+                Default: ``True``.
+            attn_mask: If specified, a 2D or 3D mask preventing attention to certain positions. Must be of shape
+                :math:`(L, S)` or :math:`(N\cdot\text{num\_heads}, L, S)`, where :math:`N` is the batch size,
+                :math:`L` is the target sequence length, and :math:`S` is the source sequence length. A 2D mask will be
+                broadcasted across the batch while a 3D mask allows for a different mask for each entry in the batch.
+                Binary and float masks are supported. For a binary mask, a ``True`` value indicates that the
+                corresponding position is not allowed to attend. For a float mask, the mask values will be added to
+                the attention weight.
+                If both attn_mask and key_padding_mask are supplied, their types should match.
+            is_causal: If specified, applies a causal mask as attention mask.
+                Default: ``False``.
+                Warning:
+                ``is_causal`` provides a hint that ``attn_mask`` is the
+                causal mask. Providing incorrect hints can result in
+                incorrect execution, including forward and backward
+                compatibility.
+            average_attn_weights: If true, indicates that the returned ``attn_weights`` should be averaged across
+                heads. Otherwise, ``attn_weights`` are provided separately per head. Note that this flag only has an
+                effect when ``need_weights=True``. Default: ``True`` (i.e. average weights across heads)
+
+        Outputs:
+            - **attn_output** - Attention outputs of shape :math:`(L, E)` when input is unbatched,
+            :math:`(L, N, E)` when ``batch_first=False`` or :math:`(N, L, E)` when ``batch_first=True``,
+            where :math:`L` is the target sequence length, :math:`N` is the batch size, and :math:`E` is the
+            embedding dimension ``embed_dim``.
+            - **attn_output_weights** - Only returned when ``need_weights=True``. If ``average_attn_weights=True``,
+            returns attention weights averaged across heads of shape :math:`(L, S)` when input is unbatched or
+            :math:`(N, L, S)`, where :math:`N` is the batch size, :math:`L` is the target sequence length, and
+            :math:`S` is the source sequence length. If ``average_attn_weights=False``, returns attention weights per
+            head of shape :math:`(\text{num\_heads}, L, S)` when input is unbatched or :math:`(N, \text{num\_heads}, L, S)`.
+
+            .. note::
+                `batch_first` argument is ignored for unbatched inputs.
+        """
+
+        is_batched = query.dim() == 3
+
+        key_padding_mask = F._canonical_mask(
+            mask=key_padding_mask,
+            mask_name="key_padding_mask",
+            other_type=F._none_or_dtype(attn_mask),
+            other_name="attn_mask",
+            target_type=query.dtype
+        )
+
+        attn_mask = F._canonical_mask(
+            mask=attn_mask,
+            mask_name="attn_mask",
+            other_type=None,
+            other_name="",
+            target_type=query.dtype,
+            check_other=False,
+        )
+
+        why_not_fast_path = ''
+        if not is_batched:
+            why_not_fast_path = f"input not batched; expected query.dim() of 3 but got {query.dim()}"
+        elif query is not key or key is not value:
+            # When lifting this restriction, don't forget to either
+            # enforce that the dtypes all match or test cases where
+            # they don't!
+            why_not_fast_path = "non-self attention was used (query, key, and value are not the same Tensor)"
+        elif self.in_proj_bias is not None and query.dtype != self.in_proj_bias.dtype:
+            why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_bias ({self.in_proj_bias.dtype}) don't match"
+        elif self.in_proj_weight is not None and query.dtype != self.in_proj_weight.dtype:
+            # this case will fail anyway, but at least they'll get a useful error message.
+            why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_weight ({self.in_proj_weight.dtype}) don't match"
+        elif self.training:
+            why_not_fast_path = "training is enabled"
+        elif not self.batch_first:
+            why_not_fast_path = "batch_first was not True"
+        elif self.bias_k is not None:
+            why_not_fast_path = "self.bias_k was not None"
+        elif self.bias_v is not None:
+            why_not_fast_path = "self.bias_v was not None"
+        elif self.add_zero_attn:
+            why_not_fast_path = "add_zero_attn was enabled"
+        elif not self._qkv_same_embed_dim:
+            why_not_fast_path = "_qkv_same_embed_dim was not True"
+        elif query.is_nested and (key_padding_mask is not None or attn_mask is not None):
+            why_not_fast_path = "supplying both src_key_padding_mask and src_mask at the same time \
+                                 is not supported with NestedTensor input"
+        elif torch.is_autocast_enabled():
+            why_not_fast_path = "autocast is enabled"
+
+        if not why_not_fast_path:
+            
+            tensor_args = (
+                query,
+                key,
+                value,
+                self._get_in_proj(),  # self.in_proj_weight,
+                self.in_proj_bias,
+                self.out_proj.weight,
+                self.out_proj.bias,
+            )
+            # We have to use list comprehensions below because TorchScript does not support
+            # generator expressions.
+            if torch.overrides.has_torch_function(tensor_args):
+                why_not_fast_path = "some Tensor argument has_torch_function"
+            elif not all([(x is None or x.is_cuda or 'cpu' in str(x.device)) for x in tensor_args]):
+                why_not_fast_path = "some Tensor argument is neither CUDA nor CPU"
+            elif torch.is_grad_enabled() and any([x is not None and x.requires_grad for x in tensor_args]):
+                why_not_fast_path = ("grad is enabled and at least one of query or the "
+                                     "input/output projection weights or biases requires_grad")
+            if not why_not_fast_path:
+                merged_mask, mask_type = self.merge_masks(attn_mask, key_padding_mask, query)
+
+                return torch._native_multi_head_attention(
+                    query,
+                    key,
+                    value,
+                    self.embed_dim,
+                    self.num_heads,
+                    self._get_in_proj(),  # self.in_proj_weight,
+                    self.in_proj_bias,
+                    self.out_proj.weight,
+                    self.out_proj.bias,
+                    merged_mask,
+                    need_weights,
+                    average_attn_weights,
+                    mask_type)
+
+        any_nested = query.is_nested or key.is_nested or value.is_nested
+        assert not any_nested, ("MultiheadAttention does not support NestedTensor outside of its fast path. " +
+                                f"The fast path was not hit because {why_not_fast_path}")
+
+        if self.batch_first and is_batched:
+            # make sure that the transpose op does not affect the "is" property
+            if key is value:
+                if query is key:
+                    query = key = value = query.transpose(1, 0)
+                else:
+                    query, key = [x.transpose(1, 0) for x in (query, key)]
+                    value = key
+            else:
+                query, key, value = [x.transpose(1, 0) for x in (query, key, value)]
+
+        if not self._qkv_same_embed_dim:
+            in_proj = self._get_in_proj(),  # self.in_proj_weight,
+            q = self._get_q()
+            k = self._get_k()
+            v = self._get_v()
+
+            attn_output, attn_output_weights = F.multi_head_attention_forward(
+                query, key, value, self.embed_dim, self.num_heads,
+                in_proj, self.in_proj_bias,
+                self.bias_k, self.bias_v, self.add_zero_attn,
+                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                training=self.training,
+                key_padding_mask=key_padding_mask, need_weights=need_weights,
+                attn_mask=attn_mask,
+                use_separate_proj_weight=True,
+                q_proj_weight=q, k_proj_weight=k,
+                v_proj_weight=v,
+                average_attn_weights=average_attn_weights,
+                is_causal=is_causal)
+        else:
+            in_proj = self._get_in_proj(),  # self.in_proj_weight,
+            attn_output, attn_output_weights = F.multi_head_attention_forward(
+                query, key, value, self.embed_dim, self.num_heads,
+                in_proj, self.in_proj_bias,
+                self.bias_k, self.bias_v, self.add_zero_attn,
+                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                training=self.training,
+                key_padding_mask=key_padding_mask,
+                need_weights=need_weights,
+                attn_mask=attn_mask,
+                average_attn_weights=average_attn_weights,
+                is_causal=is_causal)
+        if self.batch_first and is_batched:
+            return attn_output.transpose(1, 0), attn_output_weights
+        else:
+            return attn_output, attn_output_weights
+
+    def merge_masks(self, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor],
+                    query: Tensor) -> Tuple[Optional[Tensor], Optional[int]]:
+        r"""
+        Determine mask type and combine masks if necessary. If only one mask is provided, that mask
+        and the corresponding mask type will be returned. If both masks are provided, they will be both
+        expanded to shape ``(batch_size, num_heads, seq_len, seq_len)``, combined with logical ``or``
+        and mask type 2 will be returned
+        Args:
+            attn_mask: attention mask of shape ``(seq_len, seq_len)``, mask type 0
+            key_padding_mask: padding mask of shape ``(batch_size, seq_len)``, mask type 1
+            query: query embeddings of shape ``(batch_size, seq_len, embed_dim)``
+        Returns:
+            merged_mask: merged mask
+            mask_type: merged mask type (0, 1, or 2)
+        """
+        mask_type: Optional[int] = None
+        merged_mask: Optional[Tensor] = None
+
+        attn_mask = F._canonical_mask(
+            mask=attn_mask,
+            mask_name="attn_mask",
+            other_type=None,
+            other_name="",
+            target_type=query.dtype,
+            check_other=False,
+        )
+
+        if key_padding_mask is not None:
+            mask_type = 1
+            merged_mask = key_padding_mask
+
+        if attn_mask is not None:
+            # In this branch query can't be a nested tensor, so it has a shape
+            batch_size, seq_len, _ = query.shape
+            mask_type = 2
+
+            # Always expands attn_mask to 4D
+            if attn_mask.dim() == 3:
+                attn_mask_expanded = attn_mask.view(batch_size, -1, seq_len, seq_len)
+            else:  # attn_mask.dim() == 2:
+                attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(batch_size, self.num_heads, -1, -1)
+            merged_mask = attn_mask_expanded
+
+            if key_padding_mask is not None:
+                key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len).expand(-1, self.num_heads, -1, -1)
+                merged_mask = attn_mask_expanded + key_padding_mask_expanded
+
+        # no attn_mask and no key_padding_mask, returns None, None
+        return merged_mask, mask_type
