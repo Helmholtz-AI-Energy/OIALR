@@ -64,6 +64,7 @@ def main(config):  # noqa: C901
         # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
+
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
             print(model)

@@ -246,7 +246,7 @@ class SVDLinear(nn.Module):
         else:
             self.trans = True
             w = self.weight.T
-            
+
         # u, s, vh = torch.linalg.svd(w, full_matrices=False)
         k = min(tuple(w.shape))
         self.u = torch.empty((w.shape[0], k), **factory_kwargs)
@@ -379,7 +379,7 @@ class SVDLinear(nn.Module):
                 self.s.add_(torch.diag(s) if self.full_rank_sigma else s)
                 self.vh.zero_()
                 self.vh.add_(vh)
-                return 0, self.k, 1., self.u_fixed
+                return 0, self.k, 1.0, self.u_fixed
             self.prev_uvh = uvh
             if rank == 0:
                 log.info("in normal stability update")
@@ -395,7 +395,7 @@ class SVDLinear(nn.Module):
             #     print(f"{udiff.mean():.4f}, {udiff.max():.4f}, {udiff.mean():.4f}")
             #     # print(f"{udiff.mean():.4f}, {udiff.max():.4f}, {udiff.mean():.4f}")
             #     print(f"{vhdiff.mean():.4f}, {vhdiff.max():.4f}, {vhdiff.mean():.4f}")
-                
+
             self.u_fixed, self.vh_fixed = True, True
             if set_usvh:
                 self.u.zero_()
@@ -404,10 +404,10 @@ class SVDLinear(nn.Module):
                 self.vh.add_(vh)
                 if self.full_rank_sigma:
                     self.s.zero_()
-                    self.s[:self.k, :self.k].add_(torch.diag(s[:self.k]))
+                    self.s[: self.k, : self.k].add_(torch.diag(s[: self.k]))
                 else:
                     self.s.zero_()
-                    self.s[:self.k].add_(s[:self.k])
+                    self.s[: self.k].add_(s[: self.k])
 
             # if dist.get_rank() == 0:
             #     print(f"u: {self.u.mean():.4f}, {self.u.min():.4f}, {self.u.max():.4f}, {self.u.std():.4f}")
@@ -419,9 +419,9 @@ class SVDLinear(nn.Module):
         self._update_k()
         self.s_prev = self.s.data.clone()
         perc_params, _, _ = self.get_perc_params()
-        
+
         return retu, self.k, perc_params, self.u_fixed
-    
+
     @torch.no_grad()
     def _update_usv(self):
         if not self.full_rank_sigma and not self.u_fixed:
@@ -479,12 +479,12 @@ class SVDLinear(nn.Module):
             else:
                 self.k = nz[0].item()
 
-        self.u[:, self.k:] *= 0
-        self.vh[self.k:] *= 0
+        self.u[:, self.k :] *= 0
+        self.vh[self.k :] *= 0
         if self.full_rank_sigma:
-            self.s[self.k:, self.k:].mul_(0)
+            self.s[self.k :, self.k :].mul_(0)
         else:
-            self.s[self.k:].mul_(0)
+            self.s[self.k :].mul_(0)
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -531,7 +531,7 @@ class SVDLinear(nn.Module):
     def get_perc_params(self):
         normal_params = self.weight.numel()
         if self.u_fixed and self.vh_fixed:
-            active_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.vh.shape[1])
+            active_params = (self.u.shape[0] * self.k) + (self.k**2) + (self.k + self.vh.shape[1])
         else:
             active_params = normal_params
         perc_params = active_params / normal_params
