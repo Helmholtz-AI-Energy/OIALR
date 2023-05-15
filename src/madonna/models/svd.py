@@ -1,16 +1,16 @@
 import logging
 import math
 from copy import copy, deepcopy
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from torch._torch_docs import reproducibility_notes
 from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
-from torch._torch_docs import reproducibility_notes
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
 
@@ -132,7 +132,7 @@ class SVDFixingModel(nn.Module):
             )
         del module
         return module_output
-    
+
     def _reset_last_layer(self, module, name=None):
         # if dist.get_rank() == 0:
         #     print("replace", name)
@@ -158,7 +158,7 @@ class SVDFixingModel(nn.Module):
         if rank == 0:
             log.info("Testing Stability")
         all_stable = True
-        num_stable, total = 0, 0
+        total = 0
         for c, (name, mod) in enumerate(module.named_modules()):
             # try:
             if hasattr(mod, "test_stability"):
@@ -179,7 +179,7 @@ class SVDFixingModel(nn.Module):
                             percs += f"{p:.3f}, "
                     log.info(f"{name}: UVh: {uchange} - k: {k} - % active params: {percs}")
         # removing stability stuff, pain in the ass
-        #         try: 
+        #         try:
         #             stable[0]
         #             for s in stable:
         #                 if s:
@@ -204,7 +204,7 @@ class SVDFixingModel(nn.Module):
             rank = dist.get_rank()
         else:
             rank = 0
-        percs, actives, normals = [], [], []
+        # percs, actives, normals = [], [], []
         full_active = 0
         full_normal = 0
         for c, (name, mod) in enumerate(module.named_modules()):
@@ -215,7 +215,7 @@ class SVDFixingModel(nn.Module):
             else:
                 # TODO: need to get the parameters of the other modules??
                 pass
-        
+
         if full_normal == 0:
             full_normal = 1
             full_active = 1
@@ -335,7 +335,7 @@ class SVDLinear(nn.Module):
         else:
             self.trans = True
             w = self.weight.T
-            
+
         # u, s, vh = torch.linalg.svd(w, full_matrices=False)
         k = min(tuple(w.shape))
         self.u = torch.zeros((w.shape[0], k), **factory_kwargs)
@@ -353,7 +353,7 @@ class SVDLinear(nn.Module):
                 self.bias = nn.Parameter(start_bias)
         else:
             self.register_parameter("bias", None)
-        
+
         if start_weight is None:
             self.reset_parameters()
 
@@ -464,7 +464,7 @@ class SVDLinear(nn.Module):
                 self.s.add_(torch.diag(s) if self.full_rank_sigma else s)
                 self.vh.zero_()
                 self.vh.add_(vh)
-                return 0, self.k, 1., self.u_fixed
+                return 0, self.k, 1.0, self.u_fixed
             self.prev_uvh = uvh
             if rank == 0:
                 log.info("in normal stability update")
@@ -483,10 +483,10 @@ class SVDLinear(nn.Module):
                 self.vh.add_(vh)
                 if self.full_rank_sigma:
                     self.s.zero_()
-                    self.s[:self.k, :self.k].add_(torch.diag(s[:self.k]))
+                    self.s[: self.k, : self.k].add_(torch.diag(s[: self.k]))
                 else:
                     self.s.zero_()
-                    self.s[:self.k].add_(s[:self.k])
+                    self.s[: self.k].add_(s[: self.k])
 
             # if dist.get_rank() == 0:
             #     print(f"u: {self.u.mean():.4f}, {self.u.min():.4f}, {self.u.max():.4f}, {self.u.std():.4f}")
@@ -499,7 +499,6 @@ class SVDLinear(nn.Module):
 
             self._update_k()
         perc_params, _, _ = self.get_perc_params()
-        
         return csmean, self.k, perc_params, self.u_fixed
 
     @torch.no_grad()
@@ -551,7 +550,7 @@ class SVDLinear(nn.Module):
     def _update_k(self):
         # adjust K to slice of less important singular values
         s = torch.diag(self.s) if self.full_rank_sigma else self.s
-        prevk = self.k
+        # prevk = self.k
         if self.u_fixed and self.vh_fixed:
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
@@ -565,12 +564,12 @@ class SVDLinear(nn.Module):
         #     self.k = int(prevk * 0.75)
         #     log.debug(f"values of S after dropping slice value by only 75% of suggestion: {s[:5]}")
 
-        self.u[:, self.k:] *= 0
-        self.vh[self.k:] *= 0
+        self.u[:, self.k :] *= 0
+        self.vh[self.k :] *= 0
         if self.full_rank_sigma:
-            self.s[self.k:, self.k:].mul_(0)
+            self.s[self.k :, self.k :].mul_(0)
         else:
-            self.s[self.k:].mul_(0)
+            self.s[self.k :].mul_(0)
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -618,8 +617,7 @@ class SVDLinear(nn.Module):
     def get_perc_params(self):
         normal_params = self.weight.numel()
         if self.u_fixed and self.vh_fixed:
-            # active_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.vh.shape[1])
-            trainable_params = self.k ** 2
+            trainable_params = self.k**2
         else:
             trainable_params = normal_params
         perc_params = trainable_params / normal_params
@@ -694,11 +692,12 @@ class SVDMultiheadAttention(nn.Module):
 
     """
 
-    __constants__ = ['batch_first']
+    __constants__ = ["batch_first"]
     bias_k: Optional[torch.Tensor]
     bias_v: Optional[torch.Tensor]
 
     def __init__(
+<<<<<<< HEAD
             self,
             embed_dim,
             num_heads,
@@ -723,8 +722,33 @@ class SVDMultiheadAttention(nn.Module):
             start_v_bias=None,
             start_in_proj_bias=None,
             update_from_simga: bool = True,
+=======
+        self,
+        embed_dim,
+        num_heads,
+        dropout=0.0,
+        bias=True,
+        add_bias_kv=False,
+        add_zero_attn=False,
+        kdim=None,
+        vdim=None,
+        batch_first=False,
+        device=None,
+        dtype=None,
+        uvh_threshold=0.9,
+        sigma_cutoff_fraction=0.1,
+        sync_usv=False,  # TODO: should this even be here? are we letting them drift?
+        full_rank_sigma=True,
+        start_q=None,
+        start_k=None,
+        start_v=None,
+        start_in_proj=None,
+        start_k_bias=None,
+        start_v_bias=None,
+        start_in_proj_bias=None,
+>>>>>>> 7d567930d4cebcc7eaf603ff5c82a6222feb70fb
     ) -> None:
-        factory_kwargs = {'device': device, 'dtype': dtype}
+        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.update_from_simga = full_rank_sigma and update_from_simga
         self.embed_dim = embed_dim
@@ -737,7 +761,7 @@ class SVDMultiheadAttention(nn.Module):
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
         self.full_rank_sigma = full_rank_sigma
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
         if not self._qkv_same_embed_dim:
             self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
@@ -793,7 +817,7 @@ class SVDMultiheadAttention(nn.Module):
                     self.v_s = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
                 self.v_vh = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
                 self.v_slice = self.vdim
-            self.register_parameter('in_proj_weight', None)
+            self.register_parameter("in_proj_weight", None)
         else:
             self.in_proj_weight = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
             # in_proj is always TS
@@ -806,14 +830,14 @@ class SVDMultiheadAttention(nn.Module):
             self.in_proj_trans = False
             self.in_proj_slice = embed_dim
 
-            self.register_parameter('q_proj_weight', None)
-            self.register_parameter('k_proj_weight', None)
-            self.register_parameter('v_proj_weight', None)
+            self.register_parameter("q_proj_weight", None)
+            self.register_parameter("k_proj_weight", None)
+            self.register_parameter("v_proj_weight", None)
 
         if bias:
             self.in_proj_bias = nn.Parameter(torch.empty(3 * embed_dim, **factory_kwargs))
         else:
-            self.register_parameter('in_proj_bias', None)
+            self.register_parameter("in_proj_bias", None)
         self.out_proj = NonDynamicallyQuantizableLinear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
 
         if add_bias_kv:
@@ -883,8 +907,8 @@ class SVDMultiheadAttention(nn.Module):
             nn.init.xavier_uniform_(self.v_proj_weight)
 
         if self.in_proj_bias is not None:
-            nn.init.constant_(self.in_proj_bias, 0.)
-            nn.init.constant_(self.out_proj.bias, 0.)
+            nn.init.constant_(self.in_proj_bias, 0.0)
+            nn.init.constant_(self.out_proj.bias, 0.0)
         if self.bias_k is not None:
             nn.init.xavier_normal_(self.bias_k)
         if self.bias_v is not None:
@@ -892,8 +916,8 @@ class SVDMultiheadAttention(nn.Module):
 
     def __setstate__(self, state):
         # Support loading old MultiheadAttention checkpoints generated by v1.1.0
-        if '_qkv_same_embed_dim' not in state:
-            state['_qkv_same_embed_dim'] = True
+        if "_qkv_same_embed_dim" not in state:
+            state["_qkv_same_embed_dim"] = True
 
         super().__setstate__(state)
 
@@ -979,15 +1003,16 @@ class SVDMultiheadAttention(nn.Module):
             return self._get_in_proj()
 
     def forward(
-            self,
-            query: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-            key_padding_mask: Optional[torch.Tensor] = None,
-            need_weights: bool = True,
-            attn_mask: Optional[torch.Tensor] = None,
-            average_attn_weights: bool = True,
-            is_causal: bool = False) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
+        need_weights: bool = True,
+        attn_mask: Optional[torch.Tensor] = None,
+        average_attn_weights: bool = True,
+        is_causal: bool = False,
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         r"""
         Args:
             query: Query embeddings of shape :math:`(L, E_q)` for unbatched input, :math:`(L, N, E_q)` when ``batch_first=False``
@@ -1004,8 +1029,8 @@ class SVDMultiheadAttention(nn.Module):
                 sequence length, :math:`N` is the batch size, and :math:`E_v` is the value embedding dimension ``vdim``.
                 See "Attention Is All You Need" for more details.
             key_padding_mask: If specified, a mask of shape :math:`(N, S)` indicating which elements within ``key``
-                to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`, shape should be :math:`(S)`.
-                Binary and float masks are supported.
+                to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`,
+                shape should be :math:`(S)`. Binary and float masks are supported.
                 For a binary mask, a ``True`` value indicates that the corresponding ``key`` value will be ignored for
                 the purpose of attention. For a float mask, it will be directly added to the corresponding ``key`` value.
             need_weights: If specified, returns ``attn_output_weights`` in addition to ``attn_outputs``.
@@ -1051,7 +1076,7 @@ class SVDMultiheadAttention(nn.Module):
             mask_name="key_padding_mask",
             other_type=F._none_or_dtype(attn_mask),
             other_name="attn_mask",
-            target_type=query.dtype
+            target_type=query.dtype,
         )
 
         attn_mask = F._canonical_mask(
@@ -1063,7 +1088,7 @@ class SVDMultiheadAttention(nn.Module):
             check_other=False,
         )
 
-        why_not_fast_path = ''
+        why_not_fast_path = ""
         if not is_batched:
             why_not_fast_path = f"input not batched; expected query.dim() of 3 but got {query.dim()}"
         elif query is not key or key is not value:
@@ -1108,11 +1133,13 @@ class SVDMultiheadAttention(nn.Module):
             # generator expressions.
             if torch.overrides.has_torch_function(tensor_args):
                 why_not_fast_path = "some Tensor argument has_torch_function"
-            elif not all([(x is None or x.is_cuda or 'cpu' in str(x.device)) for x in tensor_args]):
+            elif not all([(x is None or x.is_cuda or "cpu" in str(x.device)) for x in tensor_args]):
                 why_not_fast_path = "some Tensor argument is neither CUDA nor CPU"
             elif torch.is_grad_enabled() and any([x is not None and x.requires_grad for x in tensor_args]):
-                why_not_fast_path = ("grad is enabled and at least one of query or the "
-                                     "input/output projection weights or biases requires_grad")
+                why_not_fast_path = (
+                    "grad is enabled and at least one of query or the "
+                    "input/output projection weights or biases requires_grad"
+                )
             if not why_not_fast_path:
                 merged_mask, mask_type = self.merge_masks(attn_mask, key_padding_mask, query)
 
@@ -1129,11 +1156,14 @@ class SVDMultiheadAttention(nn.Module):
                     merged_mask,
                     need_weights,
                     average_attn_weights,
-                    mask_type)
+                    mask_type,
+                )
 
         any_nested = query.is_nested or key.is_nested or value.is_nested
-        assert not any_nested, ("MultiheadAttention does not support NestedTensor outside of its fast path. " +
-                                f"The fast path was not hit because {why_not_fast_path}")
+        assert not any_nested, (
+            "MultiheadAttention does not support NestedTensor outside of its fast path. "
+            + f"The fast path was not hit because {why_not_fast_path}"
+        )
 
         if self.batch_first and is_batched:
             # make sure that the transpose op does not affect the "is" property
@@ -1153,38 +1183,64 @@ class SVDMultiheadAttention(nn.Module):
             v = self._get_v()
 
             attn_output, attn_output_weights = F.multi_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
-                in_proj, self.in_proj_bias,
-                self.bias_k, self.bias_v, self.add_zero_attn,
-                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                query,
+                key,
+                value,
+                self.embed_dim,
+                self.num_heads,
+                in_proj,
+                self.in_proj_bias,
+                self.bias_k,
+                self.bias_v,
+                self.add_zero_attn,
+                self.dropout,
+                self.out_proj.weight,
+                self.out_proj.bias,
                 training=self.training,
-                key_padding_mask=key_padding_mask, need_weights=need_weights,
+                key_padding_mask=key_padding_mask,
+                need_weights=need_weights,
                 attn_mask=attn_mask,
                 use_separate_proj_weight=True,
-                q_proj_weight=q, k_proj_weight=k,
+                q_proj_weight=q,
+                k_proj_weight=k,
                 v_proj_weight=v,
                 average_attn_weights=average_attn_weights,
-                is_causal=is_causal)
+                is_causal=is_causal,
+            )
         else:
             in_proj = self._get_in_proj()  # self.in_proj_weight,
             attn_output, attn_output_weights = F.multi_head_attention_forward(
-                query, key, value, self.embed_dim, self.num_heads,
-                in_proj, self.in_proj_bias,
-                self.bias_k, self.bias_v, self.add_zero_attn,
-                self.dropout, self.out_proj.weight, self.out_proj.bias,
+                query,
+                key,
+                value,
+                self.embed_dim,
+                self.num_heads,
+                in_proj,
+                self.in_proj_bias,
+                self.bias_k,
+                self.bias_v,
+                self.add_zero_attn,
+                self.dropout,
+                self.out_proj.weight,
+                self.out_proj.bias,
                 training=self.training,
                 key_padding_mask=key_padding_mask,
                 need_weights=need_weights,
                 attn_mask=attn_mask,
                 average_attn_weights=average_attn_weights,
-                is_causal=is_causal)
+                is_causal=is_causal,
+            )
         if self.batch_first and is_batched:
             return attn_output.transpose(1, 0), attn_output_weights
         else:
             return attn_output, attn_output_weights
 
-    def merge_masks(self, attn_mask: Optional[Tensor], key_padding_mask: Optional[Tensor],
-                    query: Tensor) -> Tuple[Optional[Tensor], Optional[int]]:
+    def merge_masks(
+        self,
+        attn_mask: Optional[Tensor],
+        key_padding_mask: Optional[Tensor],
+        query: Tensor,
+    ) -> Tuple[Optional[Tensor], Optional[int]]:
         r"""
         Determine mask type and combine masks if necessary. If only one mask is provided, that mask
         and the corresponding mask type will be returned. If both masks are provided, they will be both
@@ -1223,11 +1279,21 @@ class SVDMultiheadAttention(nn.Module):
             if attn_mask.dim() == 3:
                 attn_mask_expanded = attn_mask.view(batch_size, -1, seq_len, seq_len)
             else:  # attn_mask.dim() == 2:
-                attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(batch_size, self.num_heads, -1, -1)
+                attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(
+                    batch_size,
+                    self.num_heads,
+                    -1,
+                    -1,
+                )
             merged_mask = attn_mask_expanded
 
             if key_padding_mask is not None:
-                key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len).expand(-1, self.num_heads, -1, -1)
+                key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len).expand(
+                    -1,
+                    self.num_heads,
+                    -1,
+                    -1,
+                )
                 merged_mask = attn_mask_expanded + key_padding_mask_expanded
 
         # no attn_mask and no key_padding_mask, returns None, None
@@ -1256,9 +1322,15 @@ class SVDMultiheadAttention(nn.Module):
             [q, k, v]_proj_weight
             in_proj_weight
         """
+<<<<<<< HEAD
         # if getattr(self, f"uvh_fixed_{qkvin}") and not self.update_from_simga:
         #     perc_params, _, _ = self.get_perc_params()
         #     return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+=======
+        if getattr(self, f"uvh_fixed_{qkvin}"):
+            perc_params, _, _ = self.get_perc_params()
+            return 2.0, getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+>>>>>>> 7d567930d4cebcc7eaf603ff5c82a6222feb70fb
 
         rank = dist.get_rank() if dist.is_initialized() else 0
 
@@ -1288,7 +1360,7 @@ class SVDMultiheadAttention(nn.Module):
             vh = vh.to(dtp)
             uvh = u @ vh
             prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
-            if prev_uvh is None:  # first iteration 
+            if prev_uvh is None:  # first iteration
                 if rank == 0:
                     log.info("First stability update")
                 setattr(self, f"prev_uvh_{qkvin}", uvh)
@@ -1302,7 +1374,7 @@ class SVDMultiheadAttention(nn.Module):
                 sself.add_(torch.diag(s) if self.full_rank_sigma else s)
                 vhself.zero_()
                 vhself.add_(vh)
-                return 0, getattr(self, f"{qkvin}_slice"), 1., getattr(self, f"uvh_fixed_{qkvin}")
+                return 0, getattr(self, f"{qkvin}_slice"), 1.0, getattr(self, f"uvh_fixed_{qkvin}")
             if rank == 0:
                 log.info("in normal stability update")
 
@@ -1419,11 +1491,11 @@ class SVDMultiheadAttention(nn.Module):
         uself = getattr(self, f"{qkvin}_u")
         sself = getattr(self, f"{qkvin}_s")
         vhself = getattr(self, f"{qkvin}_vh")
-        gensl = getattr(self, f"{qkvin}_slice")
+        # gensl = getattr(self, f"{qkvin}_slice")
         # adjust K to slice of less important singular values
         # only want to compare the diagonal entries of sigma
         s = torch.diag(sself) if self.full_rank_sigma else sself
-        prevsl = gensl
+        # prevsl = gensl
         if getattr(self, f"uvh_fixed_{qkvin}"):
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)

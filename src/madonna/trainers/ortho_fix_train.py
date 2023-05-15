@@ -64,6 +64,7 @@ def main(config):  # noqa: C901
         # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         from torch.nn.parallel import DistributedDataParallel as DDP
+
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
             print(model)
@@ -348,7 +349,9 @@ def train(
 @torch.no_grad()
 def save_selected_weights(network, epoch, config):
     if not config.baseline:
-        raise RuntimeError("Weights should only be saved when running baseline! (remove for other data gathering)")
+        raise RuntimeError(
+            "Weights should only be saved when running baseline! (remove for other data gathering)",
+        )
     if not config.save_weights:
         return
     save_list = config.save_layers
