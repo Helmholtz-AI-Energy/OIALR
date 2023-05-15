@@ -58,7 +58,7 @@ export TOMOUNT+="/home/kit/scc/qv2382/"
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
   # -A hk-project-test-mlperf \
 
-salloc --partition=sdil \
+salloc --partition=gpu_4_h100 \
   -N "${SLURM_NNODES}" \
   --time "${TIMELIMIT}" \
   --gres gpu:"${GPUS_PER_NODE}" \

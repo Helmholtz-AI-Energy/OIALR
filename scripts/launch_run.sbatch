@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=sdil
 ####SBATCH --account=hk-project-test-mlperf

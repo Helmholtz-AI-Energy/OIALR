@@ -4,7 +4,7 @@
 model: # vit_b_16
   _target_: torchvision.models.VisionTransformer
   image_size: null # get this from datasets!! see train_crop_size in dataset!
-  patch_size: 16 # default: 16
+  patch_size: 8 # default: 16
   num_layers: 6 # default: 12
   num_heads: 6 # default: 12
   hidden_dim: 768 # default: 768
@@ -14,6 +14,7 @@ model: # vit_b_16
 #  num_classes: 1000,
 name: vit_b_16
 autocast: True
+
 #model:  # vit_b_32
 #  _target_: torchvision.models.VisionTransformer
 #  image_size: null  # get this from datasets!! see train_crop_size in dataset!
@@ -28,19 +29,19 @@ autocast: True
 #name: vit_b_32
 #autocast: True
 
-#model:  # vit_l_16
+# model:  # vit_l_16
 #  _target_: torchvision.models.VisionTransformer
 #  image_size: null  # get this from datasets!! see train_crop_size in dataset!
-#  patch_size: # default: 16
-#  num_layers: # default: 24
-#  num_heads: # default: 16
-#  hidden_dim: # default: 1024
-#  mlp_dim: # default: 4096
-#  dropout: 0.0,
-#  attention_dropout: 0.0,
-#  num_classes: 1000,
-#name: vit_b_32
-#autocast: True
+#  patch_size: 16 # default: 16
+#  num_layers: 24 # default: 24
+#  num_heads: 16 # default: 16
+#  hidden_dim: 1024 # default: 1024
+#  mlp_dim: 4096 # default: 4096
+# #  dropout: 0.0
+# #  attention_dropout: 0.0
+# #  num_classes: 1000
+# name: vit_l_16
+# autocast: True
 
 #model:  # vit_l_32
 #  _target_: torchvision.models.VisionTransformer

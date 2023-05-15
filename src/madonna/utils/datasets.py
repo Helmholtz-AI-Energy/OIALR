@@ -487,7 +487,7 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
         batch_size=batch_size,
         shuffle=(train_sampler is None),
         num_workers=workers,
-        pin_memory=dsconfig["num_workers"],
+        pin_memory=False,  # dsconfig["num_workers"],
         sampler=train_sampler,
         persistent_workers=dsconfig["persistent_workers"],
     )
@@ -498,7 +498,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
-    workers = dsconfig["num_workers"]
+    # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
     trans = [
@@ -532,7 +532,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
-        pin_memory=dsconfig["num_workers"],
+        pin_memory=True,  # dsconfig["num_workers"],
         sampler=sampler,
         # persistent_workers=dsconfig["persistent_workers"],
     )
@@ -585,7 +585,7 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
         batch_size=batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        pin_memory=dsconfig["num_workers"],
+        pin_memory=True, # dsconfig["num_workers"],
         num_workers=workers,
         persistent_workers=dsconfig["persistent_workers"],
     )
@@ -596,7 +596,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
     dsconfig = config["data"]
     base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
-    workers = dsconfig["num_workers"]
+    # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
     trans = [transforms.ToTensor(), transforms.Resize(config.data.train_crop_size)]
@@ -626,10 +626,10 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
         dataset=test_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=workers,
-        pin_memory=dsconfig["num_workers"],
+        num_workers=0,
+        pin_memory=True, # dsconfig["num_workers"],
         sampler=test_sampler,
-        persistent_workers=dsconfig["persistent_workers"],
+        # persistent_workers=dsconfig["persistent_workers"],
     )
     return test_dataset, test_loader
 

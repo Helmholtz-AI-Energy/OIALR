@@ -28,10 +28,10 @@ log = logging.getLogger(__name__)
 
 def main(config):  # noqa: C901
     if config.seed is not None:
-        cudnn.benchmark = False
+        cudnn.benchmark = True
         cudnn.deterministic = True
         # torch.manual_seed(args.local_rank)
-        torch.set_printoptions(precision=10)
+        torch.set_printoptions(precision=5)
         # if dist.is_initialized():
         #     scale = dist.get_rank() % 4
         # else:
@@ -68,6 +68,12 @@ def main(config):  # noqa: C901
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
             print(model)
+    else:
+        print(model)
+
+    # for n, p in model.named_parameters():
+    #     print(f"{n}, {p.shape}")
+    # raise ValueError
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
@@ -255,7 +261,7 @@ def train(
         #         scaler.step(optimizer)
         #         scaler.update()
         # else:
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
 
@@ -285,19 +291,17 @@ def train(
             with warmup_scheduler.dampening():
                 if batch_warmup_step:
                     lr_scheduler.step()
-        # argmax = torch.argmax(output, dim=1).to(torch.float32)
-        # # log.info(
-        # #     f"Argmax outputs s "
-        # #     f"mean: {argmax.mean().item():.5f}, max: {argmax.max().item():.5f}, "
-        # #     f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
-        # # )
-        # # progress.display(i + 1, log=log)
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
         #     for n, p in model.named_parameters():
         #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         #     raise ValueError
+        argmax = torch.argmax(output, dim=1).to(torch.float32)
+        if argmax.std() == 0 and epoch > 5:
+            # for n, p in model.named_parameters():
+            #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+            raise ValueError("Std == 0")
 
         if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
             argmax = torch.argmax(output, dim=1).to(torch.float32)
@@ -307,10 +311,6 @@ def train(
                 f"min: {argmax.min().item():.5f}, std: {argmax.std().item():.5f}",
             )
             progress.display(i + 1, log=log)
-            # if argmax.std() == 0:
-            #     for n, p in model.named_parameters():
-            #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-            #     raise ValueError("Std == 0")
 
             # if argmax.std() == 0:
             #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -344,6 +344,33 @@ def train(
             step=epoch,
         )
     return losses.avg, loss
+
+
+@torch.no_grad()
+def save_selected_weights(network, epoch, config):
+    if not config.baseline:
+        raise RuntimeError(
+            "Weights should only be saved when running baseline! (remove for other data gathering)"
+        )
+    if not config.save_weights:
+        return
+    save_list = config.save_layers
+    save_location = Path(config.save_parent_folder) / config.model.name / "baseline_weights"
+    rank = dist.get_rank()
+
+    if rank != 0:
+        dist.barrier()
+        return
+    # save location: resnet18/name/epoch/[u, s, vh, weights
+    for n, p in network.named_parameters():
+        if n in save_list:
+            print(f"saving: {n}")
+            n_save_loc = save_location / n / str(epoch)
+            n_save_loc.mkdir(exist_ok=True, parents=True)
+
+            torch.save(p.data, n_save_loc / "p.pt")
+    # print("finished saving")
+    dist.barrier()
 
 
 @torch.no_grad()

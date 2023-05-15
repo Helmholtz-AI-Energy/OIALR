@@ -15,11 +15,12 @@ criterion:
 
 lr: 0.0001
 lr_schedule:
-  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR
+  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts #
   _partial_: True
   step_size: 300
   gamma: 0.1
   # T_max: 25
+  # T_0: 25
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
@@ -44,12 +45,10 @@ fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
   stability_frequency: 100
-  delay: 10
-  uvthreshold: 0.9
+  delay: 1000
+  uvthreshold: 0.99
   sigma_cutoff_fraction: 0.4
   sync_usv: False
-  full_rank_sigma: True
-  keep_fist_layer: True
-  # full_last_layer: True
-#  triu_fixed: True
-#  ortho_q_fixed: False
+  full_rank_sigma: False
+  keep_first_layer: False
+  keep_last_layer: True
