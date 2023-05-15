@@ -45,10 +45,10 @@ fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
   stability_frequency: 100
-  delay: 100
+  delay: 1000
   uvthreshold: 0.99
   sigma_cutoff_fraction: 0.4
   sync_usv: False
-  full_rank_sigma: True
+  full_rank_sigma: False
   keep_first_layer: False
   keep_last_layer: True

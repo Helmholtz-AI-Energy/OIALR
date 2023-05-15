@@ -417,28 +417,27 @@ class SVDLinear(nn.Module):
 
         # updating usv in full rank is different!
 
-        # if self.u_fixed and self.vh_fixed:
-        #     sdiff = self.s_prev - self.s
-        #     self.s_prev = self.s.data.clone()
-        #     if rank == 0:
-        #         print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
-        #     # switch back to check on the SVD stuff
-        #     # self.u_fixed = False
-        #     normal_params = self.weight.numel()
-        #     total_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.v.shape[1])
-        #     perc_params = total_params / normal_params
-        #     return 2, self.k, perc_params, True
+        if self.u_fixed and self.vh_fixed:
+            # sdiff = self.s_prev - self.s
+            # self.s_prev = self.s.data.clone()
+            # if rank == 0:
+            #     print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
+            # switch back to check on the SVD stuff??
+            # self.u_fixed = False
+            perc_params, _, _ = self.get_perc_params()
+            return 2, self.k, perc_params, True
         set_usvh = True
         if self.full_rank_sigma and self.u_fixed:
             if rank == 0:
                 log.debug("in full rank sigma update of usvh")
             self._update_usv()
-            retu, retvh = 2, 2
             # self.u_fixed = False
             # self._update_k()
             set_usvh = False
             u, s, vh = self.u, self.s, self.vh
             uvh = u @ vh
+            # perc_params, _, _ = self.get_perc_params()
+            # return 2, self.k, perc_params, True
         else:
             # w = self.weight.T if self.trans else self.weight
             w = self.get_weight()
@@ -468,15 +467,8 @@ class SVDLinear(nn.Module):
         csim = self.cossim(self.prev_uvh, uvh)
         self.prev_uvh = uvh
         csmean, _ = csim.mean(), csim.std()
-        retu = csmean
+        self.prev_uvh = uvh
         if csmean > self.uthreshold:
-            # if dist.get_rank() == 0:
-            #     udiff = u - self.u
-            #     vhdiff = vh - self.vh
-            #     print(f"{udiff.mean():.4f}, {udiff.max():.4f}, {udiff.mean():.4f}")
-            #     # print(f"{udiff.mean():.4f}, {udiff.max():.4f}, {udiff.mean():.4f}")
-            #     print(f"{vhdiff.mean():.4f}, {vhdiff.max():.4f}, {vhdiff.mean():.4f}")
-                
             self.u_fixed, self.vh_fixed = True, True
             if set_usvh:
                 self.u.zero_()
@@ -500,11 +492,10 @@ class SVDLinear(nn.Module):
             # self.s[torch.abs(self.s) < 1e-6] *= 0
 
             self._update_k()
-        # self.s_prev = self.s.data.clone()
         perc_params, _, _ = self.get_perc_params()
         
-        return retu, self.k, perc_params, self.u_fixed
-    
+        return csmean, self.k, perc_params, self.u_fixed
+
     @torch.no_grad()
     @torch.compile()
     def _update_usv(self):
@@ -533,10 +524,10 @@ class SVDLinear(nn.Module):
 
         holdu = self.u @ usig
         self.u.zero_()
-        self.u.add_(holdu.contiguous())
+        self.u.add_(holdu)
         holdvh = vhsig @ self.vh
         self.vh.zero_()
-        self.vh.add_(holdvh.contiguous())
+        self.vh.add_(holdvh)
         self.s.zero_()
         self.s.add_(torch.diag(sig))
         # to be safe: set weight to be the same here too
@@ -563,11 +554,10 @@ class SVDLinear(nn.Module):
                 newk = s.shape[0]
             else:
                 newk = nz[0].item()
-        if newk < 0.75 * prevk:
-            self.k = int(prevk * 0.75)
-            log.debug(f"values of S after dropping slice value by only 75% of suggestion: {s[:5]}")
-        else:
-            self.k = newk
+        self.k = newk
+        # if newk < 0.75 * prevk:
+        #     self.k = int(prevk * 0.75)
+        #     log.debug(f"values of S after dropping slice value by only 75% of suggestion: {s[:5]}")
 
         self.u[:, self.k:] *= 0
         self.vh[self.k:] *= 0
@@ -1254,8 +1244,14 @@ class SVDMultiheadAttention(nn.Module):
         prev_uvh_[in_proj, q, k, v]
         _get_[in_proj, q, k, v]
         [in_proj, q, k, v]_slice
+        base weights:
+            [q, k, v]_proj_weight
+            in_proj_weight
         """
-        
+        if getattr(self, f"uvh_fixed_{qkvin}"):
+            perc_params, _, _ = self.get_perc_params()
+            return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+
         rank = dist.get_rank() if dist.is_initialized() else 0
 
         set_usvh = True  # if true: skip the update of USVH (only false for full_rank which had a different update logic)
@@ -1269,8 +1265,11 @@ class SVDMultiheadAttention(nn.Module):
             s = getattr(self, f"{qkvin}_s")
             vh = getattr(self, f"{qkvin}_vh")
             uvh = u @ vh
+            # perc_params, _, _ = self.get_perc_params()
+            # return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
         else:
             # w = self.weight.T if self.trans else self.weight
+            # w = getattr(self, f"{qkvin}_proj_weight") if qkvin in "qkv" else self.in_proj_weight
             w = getattr(self, f"_get_{qkvin}")()
             # w = self.get_weight()
             w = w.T if getattr(self, f"{qkvin}_trans") else w
@@ -1281,9 +1280,9 @@ class SVDMultiheadAttention(nn.Module):
             vh = vh.to(dtp)
             uvh = u @ vh
             prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
-            if prev_uvh is None:
+            if prev_uvh is None:  # first iteration 
                 if rank == 0:
-                    log.info("in first stability update")
+                    log.info("First stability update")
                 setattr(self, f"prev_uvh_{qkvin}", uvh)
                 uself = getattr(self, f"{qkvin}_u")
                 sself = getattr(self, f"{qkvin}_s")
@@ -1306,12 +1305,11 @@ class SVDMultiheadAttention(nn.Module):
         csmean, _ = csim.mean(), csim.std()
         if csmean > self.uvh_threshold:
             setattr(self, f"uvh_fixed_{qkvin}", True)
+            uself = getattr(self, f"{qkvin}_u")
+            sself = getattr(self, f"{qkvin}_s")
+            vhself = getattr(self, f"{qkvin}_vh")
+            gensl = getattr(self, f"{qkvin}_slice")
             if set_usvh:
-                uself = getattr(self, f"{qkvin}_u")
-                sself = getattr(self, f"{qkvin}_s")
-                vhself = getattr(self, f"{qkvin}_vh")
-                gensl = getattr(self, f"{qkvin}_slice")
-
                 uself.zero_()
                 uself.add_(u)
                 vhself.zero_()
@@ -1323,14 +1321,23 @@ class SVDMultiheadAttention(nn.Module):
                 else:
                     sself.zero_()
                     sself[:gensl].add_(s[:gensl])
-            # self.u[torch.abs(self.u) < 1e-5] *= 0
-            # self.vh[torch.abs(self.vh) < 1e-5] *= 0
-            # self.s[torch.abs(self.s) < 1e-6] *= 0
+            # uself[torch.abs(uself) < 1e-5] *= 0
+            # vhself[torch.abs(vhself) < 1e-5] *= 0
+            # sself[torch.abs(sself) < 1e-6] *= 0
+
             self._update_k_slice(qkvin)
+
+        if dist.get_rank() == 0:
+            usig = getattr(self, f"{qkvin}_u")
+            sig = getattr(self, f"{qkvin}_s")
+            vhsig = getattr(self, f"{qkvin}_vh")
+            print(f"u: {usig.mean():.4f}, {usig.min():.4f}, {usig.max():.4f}, {usig.std():.4f}")
+            print(f"s: {sig.mean():.4f}, {sig.min():.4f}, {sig.max():.4f}, {sig.std():.4f}")
+            print(f"vh: {vhsig.mean():.4f}, {vhsig.min():.4f}, {vhsig.max():.4f}, {vhsig.std():.4f}")
         # self.s_prev = self.s.data.clone()
         perc_params, _, _ = self.get_perc_params()
         return csmean, getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
-    
+
     @torch.no_grad()
     def test_stability(self):
         if self.in_proj_weight is not None:
@@ -1347,7 +1354,7 @@ class SVDMultiheadAttention(nn.Module):
             ]
 
     @torch.no_grad()
-    @torch.compile()
+    # @torch.compile()  # TODO: fix compiling here: index error?
     def _update_usv(self, qkvin):
         if not self.full_rank_sigma and not self.u_fixed:
             raise ValueError("this function is only for full-rank sigma with usvh is fixed")
@@ -1416,10 +1423,10 @@ class SVDMultiheadAttention(nn.Module):
                 newsl = s.shape[0]
             else:
                 newsl = nz[0].item()
-        if newsl < 0.75 * prevsl:
-            # TODO: log message?
-            newsl = int(prevsl * 0.75)
-            # print(s[:5])
+        # if newsl < 0.75 * prevsl:
+        #     # TODO: log message?
+        #     newsl = int(prevsl * 0.75)
+        #     # print(s[:5])
         setattr(self, f"{qkvin}_slice", newsl)
 
         uself[:, newsl:] *= 0
