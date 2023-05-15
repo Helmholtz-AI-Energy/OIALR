@@ -585,7 +585,7 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
         batch_size=batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        pin_memory=True, # dsconfig["num_workers"],
+        pin_memory=True,  # dsconfig["num_workers"],
         num_workers=workers,
         persistent_workers=dsconfig["persistent_workers"],
     )
@@ -627,7 +627,7 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
         batch_size=batch_size,
         shuffle=False,
         num_workers=0,
-        pin_memory=True, # dsconfig["num_workers"],
+        pin_memory=True,  # dsconfig["num_workers"],
         sampler=test_sampler,
         # persistent_workers=dsconfig["persistent_workers"],
     )

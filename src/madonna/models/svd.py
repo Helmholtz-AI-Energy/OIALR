@@ -154,7 +154,7 @@ class SVDFixingModel(nn.Module):
         if rank == 0:
             log.info("Testing Stability")
         all_stable = True
-        num_stable, total = 0, 0
+        total = 0
         for c, (name, mod) in enumerate(module.named_modules()):
             # try:
             if hasattr(mod, "test_stability"):
@@ -200,7 +200,7 @@ class SVDFixingModel(nn.Module):
             rank = dist.get_rank()
         else:
             rank = 0
-        percs, actives, normals = [], [], []
+        # percs, actives, normals = [], [], []
         full_active = 0
         full_normal = 0
         for c, (name, mod) in enumerate(module.named_modules()):
@@ -544,7 +544,7 @@ class SVDLinear(nn.Module):
     def _update_k(self):
         # adjust K to slice of less important singular values
         s = torch.diag(self.s) if self.full_rank_sigma else self.s
-        prevk = self.k
+        # prevk = self.k
         if self.u_fixed and self.vh_fixed:
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
@@ -727,7 +727,7 @@ class SVDMultiheadAttention(nn.Module):
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
         self.full_rank_sigma = full_rank_sigma
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
+        assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
         if not self._qkv_same_embed_dim:
             self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
@@ -995,8 +995,8 @@ class SVDMultiheadAttention(nn.Module):
                 sequence length, :math:`N` is the batch size, and :math:`E_v` is the value embedding dimension ``vdim``.
                 See "Attention Is All You Need" for more details.
             key_padding_mask: If specified, a mask of shape :math:`(N, S)` indicating which elements within ``key``
-                to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`, shape should be :math:`(S)`.
-                Binary and float masks are supported.
+                to ignore for the purpose of attention (i.e. treat as "padding"). For unbatched `query`,
+                shape should be :math:`(S)`. Binary and float masks are supported.
                 For a binary mask, a ``True`` value indicates that the corresponding ``key`` value will be ignored for
                 the purpose of attention. For a float mask, it will be directly added to the corresponding ``key`` value.
             need_weights: If specified, returns ``attn_output_weights`` in addition to ``attn_outputs``.
@@ -1246,13 +1246,19 @@ class SVDMultiheadAttention(nn.Module):
                 attn_mask_expanded = attn_mask.view(batch_size, -1, seq_len, seq_len)
             else:  # attn_mask.dim() == 2:
                 attn_mask_expanded = attn_mask.view(1, 1, seq_len, seq_len).expand(
-                    batch_size, self.num_heads, -1, -1
+                    batch_size,
+                    self.num_heads,
+                    -1,
+                    -1,
                 )
             merged_mask = attn_mask_expanded
 
             if key_padding_mask is not None:
                 key_padding_mask_expanded = key_padding_mask.view(batch_size, 1, 1, seq_len).expand(
-                    -1, self.num_heads, -1, -1
+                    -1,
+                    self.num_heads,
+                    -1,
+                    -1,
                 )
                 merged_mask = attn_mask_expanded + key_padding_mask_expanded
 
@@ -1445,10 +1451,10 @@ class SVDMultiheadAttention(nn.Module):
         uself = getattr(self, f"{qkvin}_u")
         sself = getattr(self, f"{qkvin}_s")
         vhself = getattr(self, f"{qkvin}_vh")
-        gensl = getattr(self, f"{qkvin}_slice")
+        # gensl = getattr(self, f"{qkvin}_slice")
         # adjust K to slice of less important singular values
         s = torch.diag(sself) if self.full_rank_sigma else sself
-        prevsl = gensl
+        # prevsl = gensl
         if getattr(self, f"uvh_fixed_{qkvin}"):
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)

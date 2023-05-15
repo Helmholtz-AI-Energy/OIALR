@@ -14,7 +14,6 @@ model: # vit_b_16
 #  num_classes: 1000,
 name: vit_b_16
 autocast: True
-
 #model:  # vit_b_32
 #  _target_: torchvision.models.VisionTransformer
 #  image_size: null  # get this from datasets!! see train_crop_size in dataset!

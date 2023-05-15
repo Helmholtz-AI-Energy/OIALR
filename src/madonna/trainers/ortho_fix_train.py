@@ -350,7 +350,7 @@ def train(
 def save_selected_weights(network, epoch, config):
     if not config.baseline:
         raise RuntimeError(
-            "Weights should only be saved when running baseline! (remove for other data gathering)"
+            "Weights should only be saved when running baseline! (remove for other data gathering)",
         )
     if not config.save_weights:
         return
