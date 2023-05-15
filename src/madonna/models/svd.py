@@ -31,12 +31,14 @@ class SVDFixingModel(nn.Module):
         full_rank_sigma: bool = False,
         keep_first_layer: bool = False,
         keep_last_layer: bool = True,
+        update_from_simga: bool = True,
     ):
         super().__init__()
         self.uvthreshold = uvthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         self.sync_usv = sync_usv
         self.full_rank_sigma = full_rank_sigma
+        self.update_from_simga = update_from_simga
         # print('before replace layers')
         self.first_layer = keep_first_layer
         self.keep_last_layer = keep_last_layer
@@ -80,6 +82,7 @@ class SVDFixingModel(nn.Module):
                     full_rank_sigma=self.full_rank_sigma,
                     start_weight=module.weight,
                     start_bias=module.bias,
+                    update_from_simga=self.update_from_simga,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 # module_output = parametrizations.orthogonal(module_output, name="u")
                 # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
@@ -112,6 +115,7 @@ class SVDFixingModel(nn.Module):
                     start_k_bias=module.bias_k,
                     start_v_bias=module.bias_v,
                     start_in_proj_bias=module.in_proj_bias,
+                    update_from_simga=self.update_from_simga,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name]
             else:
@@ -310,12 +314,14 @@ class SVDLinear(nn.Module):
         full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
+        update_from_simga=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
         self.full_rank_sigma = full_rank_sigma
+        self.update_from_simga = full_rank_sigma and update_from_simga
 
         if start_weight is not None:
             self.weight = start_weight
@@ -417,19 +423,19 @@ class SVDLinear(nn.Module):
 
         # updating usv in full rank is different!
 
-        if self.u_fixed and self.vh_fixed:
-            # sdiff = self.s_prev - self.s
-            # self.s_prev = self.s.data.clone()
-            # if rank == 0:
-            #     print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
-            # switch back to check on the SVD stuff??
-            # self.u_fixed = False
-            perc_params, _, _ = self.get_perc_params()
-            return 2, self.k, perc_params, True
+        # if self.u_fixed and self.vh_fixed:
+        #     # sdiff = self.s_prev - self.s
+        #     # self.s_prev = self.s.data.clone()
+        #     # if rank == 0:
+        #     #     print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
+        #     # switch back to check on the SVD stuff??
+        #     # self.u_fixed = False
+        #     perc_params, _, _ = self.get_perc_params()
+        #     return 2, self.k, perc_params, True
         set_usvh = True
-        if self.full_rank_sigma and self.u_fixed:
+        if self.full_rank_sigma and self.u_fixed and self.update_from_simga:
             if rank == 0:
-                log.debug("in full rank sigma update of usvh")
+                log.info("in full rank sigma update of usvh")
             self._update_usv()
             # self.u_fixed = False
             # self._update_k()
@@ -439,9 +445,9 @@ class SVDLinear(nn.Module):
             # perc_params, _, _ = self.get_perc_params()
             # return 2, self.k, perc_params, True
         else:
-            # w = self.weight.T if self.trans else self.weight
-            w = self.get_weight()
-            w = w.T if self.trans else w
+            w = self.weight.T if self.trans else self.weight
+            # w = self.get_weight()
+            # w = w.T if self.trans else w
             dtp = w.dtype
             u, s, vh = torch.linalg.svd(w.to(torch.float32), full_matrices=False)  # , driver="gesvd")
             u = u.to(dtp)
@@ -716,9 +722,11 @@ class SVDMultiheadAttention(nn.Module):
             start_k_bias=None,
             start_v_bias=None,
             start_in_proj_bias=None,
+            update_from_simga: bool = True,
     ) -> None:
         factory_kwargs = {'device': device, 'dtype': dtype}
         super().__init__()
+        self.update_from_simga = full_rank_sigma and update_from_simga
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
@@ -1248,16 +1256,17 @@ class SVDMultiheadAttention(nn.Module):
             [q, k, v]_proj_weight
             in_proj_weight
         """
-        if getattr(self, f"uvh_fixed_{qkvin}"):
-            perc_params, _, _ = self.get_perc_params()
-            return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+        # if getattr(self, f"uvh_fixed_{qkvin}") and not self.update_from_simga:
+        #     perc_params, _, _ = self.get_perc_params()
+        #     return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
 
         rank = dist.get_rank() if dist.is_initialized() else 0
 
         set_usvh = True  # if true: skip the update of USVH (only false for full_rank which had a different update logic)
-        if self.full_rank_sigma and getattr(self, f"uvh_fixed_{qkvin}"):
-            # if rank == 0:
-            #     log.debug("Full rank sigma update of usvh")
+        if self.full_rank_sigma and getattr(self, f"uvh_fixed_{qkvin}") and self.update_from_simga:
+            # updating U/Vh from full-rank sigma
+            if rank == 0:
+                log.info("Full rank sigma update of usvh")
             # TODO: update _update_usv!
             self._update_usv(qkvin)
             set_usvh = False
@@ -1269,10 +1278,9 @@ class SVDMultiheadAttention(nn.Module):
             # return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
         else:
             # w = self.weight.T if self.trans else self.weight
-            # w = getattr(self, f"{qkvin}_proj_weight") if qkvin in "qkv" else self.in_proj_weight
-            w = getattr(self, f"_get_{qkvin}")()
-            # w = self.get_weight()
+            w = getattr(self, f"{qkvin}_proj_weight") if qkvin in "qkv" else self.in_proj_weight
             w = w.T if getattr(self, f"{qkvin}_trans") else w
+            # w = getattr(self, f"_get_{qkvin}")()
             dtp = w.dtype
             u, s, vh = torch.linalg.svd(w.to(torch.float32), full_matrices=False)  # , driver="gesvd")
             u = u.to(dtp)
@@ -1413,6 +1421,7 @@ class SVDMultiheadAttention(nn.Module):
         vhself = getattr(self, f"{qkvin}_vh")
         gensl = getattr(self, f"{qkvin}_slice")
         # adjust K to slice of less important singular values
+        # only want to compare the diagonal entries of sigma
         s = torch.diag(sself) if self.full_rank_sigma else sself
         prevsl = gensl
         if getattr(self, f"uvh_fixed_{qkvin}"):
