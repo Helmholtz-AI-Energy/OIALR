@@ -17,6 +17,8 @@ import torch.optim
 import torch.utils.data.distributed
 from torch.utils.data import Subset
 
+import time
+
 # import cProfile, pstats, io
 # from pstats import SortKey
 # pr = cProfile.Profile()
@@ -136,6 +138,11 @@ def main(config):  # noqa: C901
     # print(config.training.lr_warmup._target_.split("."), batch_warmup_step)
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
+    rank = dist.get_rank() if dist.is_initialized() else 0
+    try:
+        warmup_steps = config.training.lr_schedule.warmup_period
+    except:
+        warmup_steps = 0
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
@@ -147,7 +154,7 @@ def main(config):  # noqa: C901
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        train_loss, last_loss = train(
+        train_loss, last_loss, optimizer = train(
             train_loader=train_loader,
             optimizer=optimizer,
             model=model,
@@ -160,10 +167,58 @@ def main(config):  # noqa: C901
             warmup_scheduler=warmup_scheduler,
         )
 
+        if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1 
+            try:
+                stabtime = time.perf_counter()
+                reset_optimizer = model.check_stability(force=True)
+                if rank == 0:
+                    log.info(f"Stability time: {time.perf_counter() - stabtime}")
+            except AttributeError:
+                reset_optimizer = False
+            if reset_optimizer:
+                resettime = time.perf_counter()
+                # instead of resetting optimizer, slice off bits of the saved states
+                is_adam = isinstance(optimizer, torch.optim.Adam)
+                # for group in optimizer.param_groups:
+                for c, (n, p) in enumerate(model.named_parameters()):
+                    # if dist.get_rank() == 0:
+                    #     print(n, optimizer.param_groups[0]["params"][c].shape, p.shape)
+                    if is_adam:
+                        state = optimizer.state[p]
+                        if len(list(state.keys())) > 0:
+                            for k in ["exp_avg", "exp_avg_sq"]:
+                                if state[k].shape != p.shape:
+                                    sl = []
+                                    for d in range(p.ndim):
+                                        sl.append(slice(0, p.shape[d]))
+                                    # print(type(state[k]))
+                                    state[k] = state[k][tuple(sl)]
+                            if optimizer.param_groups[0]["amsgrad"]:
+                                if state["max_exp_avg_sq"].shape != p.shape:
+                                    sl = []
+                                    for d in range(p.ndim):
+                                        sl.append(slice(0, p.shape[d]))
+                                    state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
+                    if optimizer.param_groups[0]["params"][c].shape != p.shape:
+                        sl = []
+                        for d in range(p.ndim):
+                            sl.append(slice(0, p.shape[d]))
+                        optimizer.param_groups[0]["params"][c] = optimizer.param_groups[0]["params"][c][tuple(sl)]
+                if rank == 0:
+                    log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
+                # optimizer = madonna.utils.get_optimizer(config, model.ddp_model, lr=optimizer.param_groups[0]['lr'])
+                # # if resetting optimizer, need to also reset the lr scheduler and warmup
+                # scheduler.optimizer = optimizer
+                # warmup_scheduler.optimizer = optimizer
+
         # if model.skip_stability:
         # for n, p in model.named_parameters():
         #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         # model.sync_models()
+        # if epoch % 10 == 9 or epoch == config.training.epochs - 1:
+        #     if dist.get_rank() == 0:
+        #         for n, p in model.named_parameters():
+        #             print(f"{n} {p.requires_grad} sparcity: {torch.count_nonzero(torch.abs(p) < 1e-5) / p.numel()}")
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
@@ -185,10 +240,13 @@ def main(config):  # noqa: C901
             )
 
         # log the percentage of params in use
-        if config.rank == 0 and config.enable_tracking and not config.baseline:
+        if config.rank == 0 and not config.baseline:
             if hasattr(model, "get_perc_params_all_layers"):
-                perc, _num_active, _num_normal = model.get_perc_params_all_layers(module=model.ddp_model)
-                mlflow.log_metric("perc_parmas", perc, step=epoch)
+                perc, trainable, normal = model.get_perc_params_all_layers(module=model.ddp_model)
+                if config.enable_tracking:
+                    mlflow.log_metric("perc_parmas", perc, step=epoch)
+                log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
+                model.track_interior_slices_mlflow(config, epoch)
 
         if warmup_scheduler is not None:
             with warmup_scheduler.dampening():
@@ -246,6 +304,19 @@ def train(
         # move data to the same device as model
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+
+        # try:
+        #     reset_optimizer = model.check_stability()
+        # except AttributeError:
+        #     reset_optimizer = False
+        # if reset_optimizer:
+        #     if dist.get_rank() == 0:
+        #         log.info("Reset Optimizer State")
+        #     optimizer = madonna.utils.get_optimizer(config, model.ddp_model, lr=optimizer.param_groups[0]['lr'])
+        #     # if resetting optimizer, need to also reset the lr scheduler and warmup
+        #     lr_scheduler.optimizer = optimizer
+        #     warmup_scheduler.optimizer = optimizer
+
         # if not config.baseline and dist.is_initialized():
         #     with model.target_model.no_sync():
         #         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
@@ -261,7 +332,7 @@ def train(
         #         scaler.step(optimizer)
         #         scaler.update()
         # else:
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
 
@@ -298,10 +369,11 @@ def train(
         #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         #     raise ValueError
         argmax = torch.argmax(output, dim=1).to(torch.float32)
-        if argmax.std() == 0 and epoch > 5:
-            # for n, p in model.named_parameters():
-            #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-            raise ValueError("Std == 0")
+        # if argmax.std() == 0 and epoch > 5:
+        #     if dist.get_rank() == 0:
+        #         for n, p in model.named_parameters():
+        #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+        #     raise ValueError("Std == 0")
 
         if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
             argmax = torch.argmax(output, dim=1).to(torch.float32)
@@ -343,7 +415,7 @@ def train(
             },
             step=epoch,
         )
-    return losses.avg, loss
+    return losses.avg, loss, optimizer
 
 
 @torch.no_grad()

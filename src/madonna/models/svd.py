@@ -13,7 +13,8 @@ from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
-
+from time import perf_counter
+import mlflow
 from ..utils import utils
 
 log = logging.getLogger(__name__)
@@ -32,6 +33,7 @@ class SVDFixingModel(nn.Module):
         keep_first_layer: bool = False,
         keep_last_layer: bool = True,
         update_from_simga: bool = True,
+        reinit_shapes: bool = True,
     ):
         super().__init__()
         self.uvthreshold = uvthreshold
@@ -43,13 +45,14 @@ class SVDFixingModel(nn.Module):
         self.first_layer = keep_first_layer
         self.keep_last_layer = keep_last_layer
         self.last_layer = None
+        self.reinit_shapes = reinit_shapes
         self.local_model = self._replace_layers(existing_model)
         if keep_last_layer:
             self._reset_last_layer(self.local_model)
         if dist.is_initialized():
             if dist.get_rank() == 0:
                 log.info("Initializing DDP")
-            self.ddp_model = DDP(self.local_model, find_unused_parameters=True)
+            self.ddp_model = DDP(self.local_model, find_unused_parameters=False)
         try:
             if dist.get_rank() == 0:
                 print(self.ddp_model)
@@ -64,8 +67,15 @@ class SVDFixingModel(nn.Module):
         self.skip_stability = False
         self.delay = delay
         self.stable_list = []
-        # for n, p in self.local_model.named_parameters():
-        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+
+        num = 0
+        for n, p in self.ddp_model.named_parameters():
+            if p.requires_grad:
+                if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
+                    # print(f"{n}: {p.numel()}")
+                    num += p.numel()
+
+        self.base_trainable_parameters = num
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
@@ -83,6 +93,7 @@ class SVDFixingModel(nn.Module):
                     start_weight=module.weight,
                     start_bias=module.bias,
                     update_from_simga=self.update_from_simga,
+                    reinit_shapes=self.reinit_shapes,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 # module_output = parametrizations.orthogonal(module_output, name="u")
                 # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
@@ -116,11 +127,11 @@ class SVDFixingModel(nn.Module):
                     start_v_bias=module.bias_v,
                     start_in_proj_bias=module.in_proj_bias,
                     update_from_simga=self.update_from_simga,
+                    reinit_shapes=self.reinit_shapes,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name]
             else:
                 self.first_layer = False
-        # SKIPPING CONV2D Layers!!
         for n, child in module.named_children():
             module_output.add_module(
                 f"{n}",
@@ -151,33 +162,32 @@ class SVDFixingModel(nn.Module):
         # self.sync_models()
         # if self.skip_stability:
         #     return
-        if dist.is_initialized():
-            rank = dist.get_rank()
-        else:
-            rank = 0
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        sz = dist.get_world_size() if dist.is_initialized() else 1
         if rank == 0:
             log.info("Testing Stability")
         all_stable = True
         total = 0
+        reset_optimizer = False
         for c, (name, mod) in enumerate(module.named_modules()):
             # try:
             if hasattr(mod, "test_stability"):
-                uchanging, k, perc, stable = mod.test_stability()
+                uchanging, k, perc, stable, changing_k = mod.test_stability()
                 total += 1
                 if rank == 0:
                     try:
-                        uchange = f"{uchanging:.3f}"
+                        uchange = f"{uchanging:.4f}"
+                        percs = f"{perc * 100:.4f}"
                     except TypeError:  # in list return (qkv from attention...)
                         uchange = ""
-                        for u in uchanging:
-                            uchange += f"{u:.3f}, "
-                    try:
-                        percs = f"{perc * 100:.3f}"
-                    except TypeError:  # in list return (qkv from attention...)
                         percs = ""
+                        for u in uchanging:
+                            uchange += f"{u:.4f}, "
                         for p in perc:
                             percs += f"{p:.3f}, "
                     log.info(f"{name}: UVh: {uchange} - k: {k} - % active params: {percs}")
+                if changing_k:
+                    reset_optimizer = True
         # removing stability stuff, pain in the ass
         #         try:
         #             stable[0]
@@ -192,8 +202,20 @@ class SVDFixingModel(nn.Module):
         #         f"Stablity stats: {num_stable} of {total} layers with fixed U + Vh -> "
         #         f"{100 * num_stable / total:.4f}%",
         #     )
+        if dist.is_initialized():  # and reset_optimizer:
+            # this indicates that the shapes of the parameters changed
+            # need to re-init DDP to have the correct buckets
+            # TODO: this might be a preformance hit
+            ddp_time = perf_counter()
+            del self.ddp_model
+            self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+            if dist.get_rank() == 0:
+                log.info(f"Reinit DDP. Time takesn: {perf_counter() - ddp_time}")
+                # for n, p in self.ddp_model.named_parameters():
+                #     print(f"{n}, {p.requires_grad}")
         if all_stable:
             self.skip_stability = True
+        return reset_optimizer
 
     @torch.no_grad()
     def get_perc_params_all_layers(self, module):
@@ -206,37 +228,74 @@ class SVDFixingModel(nn.Module):
             rank = 0
         # percs, actives, normals = [], [], []
         full_active = 0
-        full_normal = 0
-        for c, (name, mod) in enumerate(module.named_modules()):
-            if hasattr(mod, "get_perc_params"):
-                perc_params, active_params, normal_params = mod.get_perc_params()
-                full_active += active_params
-                full_normal += normal_params
-            else:
-                # TODO: need to get the parameters of the other modules??
-                pass
+        # print("in perc params")
+        for n, p in self.ddp_model.named_parameters():
+            # print(f"{n} {p.requires_grad}")
+            if p.requires_grad:
+                # if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
+                full_active += p.numel()
 
-        if full_normal == 0:
-            full_normal = 1
-            full_active = 1
+        # for c, (name, mod) in enumerate(module.named_modules()):
+        #     if hasattr(mod, "get_perc_params"):
+        #         _, active_params, _ = mod.get_perc_params()
+        #         full_active += active_params
+        #     else:
+        #         if len(list(mod.children())) > 1:
+        #             print(f'skipping {name}')
+        #             continue
+        #         print(f"getting params for {name}")
+        #         for n, p in mod.named_parameters():
+        #             if p.requires_grad:
+        #                 if rank == 0:
+        #                     print(n)
+        #                 full_active += p.numel()
+
+        full_normal = self.base_trainable_parameters
         if rank == 0:
             log.info(
                 f"Active Params: {100 * (full_active / full_normal):.4f}%",
             )
         return 100 * (full_active / full_normal), full_active, full_normal
 
-    def forward(self, inputs):
+    def check_stability(self, force=False):
+        ret = False
         if self.ddp_model.training:
             self.call_count += 1
+            if force:
+                return self.test_basis_stability_all_layers(module=self.ddp_model)
+
             if (
                 self.call_count % self.stability_frequency == self.stability_frequency - 1
                 and self.call_count >= self.delay
             ):
-                self.test_basis_stability_all_layers(module=self.ddp_model)
-            # self.train()
+                ret = self.test_basis_stability_all_layers(module=self.ddp_model)
+                # self.train()
+        return ret
+
+    def forward(self, inputs):
         # if self.call_count > (self.stability_frequency * 4 + self.delay):
         #     return self.local_model(inputs)
+        # try:
         return self.ddp_model(inputs)
+        # except RuntimeError as err:
+        #     if dist.get_rank() == 0:
+        #         print("failed forward!!")
+        #         for c, n, p in enumerate(self.ddp_model.named_parameters()):
+        #             print(f"{n}: {p.requires_grad} - {c}")
+        #     return self.ddp_model(inputs)
+        
+    @torch.no_grad()
+    def track_interior_slices_mlflow(self, config, epoch):
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if not config.enable_tracking or rank != 0:
+            return
+        # for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
+        #     # try:
+        #     if hasattr(mod, "test_stability"):
+        #         slices = mod.get_interior_slice()
+        #         for sl in slices:
+        #             mlflow.log_metric(name + f".{sl}", slices[sl], step=epoch)
+        #             # print(f"logging interior slice for {name}.{sl}")
 
     @torch.no_grad()
     def sync_models(self, verbose=True):
@@ -315,6 +374,7 @@ class SVDLinear(nn.Module):
         start_weight=None,
         start_bias=None,
         update_from_simga=True,
+        reinit_shapes=False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinear, self).__init__()
@@ -322,6 +382,7 @@ class SVDLinear(nn.Module):
         self.out_features = out_features
         self.full_rank_sigma = full_rank_sigma
         self.update_from_simga = full_rank_sigma and update_from_simga
+        self.reinit_shapes = reinit_shapes
 
         if start_weight is not None:
             self.weight = start_weight
@@ -342,9 +403,9 @@ class SVDLinear(nn.Module):
         self.vh = torch.zeros((k, w.shape[1]), **factory_kwargs)
         self.s = torch.zeros((k, k) if self.full_rank_sigma else k, **factory_kwargs)
 
-        self.u = nn.Parameter(self.u)
+        self.u = nn.Parameter(self.u, requires_grad=False)
         self.s = nn.Parameter(self.s, requires_grad=False)
-        self.vh = nn.Parameter(self.vh)
+        self.vh = nn.Parameter(self.vh, requires_grad=False)
 
         if bias:
             if start_bias is None:
@@ -360,9 +421,10 @@ class SVDLinear(nn.Module):
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         self.sync_usv = sync_usv
-        self.u_fixed = False
+        # self.u_fixed = False
+        self.uvh_fixed = False
         self.u_prev = None
-        self.vh_fixed = False
+        # self.vh_fixed = False
         self.vh_prev = None
         self.s_prev = None
         self.k = min(in_features, out_features)
@@ -384,26 +446,36 @@ class SVDLinear(nn.Module):
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
-    @torch.compile()
+    # @torch.compile()  # TODO: compiling seems to be weird here...might need to compile two different functions?
     def get_weight(self):
-        if not self.u_fixed and not self.vh_fixed:
+        if not self.uvh_fixed:
             # if both are not fixed -> normal training
             # if dist.get_rank() == 0:
             #     log.info("Using self.weight")
+            self.weight.requires_grad = True
+            self.u.requires_grad = False
+            self.vh.requires_grad = False
+            self.s.requires_grad = False
             return self.weight
         # detach sets 'requires grad' to False
-        # if self.training:
-        #     self.s.requires_grad = True
-        #     self.u.requires_grad = False if self.u_fixed else True
-        #     self.vh.requires_grad = False if self.u_fixed else True
-        # u, vh = self.u, self.vh
-        u = self.u.detach() if self.u_fixed else self.u
-        vh = self.vh.detach() if self.vh_fixed else self.vh
+        if self.training:
+            self.s.requires_grad = True
+            if self.uvh_fixed:
+                self.u.requires_grad = False
+                self.vh.requires_grad = False
+                self.weight.requires_grad = False
+
+                # self.bias.requires_grad = False
+        u, vh = self.u, self.vh
+        # u = self.u.detach() if self.u_fixed else self.u
+        # vh = self.vh.detach() if self.vh_fixed else self.vh
 
         s = self.s if self.full_rank_sigma else torch.diag(self.s)
 
         w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.trans else w
+        # eps = torch.finfo(ret.dtype).eps * 10
+        # ret[torch.abs(ret) < eps] *= 0
         with torch.no_grad():
             self.weight *= 0
             self.weight += ret
@@ -414,6 +486,9 @@ class SVDLinear(nn.Module):
     # @torch.compile()
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         w = self.get_weight()
+        # if self.bias is None:
+        #     self.bias.requires_grad = False
+        # print(f"bias is None? {self.bias is None}")
         return F.linear(input, w, self.bias)
 
     @torch.no_grad()
@@ -423,27 +498,28 @@ class SVDLinear(nn.Module):
 
         # updating usv in full rank is different!
 
-        # if self.u_fixed and self.vh_fixed:
+        # if self.uvh_fixed and not self.update_from_simga:
         #     # sdiff = self.s_prev - self.s
         #     # self.s_prev = self.s.data.clone()
         #     # if rank == 0:
         #     #     print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
         #     # switch back to check on the SVD stuff??
-        #     # self.u_fixed = False
+        #     # self.uvh_fixed = False
         #     perc_params, _, _ = self.get_perc_params()
-        #     return 2, self.k, perc_params, True
+        #     return 3, self.k, perc_params, True, False
         set_usvh = True
-        if self.full_rank_sigma and self.u_fixed and self.update_from_simga:
+        if self.full_rank_sigma and self.uvh_fixed and self.update_from_simga:
             if rank == 0:
                 log.info("in full rank sigma update of usvh")
             self._update_usv()
-            # self.u_fixed = False
+            # self.uvh_fixed = False
             # self._update_k()
             set_usvh = False
             u, s, vh = self.u, self.s, self.vh
             uvh = u @ vh
-            # perc_params, _, _ = self.get_perc_params()
-            # return 2, self.k, perc_params, True
+            # self.update_from_simga = False
+            perc_params, _, _ = self.get_perc_params()
+            # return 2, self.k, perc_params, True, False
         else:
             w = self.weight.T if self.trans else self.weight
             # w = self.get_weight()
@@ -464,7 +540,7 @@ class SVDLinear(nn.Module):
                 self.s.add_(torch.diag(s) if self.full_rank_sigma else s)
                 self.vh.zero_()
                 self.vh.add_(vh)
-                return 0, self.k, 1.0, self.u_fixed
+                return 0, self.k, 1.0, self.uvh_fixed, False
             self.prev_uvh = uvh
             if rank == 0:
                 log.info("in normal stability update")
@@ -474,8 +550,9 @@ class SVDLinear(nn.Module):
         self.prev_uvh = uvh
         csmean, _ = csim.mean(), csim.std()
         self.prev_uvh = uvh
+        change_k = False
         if csmean > self.uthreshold:
-            self.u_fixed, self.vh_fixed = True, True
+            self.uvh_fixed = True
             if set_usvh:
                 self.u.zero_()
                 self.u.add_(u)
@@ -488,6 +565,11 @@ class SVDLinear(nn.Module):
                     self.s.zero_()
                     self.s[: self.k].add_(s[: self.k])
 
+            self.weight.requires_grad = False
+            self.u.requires_grad = False
+            self.vh.requires_grad = False
+            self.s.requires_grad = True
+
             # if dist.get_rank() == 0:
             #     print(f"u: {self.u.mean():.4f}, {self.u.min():.4f}, {self.u.max():.4f}, {self.u.std():.4f}")
             #     print(f"s: {self.s.mean():.4f}, {self.s.min():.4f}, {self.s.max():.4f}, {self.s.std():.4f}")
@@ -497,14 +579,19 @@ class SVDLinear(nn.Module):
             # self.vh[torch.abs(self.vh) < 1e-5] *= 0
             # self.s[torch.abs(self.s) < 1e-6] *= 0
 
-            self._update_k()
+            # self.bias.requires_grad = False
+
+            change_k = self._update_k()
         perc_params, _, _ = self.get_perc_params()
-        return csmean, self.k, perc_params, self.u_fixed
+        # w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+        # w[torch.abs(w) < 1e-5] *= 0
+        # if dist.get_rank() == 0:
+        #     print(f"sparcity: {torch.count_nonzero(w) / w.numel()}")
+        return csmean, self.k, perc_params, self.uvh_fixed, change_k
 
     @torch.no_grad()
-    @torch.compile()
     def _update_usv(self):
-        if not self.full_rank_sigma and not self.u_fixed:
+        if not self.full_rank_sigma and not self.uvh_fixed:
             raise ValueError("this function is only for full-rank sigma with usvh is fixed")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
         usig, sig, vhsig = torch.linalg.svd(self.s)  # square mat, full mat arg doesnt matter
@@ -550,8 +637,8 @@ class SVDLinear(nn.Module):
     def _update_k(self):
         # adjust K to slice of less important singular values
         s = torch.diag(self.s) if self.full_rank_sigma else self.s
-        # prevk = self.k
-        if self.u_fixed and self.vh_fixed:
+        prevk = self.k
+        if self.uvh_fixed:
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
             if len(nz) == 0:
@@ -560,16 +647,30 @@ class SVDLinear(nn.Module):
             else:
                 newk = nz[0].item()
         self.k = newk
-        # if newk < 0.75 * prevk:
-        #     self.k = int(prevk * 0.75)
-        #     log.debug(f"values of S after dropping slice value by only 75% of suggestion: {s[:5]}")
+        if newk < 0.75 * prevk:
+            self.k = int(prevk * 0.75)
+            log.debug(f"Values of S after dropping slice value by only 75% of suggestion: {s[:5]}")
 
-        self.u[:, self.k :] *= 0
-        self.vh[self.k :] *= 0
-        if self.full_rank_sigma:
-            self.s[self.k :, self.k :].mul_(0)
+        if self.reinit_shapes:
+            self.u.set_(self.u[:, :self.k].contiguous())
+            self.vh.set_(self.vh[:self.k].contiguous())
+            if self.full_rank_sigma:
+                self.s.set_(self.s[:self.k, :self.k].contiguous())
+            else:
+                self.s.set_(self.s[:self.k])
         else:
-            self.s[self.k :].mul_(0)
+            self.u[:, self.k :] *= 0
+            self.vh[self.k :] *= 0
+            if self.full_rank_sigma:
+                self.s[self.k :, self.k :].mul_(0)
+            else:
+                self.s[self.k :].mul_(0)
+        return prevk != self.k
+    
+    def get_interior_slice(self):
+        return {
+            "weight": self.k,
+        }
 
     def extra_repr(self) -> str:
         return "in_features={}, out_features={}, bias={}".format(
@@ -596,7 +697,7 @@ class SVDLinear(nn.Module):
         if not isinstance(mode, bool):
             raise ValueError("training mode is expected to be boolean")
 
-        if dist.is_initialized() and self.sync_usv and (self.u_fixed or self.vh_fixed):
+        if dist.is_initialized() and self.sync_usv and self.uvh_fixed:
             with torch.no_grad():
                 self.u /= dist.get_world_size()
                 uwait = dist.all_reduce(self.u, async_op=True)
@@ -616,10 +717,15 @@ class SVDLinear(nn.Module):
     @torch.compile()
     def get_perc_params(self):
         normal_params = self.weight.numel()
-        if self.u_fixed and self.vh_fixed:
-            trainable_params = self.k**2
+        bias_params = 0 if self.bias is None else self.bias.numel()
+        if self.uvh_fixed:
+            trainable_params = self.k
+            if self.full_rank_sigma:
+                trainable_params = trainable_params ** 2
         else:
             trainable_params = normal_params
+        trainable_params += bias_params
+        normal_params += bias_params
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
 
@@ -697,7 +803,6 @@ class SVDMultiheadAttention(nn.Module):
     bias_v: Optional[torch.Tensor]
 
     def __init__(
-<<<<<<< HEAD
             self,
             embed_dim,
             num_heads,
@@ -722,31 +827,7 @@ class SVDMultiheadAttention(nn.Module):
             start_v_bias=None,
             start_in_proj_bias=None,
             update_from_simga: bool = True,
-=======
-        self,
-        embed_dim,
-        num_heads,
-        dropout=0.0,
-        bias=True,
-        add_bias_kv=False,
-        add_zero_attn=False,
-        kdim=None,
-        vdim=None,
-        batch_first=False,
-        device=None,
-        dtype=None,
-        uvh_threshold=0.9,
-        sigma_cutoff_fraction=0.1,
-        sync_usv=False,  # TODO: should this even be here? are we letting them drift?
-        full_rank_sigma=True,
-        start_q=None,
-        start_k=None,
-        start_v=None,
-        start_in_proj=None,
-        start_k_bias=None,
-        start_v_bias=None,
-        start_in_proj_bias=None,
->>>>>>> 7d567930d4cebcc7eaf603ff5c82a6222feb70fb
+            reinit_shapes=False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -761,16 +842,17 @@ class SVDMultiheadAttention(nn.Module):
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
         self.full_rank_sigma = full_rank_sigma
+        self.reinit_shapes = reinit_shapes
         assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
         if not self._qkv_same_embed_dim:
             self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-            self.qu = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            self.q_u = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
             if self.full_rank_sigma:
-                self.qs = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                self.q_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
             else:
-                self.qs = Parameter(torch.empty((embed_dim), **factory_kwargs))
-            self.qvh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                self.q_s = Parameter(torch.empty((embed_dim), **factory_kwargs), requires_grad=False)
+            self.q_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
             self.q_trans = False
             self.q_slice = embed_dim
 
@@ -778,55 +860,55 @@ class SVDMultiheadAttention(nn.Module):
             if self.kdim > embed_dim:
                 # u - kdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x kdim
                 self.k_trans = True
-                self.k_u = Parameter(torch.empty((self.kdim, embed_dim), **factory_kwargs))
+                self.k_u = Parameter(torch.empty((self.kdim, embed_dim), **factory_kwargs), requires_grad=False)
                 if not self.full_rank_sigma:
-                    self.k_s = Parameter(torch.empty((embed_dim), **factory_kwargs))
+                    self.k_s = Parameter(torch.empty((embed_dim), **factory_kwargs), requires_grad=False)
                 else:
-                    self.k_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-                self.k_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                    self.k_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+                self.k_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
                 self.k_slice = embed_dim
             else:
                 # u - embed x kdim, s - kdim x kdim, vh - kdim x kdim
                 self.k_trans = False
-                self.k_u = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
+                self.k_u = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs), requires_grad=False)
                 if not self.full_rank_sigma:
-                    self.k_s = Parameter(torch.empty((self.kdim), **factory_kwargs))
+                    self.k_s = Parameter(torch.empty((self.kdim), **factory_kwargs), requires_grad=False)
                 else:
-                    self.k_s = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs))
-                self.k_vh = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs))
+                    self.k_s = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs), requires_grad=False)
+                self.k_vh = Parameter(torch.empty((self.kdim, self.kdim), **factory_kwargs), requires_grad=False)
                 self.k_slice = self.kdim
 
             self.v_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
             if self.vdim > embed_dim:
                 # u - vdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x vdim
                 self.v_trans = True
-                self.v_u = Parameter(torch.empty((self.vdim, embed_dim), **factory_kwargs))
+                self.v_u = Parameter(torch.empty((self.vdim, embed_dim), **factory_kwargs), requires_grad=False)
                 if not self.full_rank_sigma:
-                    self.v_s = Parameter(torch.empty((embed_dim), **factory_kwargs))
+                    self.v_s = Parameter(torch.empty((embed_dim), **factory_kwargs), requires_grad=False)
                 else:
-                    self.v_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-                self.v_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                    self.v_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+                self.v_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
                 self.v_slice = embed_dim
             else:
                 # u - embed x vdim, s - vdim x vdim, vh - vdim x vdim
                 self.v_trans = False
-                self.v_u = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
+                self.v_u = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs), requires_grad=False)
                 if not self.full_rank_sigma:
-                    self.v_s = Parameter(torch.empty((self.vdim), **factory_kwargs))
+                    self.v_s = Parameter(torch.empty((self.vdim), **factory_kwargs), requires_grad=False)
                 else:
-                    self.v_s = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
-                self.v_vh = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs))
+                    self.v_s = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs), requires_grad=False)
+                self.v_vh = Parameter(torch.empty((self.vdim, self.vdim), **factory_kwargs), requires_grad=False)
                 self.v_slice = self.vdim
             self.register_parameter("in_proj_weight", None)
         else:
             self.in_proj_weight = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
             # in_proj is always TS
-            self.in_proj_u = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
+            self.in_proj_u = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
             if not self.full_rank_sigma:
-                self.in_proj_s = Parameter(torch.empty((embed_dim), **factory_kwargs))
+                self.in_proj_s = Parameter(torch.empty((embed_dim), **factory_kwargs), requires_grad=False)
             else:
-                self.in_proj_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
-            self.in_proj_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+                self.in_proj_s = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+            self.in_proj_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
             self.in_proj_trans = False
             self.in_proj_slice = embed_dim
 
@@ -926,9 +1008,19 @@ class SVDMultiheadAttention(nn.Module):
         if self.q_proj_weight is None:
             return self.q_proj_weight
         if not self.uvh_fixed_q:
+            self.q_u.requires_grad = False
+            self.q_s.requires_grad = False
+            self.q_vh.requires_grad = False
             return self.q_proj_weight
-        u = self.q_u.detach()
-        vh = self.q_vh.detach()
+        
+        if self.training:
+            self.q_u.requires_grad = False
+            self.q_s.requires_grad = True
+            self.q_vh.requires_grad = False
+            self.q_proj_weight.requires_grad = False
+        u, vh = self.q_u, self.q_vh
+        # u = self.q_u.detach()
+        # vh = self.q_vh.detach()
 
         s = self.q_s if self.full_rank_sigma else torch.diag(self.q_s)
 
@@ -944,9 +1036,18 @@ class SVDMultiheadAttention(nn.Module):
         if self.k_proj_weight is None:
             return self.k_proj_weight
         if not self.uvh_fixed_k:
+            self.k_u.requires_grad = False
+            self.k_s.requires_grad = False
+            self.k_vh.requires_grad = False
             return self.k_proj_weight
-        u = self.k_u.detach()
-        vh = self.k_vh.detach()
+        if self.training:
+            self.k_u.requires_grad = False
+            self.k_s.requires_grad = True
+            self.k_vh.requires_grad = False
+            self.k_proj_weight.requires_grad = False
+        u, vh = self.k_u, self.k_vh
+        # u = self.k_u.detach()
+        # vh = self.k_vh.detach()
 
         s = self.k_s if self.full_rank_sigma else torch.diag(self.k_s)
 
@@ -962,9 +1063,18 @@ class SVDMultiheadAttention(nn.Module):
         if self.v_proj_weight is None:
             return self.v_proj_weight
         if not self.uvh_fixed_v:
+            self.v_u.requires_grad = False
+            self.v_s.requires_grad = False
+            self.v_vh.requires_grad = False
             return self.v_proj_weight
-        u = self.v_u.detach()
-        vh = self.v_vh.detach()
+        if self.training:
+            self.v_u.requires_grad = False
+            self.v_s.requires_grad = True
+            self.v_vh.requires_grad = False
+            self.v_proj_weight.requires_grad = False
+        u, vh = self.v_u, self.v_vh
+        # u = self.v_u.detach()
+        # vh = self.v_vh.detach()
 
         s = self.v_s if self.full_rank_sigma else torch.diag(self.v_s)
 
@@ -977,22 +1087,48 @@ class SVDMultiheadAttention(nn.Module):
 
     # @torch.compile()
     def _get_in_proj(self) -> Tensor:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        if self.in_proj_weight is None:
+            # if rank == 0:
+            #     log.info("in_proj weight is None")
+            return self.in_proj_weight
         if not self.uvh_fixed_in_proj:
             # print('uvh not fixed', type(self.in_proj_weight))
+            # if rank == 0:
+            #     log.info("Using default in_proj_weight")
+            self.in_proj_u.requires_grad = False
+            self.in_proj_s.requires_grad = False
+            self.in_proj_vh.requires_grad = False
             return self.in_proj_weight
-        u = self.in_proj_u.detach()
-        vh = self.in_proj_vh.detach()
+        if self.training:
+            self.in_proj_u.requires_grad = False
+            self.in_proj_vh.requires_grad = False
+            self.in_proj_weight.requires_grad = False
+
+            # if self.bias_k is not None:
+            #     self.bias_k.requires_grad = False
+            # if self.bias_v is not None:
+            #     self.bias_v.requires_grad = False
+            # if self.in_proj_bias is not None:
+            #     self.in_proj_bias.requires_grad = False
+        self.in_proj_s.requires_grad = True
+        u = self.in_proj_u  # .detach()
+        vh = self.in_proj_vh  # .detach()
 
         s = self.in_proj_s if self.full_rank_sigma else torch.diag(self.in_proj_s)
 
         ret = torch.linalg.multi_dot([u, s, vh])
+        # eps = torch.finfo(ret.dtype).eps * 10
+        # ret[torch.abs(ret) < eps] *= 0
         # No need for transpose, in_proj is always TS (be definition)
         with torch.no_grad():
             self.in_proj_weight *= 0
             self.in_proj_weight += ret
+        # if rank == 0:
+        #     log.info("Using USVh in_proj_weight")
         return ret
 
-    @torch.compile()
+    # @torch.compile()
     def get_weight(self):
         if not self._qkv_same_embed_dim:  # get qkv
             q = self._get_q()
@@ -1126,7 +1262,7 @@ class SVDMultiheadAttention(nn.Module):
                 value,
                 self._get_in_proj(),  # self.in_proj_weight,
                 self.in_proj_bias,
-                self.out_proj.weight,
+                self.out_proj.get_weight(),
                 self.out_proj.bias,
             )
             # We have to use list comprehensions below because TorchScript does not support
@@ -1151,7 +1287,7 @@ class SVDMultiheadAttention(nn.Module):
                     self.num_heads,
                     self._get_in_proj(),  # self.in_proj_weight,
                     self.in_proj_bias,
-                    self.out_proj.weight,
+                    self.out_proj.get_weight(),
                     self.out_proj.bias,
                     merged_mask,
                     need_weights,
@@ -1194,7 +1330,7 @@ class SVDMultiheadAttention(nn.Module):
                 self.bias_v,
                 self.add_zero_attn,
                 self.dropout,
-                self.out_proj.weight,
+                self.out_proj.get_weight(),
                 self.out_proj.bias,
                 training=self.training,
                 key_padding_mask=key_padding_mask,
@@ -1221,7 +1357,7 @@ class SVDMultiheadAttention(nn.Module):
                 self.bias_v,
                 self.add_zero_attn,
                 self.dropout,
-                self.out_proj.weight,
+                self.out_proj.get_weight(),
                 self.out_proj.bias,
                 training=self.training,
                 key_padding_mask=key_padding_mask,
@@ -1322,15 +1458,9 @@ class SVDMultiheadAttention(nn.Module):
             [q, k, v]_proj_weight
             in_proj_weight
         """
-<<<<<<< HEAD
         # if getattr(self, f"uvh_fixed_{qkvin}") and not self.update_from_simga:
         #     perc_params, _, _ = self.get_perc_params()
-        #     return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
-=======
-        if getattr(self, f"uvh_fixed_{qkvin}"):
-            perc_params, _, _ = self.get_perc_params()
-            return 2.0, getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
->>>>>>> 7d567930d4cebcc7eaf603ff5c82a6222feb70fb
+        #     return 3., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}"), False
 
         rank = dist.get_rank() if dist.is_initialized() else 0
 
@@ -1346,8 +1476,9 @@ class SVDMultiheadAttention(nn.Module):
             s = getattr(self, f"{qkvin}_s")
             vh = getattr(self, f"{qkvin}_vh")
             uvh = u @ vh
-            # perc_params, _, _ = self.get_perc_params()
-            # return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+            # self.update_from_simga = False
+            perc_params, _, _ = self.get_perc_params()
+            # return 2., getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}"), False
         else:
             # w = self.weight.T if self.trans else self.weight
             w = getattr(self, f"{qkvin}_proj_weight") if qkvin in "qkv" else self.in_proj_weight
@@ -1374,7 +1505,7 @@ class SVDMultiheadAttention(nn.Module):
                 sself.add_(torch.diag(s) if self.full_rank_sigma else s)
                 vhself.zero_()
                 vhself.add_(vh)
-                return 0, getattr(self, f"{qkvin}_slice"), 1.0, getattr(self, f"uvh_fixed_{qkvin}")
+                return 0, getattr(self, f"{qkvin}_slice"), 1.0, getattr(self, f"uvh_fixed_{qkvin}"), False
             if rank == 0:
                 log.info("in normal stability update")
 
@@ -1383,12 +1514,13 @@ class SVDMultiheadAttention(nn.Module):
         csim = self.cossim(prev_uvh, uvh)
         setattr(self, f"prev_uvh_{qkvin}", uvh)
         csmean, _ = csim.mean(), csim.std()
-        if csmean > self.uvh_threshold:
+        change_sl = False
+        uself = getattr(self, f"{qkvin}_u")
+        sself = getattr(self, f"{qkvin}_s")
+        vhself = getattr(self, f"{qkvin}_vh")
+        gensl = getattr(self, f"{qkvin}_slice")
+        if csmean >= self.uvh_threshold:
             setattr(self, f"uvh_fixed_{qkvin}", True)
-            uself = getattr(self, f"{qkvin}_u")
-            sself = getattr(self, f"{qkvin}_s")
-            vhself = getattr(self, f"{qkvin}_vh")
-            gensl = getattr(self, f"{qkvin}_slice")
             if set_usvh:
                 uself.zero_()
                 uself.add_(u)
@@ -1401,36 +1533,50 @@ class SVDMultiheadAttention(nn.Module):
                 else:
                     sself.zero_()
                     sself[:gensl].add_(s[:gensl])
-            # uself[torch.abs(uself) < 1e-5] *= 0
-            # vhself[torch.abs(vhself) < 1e-5] *= 0
-            # sself[torch.abs(sself) < 1e-6] *= 0
+            # eps = torch.finfo(uself.dtype).eps
 
-            self._update_k_slice(qkvin)
+            # uself[torch.abs(uself) < eps] *= 0
+            # vhself[torch.abs(vhself) < eps] *= 0
+            # sself[torch.abs(sself) < eps] *= 0
 
-        if dist.get_rank() == 0:
-            usig = getattr(self, f"{qkvin}_u")
-            sig = getattr(self, f"{qkvin}_s")
-            vhsig = getattr(self, f"{qkvin}_vh")
-            print(f"u: {usig.mean():.4f}, {usig.min():.4f}, {usig.max():.4f}, {usig.std():.4f}")
-            print(f"s: {sig.mean():.4f}, {sig.min():.4f}, {sig.max():.4f}, {sig.std():.4f}")
-            print(f"vh: {vhsig.mean():.4f}, {vhsig.min():.4f}, {vhsig.max():.4f}, {vhsig.std():.4f}")
+            change_sl = self._update_k_slice(qkvin)
+            
+            # if self.bias_k is not None:
+            #     self.bias_k.requires_grad = False
+            # if self.bias_v is not None:
+            #     self.bias_v.requires_grad = False
+            # if self.in_proj_bias is not None:
+            #     self.in_proj_bias.requires_grad = False
+
+        # if dist.get_rank() == 0:
+        #     usig = getattr(self, f"{qkvin}_u")
+        #     sig = getattr(self, f"{qkvin}_s")
+        #     vhsig = getattr(self, f"{qkvin}_vh")
+        #     print(f"u: {usig.mean():.4f}, {usig.min():.4f}, {usig.max():.4f}, {usig.std():.4f}")
+        #     print(f"s: {sig.mean():.4f}, {sig.min():.4f}, {sig.max():.4f}, {sig.std():.4f}")
+        #     print(f"vh: {vhsig.mean():.4f}, {vhsig.min():.4f}, {vhsig.max():.4f}, {vhsig.std():.4f}")
         # self.s_prev = self.s.data.clone()
         perc_params, _, _ = self.get_perc_params()
-        return csmean, getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}")
+        # w = torch.linalg.multi_dot([uself, sself, vhself])
+        # w[torch.abs(w) < 1e-5] *= 0
+        # if dist.get_rank() == 0:
+        #     print(f"sparcity: {torch.count_nonzero(w) / w.numel()}")
+        return csmean, getattr(self, f"{qkvin}_slice"), perc_params, getattr(self, f"uvh_fixed_{qkvin}"), change_sl
 
     @torch.no_grad()
     def test_stability(self):
         if self.in_proj_weight is not None:
             return self._test_stability_general(qkvin="in_proj")
         else:
-            csmeanq, qslice, qparams, qfixed = self._test_stability_general(qkvin="q")
-            csmeank, kslice, kparams, kfixed = self._test_stability_general(qkvin="k")
-            csmeanv, vslice, vparams, vfixed = self._test_stability_general(qkvin="v")
+            csmeanq, qslice, qparams, qfixed, qchange_sl = self._test_stability_general(qkvin="q")
+            csmeank, kslice, kparams, kfixed, kchange_sl = self._test_stability_general(qkvin="k")
+            csmeanv, vslice, vparams, vfixed, vchange_sl = self._test_stability_general(qkvin="v")
             return [
                 [csmeanq, csmeank, csmeanv],  # TODO: should this already be a string?
                 [qslice, kslice, vslice],  # TODO: should this already be a string?
                 [qparams, kparams, vparams],  # TODO: should this already be a string?
                 [qfixed, kfixed, vfixed],  # TODO: should this already be a string?
+                [qchange_sl, kchange_sl, vchange_sl],  # TODO: should this already be a string?
             ]
 
     @torch.no_grad()
@@ -1480,22 +1626,21 @@ class SVDMultiheadAttention(nn.Module):
             weight = self.in_proj_weight
         weight *= 0
         weight += ret
-        # let this get handled by other function?
-        # if dist.get_rank() == 0:
-        #     print(f"u: {usig.mean():.4f}, {usig.min():.4f}, {usig.max():.4f}, {usig.std():.4f}")
-        #     print(f"s: {sig.mean():.4f}, {sig.min():.4f}, {sig.max():.4f}, {sig.std():.4f}")
-        #     print(f"vh: {vhsig.mean():.4f}, {vhsig.min():.4f}, {vhsig.max():.4f}, {vhsig.std():.4f}")
 
     @torch.no_grad()
+    # @torch.compile()
     def _update_k_slice(self, qkvin):
+        # rank = dist.get_rank() if dist.is_initialized() else 0
+        # if rank == 0:
+        #     log.info("updating slice/shape")
         uself = getattr(self, f"{qkvin}_u")
         sself = getattr(self, f"{qkvin}_s")
         vhself = getattr(self, f"{qkvin}_vh")
-        # gensl = getattr(self, f"{qkvin}_slice")
+        gensl = getattr(self, f"{qkvin}_slice")
         # adjust K to slice of less important singular values
         # only want to compare the diagonal entries of sigma
         s = torch.diag(sself) if self.full_rank_sigma else sself
-        # prevsl = gensl
+        prevsl = gensl
         if getattr(self, f"uvh_fixed_{qkvin}"):
             cutoff = s[0] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
@@ -1504,18 +1649,33 @@ class SVDMultiheadAttention(nn.Module):
                 newsl = s.shape[0]
             else:
                 newsl = nz[0].item()
-        # if newsl < 0.75 * prevsl:
-        #     # TODO: log message?
-        #     newsl = int(prevsl * 0.75)
+        if newsl < 0.75 * prevsl:
+            # TODO: log message?
+            newsl = int(prevsl * 0.75)
         #     # print(s[:5])
         setattr(self, f"{qkvin}_slice", newsl)
 
-        uself[:, newsl:] *= 0
-        vhself[newsl:] *= 0
-        if self.full_rank_sigma:
-            sself[newsl:, newsl:].mul_(0)
+        if not self.reinit_shapes:
+            uself[:, newsl:] *= 0
+            vhself[newsl:] *= 0
+            if self.full_rank_sigma:
+                sself[newsl:, newsl:].mul_(0)
+            else:
+                sself[newsl:].mul_(0)
         else:
-            sself[newsl:].mul_(0)
+            uself.set_(uself[:, :newsl])
+            vhself.set_(vhself[:newsl])
+            if self.full_rank_sigma:
+                sself.set_(sself[:newsl, :newsl])
+            else:
+                sself.set_(sself[:newsl])
+        
+        uself.requires_grad = False
+        vhself.requires_grad = False
+        sself.requires_grad = True
+        w = getattr(self, f"{qkvin}_proj_weight") if qkvin in "qkv" else self.in_proj_weight
+        w.requires_grad = False
+        return prevsl != newsl
 
     @torch.compile()
     def get_perc_params_select(self, qkvin):
@@ -1526,20 +1686,39 @@ class SVDMultiheadAttention(nn.Module):
         normal_params = weight.numel()
         if getattr(self, f"uvh_fixed_{qkvin}"):
             # active_params = (self.u.shape[0] * self.k) + (self.k ** 2) + (self.k + self.vh.shape[1])
-            trainable_params = getattr(self, f"{qkvin}_slice") ** 2
+            if self.full_rank_sigma:
+                trainable_params = getattr(self, f"{qkvin}_slice") ** 2
+            else:
+                trainable_params = getattr(self, f"{qkvin}_slice")
         else:
             trainable_params = normal_params
-        perc_params = trainable_params / normal_params
-        return perc_params, trainable_params, normal_params
+        return trainable_params, normal_params
 
     def get_perc_params(self):
         if not self._qkv_same_embed_dim:  # get perc perams for all
-            _, qtrain, qnormal = self.get_perc_params_select("q")
-            _, ktrain, knormal = self.get_perc_params_select("k")
-            _, vtrain, vnormal = self.get_perc_params_select("v")
+            qtrain, qnormal = self.get_perc_params_select("q")
+            ktrain, knormal = self.get_perc_params_select("k")
+            vtrain, vnormal = self.get_perc_params_select("v")
             active = qtrain + ktrain + vtrain
             normal = qnormal + knormal + vnormal
-            perc = active / normal
         else:
-            perc, active, normal = self.get_perc_params_select("in_proj")
+            active, normal = self.get_perc_params_select("in_proj")
+
+        in_bias = 0 if self.in_proj_bias is None else self.in_proj_bias.numel()
+        k_bias = 0 if self.bias_k is None else self.bias_k.numel()
+        v_bias = 0 if self.bias_v is None else self.bias_v.numel()
+        normal += in_bias + k_bias + v_bias
+        active += in_bias + k_bias + v_bias
+        perc = active / normal
         return perc, active, normal
+    
+    def get_interior_slice(self):
+        if not self._qkv_same_embed_dim:
+            return {
+                "q": self.q_slice,
+                "k": self.k_slice,
+                "v": self.v_slice,
+            }
+        return {
+            "in_proj": self.in_proj_slice,
+        }

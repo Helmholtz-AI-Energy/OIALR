@@ -31,7 +31,7 @@ def get_criterion(config):
         return criterion
 
 
-def get_optimizer(config, network):
+def get_optimizer(config, network, lr=None):
     if config.training.optimizer is None:
         raise ValueError("Optimizer must be specified")
     optimizer = hydra.utils.instantiate(config.training.optimizer)
@@ -41,8 +41,10 @@ def get_optimizer(config, network):
     else:
         first = network.parameters()
 
-    if config.training.lr is not None:
+    if lr is None and config.training.lr is not None:
         kwargs["lr"] = config.training.lr
+    elif lr is not None:
+        kwargs["lr"] = lr
     return optimizer(first, **kwargs)
 
 
