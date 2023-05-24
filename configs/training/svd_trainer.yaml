@@ -24,7 +24,7 @@ lr_schedule:
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
-  warmup_period: 200
+  warmup_period: 3
 
 lr_warmup_step_frequency: "epoch"
 lr_warmup_step_args: null
@@ -51,6 +51,6 @@ fixing_method:
   sync_usv: False
   full_rank_sigma: True
   keep_first_layer: False
-  keep_last_layer: False
+  keep_last_layer: True
   update_from_simga: True
   reinit_shapes: True

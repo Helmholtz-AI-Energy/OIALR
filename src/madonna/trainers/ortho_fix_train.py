@@ -140,9 +140,10 @@ def main(config):  # noqa: C901
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
     try:
-        warmup_steps = config.training.lr_schedule.warmup_period
-    except:
-        warmup_steps = 0
+        warmup_steps = config.training.lr_warmup.warmup_period
+    except omegaconf.errors.ConfigAttributeError:
+        log.info(f"No number of warmup steps specified")
+
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
@@ -168,13 +169,14 @@ def main(config):  # noqa: C901
         )
 
         if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1 
-            try:
-                stabtime = time.perf_counter()
-                reset_optimizer = model.check_stability(force=True)
-                if rank == 0:
-                    log.info(f"Stability time: {time.perf_counter() - stabtime}")
-            except AttributeError:
-                reset_optimizer = False
+            # try:
+            dist.barrier()
+            stabtime = time.perf_counter()
+            reset_optimizer = model.test_basis_stability_all_layers()
+            if rank == 0:
+                log.info(f"Stability time: {time.perf_counter() - stabtime}")
+            # except AttributeError:
+            #     reset_optimizer = False
             if reset_optimizer:
                 resettime = time.perf_counter()
                 # instead of resetting optimizer, slice off bits of the saved states
