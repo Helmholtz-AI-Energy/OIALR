@@ -13,18 +13,18 @@ criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 0.0001
+lr: 0.001
 lr_schedule:
-  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts #
+  _target_: torch.optim.lr_scheduler.CosineAnnealingWarmRestarts #torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingLR # 
   _partial_: True
-  step_size: 200
-  gamma: 0.1
+  # step_size: 200
+  # gamma: 0.1
   # T_max: 25
-  # T_0: 25
+  T_0: 25
 lr_warmup: #null
   _target_: pytorch_warmup.LinearWarmup
   _partial_: True
-  warmup_period: 3
+  warmup_period: 2000
 
 lr_warmup_step_frequency: "epoch"
 lr_warmup_step_args: null
@@ -32,7 +32,7 @@ lr_warmup_step_args: null
 optimizer:
   # _target_: torch.optim.SGD
   # _partial_: True
-  # momentum: 0.9
+  # momentum: 0.1
   # weight_decay: 1.0e-5
   # nesterov: True
   _target_: torch.optim.Adam
@@ -41,12 +41,13 @@ optimizer:
 init_opt_with_model: False
 print_freq: 10
 
+svd_epoch_delay: 20
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
   stability_frequency: 400
-  delay: 10
-  uvthreshold: 0.99
+  delay: 200
+  uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.1
   sync_usv: False
   full_rank_sigma: True

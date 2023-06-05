@@ -32,7 +32,7 @@ test: False
 seed: 42
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
-name: "svd-reinitddp"
+name: "svd"
 baseline: False
 
 comm_method: "nccl"
