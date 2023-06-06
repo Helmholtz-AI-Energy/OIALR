@@ -885,13 +885,22 @@ class SVDLinear(nn.Module):
             status = self._full_rank_update_usv()
             # shapes are updated within above (as is slice update)
             perc, _, _ = self.get_perc_params()
+            # normalize self.s to max == 1
+            maxs = self.s.max()
+            self.s /= maxs
+            self.vh *= maxs
             log.info(f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
                      f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]")
+            # print(f"{torch.diag(self.s)[:5]}")
 
         elif not self.uvh_stable:
             # case 2: normal stability update
             status = self._full_rank_weight_stability()
             perc, _, _ = self.get_perc_params()
+            # normalize self.s to max == 1
+            maxs = self.s.max()
+            self.s /= maxs
+            self.vh *= maxs
             log.info(f"{name[-30:]}: Normal stability, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
                      f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]")
         else:
@@ -1936,14 +1945,22 @@ class SVDMultiheadAttention(nn.Module):
             # shapes are updated within above (as is slice update)
             perc, _, _ = self.get_perc_params()
             u, s, vh, sl = self._get_usvh_from_qkvin(qkvin)
+            # normalize self.s to max == 1
+            maxs = s.max()
+            s /= maxs
+            # vh *= maxs
             log.info(f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
                      f"\t[{u.shape[0]} {s.shape[0]} {vh.shape[1]}]")
+            # print(f"{torch.diag(s)[:5]}")
 
         elif not stable:
             # case 2: normal stability update
             status = self._weight_stability_abs(qkvin, working_rank)
             perc, _, _ = self.get_perc_params()
             u, s, vh, sl = self._get_usvh_from_qkvin(qkvin)
+            maxs = s.max()
+            s /= maxs
+            # vh *= maxs
             log.info(f"{name[-30:]}: Normal stability, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
                      f"\t[{u.shape[0]} {s.shape[0]} {vh.shape[1]}]")
         else:

@@ -129,7 +129,7 @@ def main(config):  # noqa: C901
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
     #
-    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[0] in [
+    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[-1] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
@@ -159,21 +159,25 @@ def main(config):  # noqa: C901
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        with torch.no_grad():
-            if epoch > config.training.svd_epoch_delay + 1:
-                for n, p in model.named_parameters():
-                    if n.endswith(".s"):
-                        # # TODO: remove later if not working
-                        # sdiag = torch.diag(self.s).clone()
-                        sdiag = torch.diag(p)
-                        # sdiag_diff1 = torch.diff(sdiag, n=1)
-                        # sdiag_diff2 = torch.diff(sdiag, n=2)
-                        # sdiag_diff3 = torch.diff(sdiag, n=3)
+        # with torch.no_grad():
+        #     if epoch > config.training.svd_epoch_delay + 1:
+        #         for n, p in model.named_parameters():
+        #             if n.endswith(".s"):
+        #                 # # TODO: remove later if not working
+        #                 # sdiag = torch.diag(self.s).clone()
+        #                 # sdiag = torch.diag(p)
+        #                 # sdiag_diff1 = torch.diff(sdiag, n=1) * 0.001
+        #                 # sdiag_diff2 = torch.diff(sdiag, n=2) * 0.0001
+        #                 # # sdiag_diff3 = torch.diff(sdiag, n=3) * 0.001
+        #                 # for i in range(p.shape[0] - 1):
+        #                 #     p[i, i + 1] = sdiag_diff1[i]
+        #                 #     if i < p.shape[0] - 2:
+        #                 #         p[i, i + 2] = sdiag_diff2[i]
 
-                        mask = torch.abs(p) <= 1e-7
-                        # print(f"{n} -> {torch.count_nonzero(mask)}")
-                        p[mask] *= 0
-                        p[mask] += 1e-4 * torch.rand_like(p[mask])  # * sdiag.max()
+        #                 mask = torch.abs(p) <= 1e-7
+        #                 # print(f"{n} -> {torch.count_nonzero(mask)}")
+        #                 p[mask] *= 0
+        #                 p[mask] += 1e-4 * torch.rand_like(p[mask])  # * sdiag.max()
 
         train_loss, last_loss, optimizer = train(
             train_loader=train_loader,
@@ -189,7 +193,7 @@ def main(config):  # noqa: C901
         )
 
         # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1 
-        if epoch > config.training.svd_epoch_delay or epoch == config.training.epochs - 1:
+        if (epoch >= config.training.svd_epoch_delay) or epoch == config.training.epochs - 1:
             # try:
             # dist.barrier()
             optimizer.zero_grad(set_to_none=True)
@@ -205,40 +209,6 @@ def main(config):  # noqa: C901
                 elif is_sgd:
                     madonna.optimizers.change_sgd_shapes(optimizer=optimizer, model=model, reset_buffers_zero=first)
                 first = False
-
-                # resettime = time.perf_counter()
-                # # instead of resetting optimizer, slice off bits of the saved states
-                # # for group in optimizer.param_groups:
-                # for c, (n, p) in enumerate(model.named_parameters()):
-                #     # if dist.get_rank() == 0:
-                #     #     print(n, optimizer.param_groups[0]["params"][c].shape, p.shape)
-                #     if is_adam:
-                #         state = optimizer.state[p]
-                #         if len(list(state.keys())) > 0:
-                #             for k in ["exp_avg", "exp_avg_sq"]:
-                #                 if state[k].shape != p.shape:
-                #                     sl = []
-                #                     for d in range(p.ndim):
-                #                         sl.append(slice(0, p.shape[d]))
-                #                     # print(type(state[k]))
-                #                     state[k] = state[k][tuple(sl)]
-                #             if optimizer.param_groups[0]["amsgrad"]:
-                #                 if state["max_exp_avg_sq"].shape != p.shape:
-                #                     sl = []
-                #                     for d in range(p.ndim):
-                #                         sl.append(slice(0, p.shape[d]))
-                #                     state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
-                #     if optimizer.param_groups[0]["params"][c].shape != p.shape:
-                #         sl = []
-                #         for d in range(p.ndim):
-                #             sl.append(slice(0, p.shape[d]))
-                #         optimizer.param_groups[0]["params"][c] = optimizer.param_groups[0]["params"][c][tuple(sl)]
-                # if rank == 0:
-                #     log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
-                # optimizer = madonna.utils.get_optimizer(config, model.ddp_model, lr=optimizer.param_groups[0]['lr'])
-                # # if resetting optimizer, need to also reset the lr scheduler and warmup
-                # scheduler.optimizer = optimizer
-                # warmup_scheduler.optimizer = optimizer
 
         # if model.skip_stability:
         # for n, p in model.named_parameters():
@@ -308,7 +278,7 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[0] in [
+    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[-1] in [
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
