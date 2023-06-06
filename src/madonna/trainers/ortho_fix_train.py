@@ -10,6 +10,11 @@ from pathlib import Path
 
 import hydra
 import mlflow.pytorch
+
+# import cProfile, pstats, io
+# from pstats import SortKey
+# pr = cProfile.Profile()
+import omegaconf
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -17,12 +22,6 @@ import torch.optim
 import torch.utils.data.distributed
 from torch.utils.data import Subset
 
-import time
-
-# import cProfile, pstats, io
-# from pstats import SortKey
-# pr = cProfile.Profile()
-import omegaconf
 import madonna
 
 best_acc1 = 0
@@ -136,14 +135,13 @@ def main(config):  # noqa: C901
         batch_warmup_step = True
     else:
         batch_warmup_step = False
-    # print(config.training.lr_warmup._target_.split("."), batch_warmup_step)
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
-    try:
-        warmup_steps = config.training.lr_warmup.warmup_period
-    except omegaconf.errors.ConfigAttributeError:
-        log.info("No number of warmup steps specified")
+    # try:
+    #     warmup_steps = config.training.lr_warmup.warmup_period
+    # except omegaconf.errors.ConfigAttributeError:
+    #     log.info("No number of warmup steps specified")
 
     is_adam = isinstance(optimizer, torch.optim.Adam)
     is_sgd = isinstance(optimizer, torch.optim.SGD)
@@ -165,7 +163,7 @@ def main(config):  # noqa: C901
                     if n.endswith(".s"):
                         # # TODO: remove later if not working
                         # sdiag = torch.diag(self.s).clone()
-                        sdiag = torch.diag(p)
+                        # sdiag = torch.diag(p)
                         # sdiag_diff1 = torch.diff(sdiag, n=1)
                         # sdiag_diff2 = torch.diff(sdiag, n=2)
                         # sdiag_diff3 = torch.diff(sdiag, n=3)
@@ -188,7 +186,7 @@ def main(config):  # noqa: C901
             warmup_scheduler=warmup_scheduler,
         )
 
-        # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1 
+        # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
         if epoch > config.training.svd_epoch_delay or epoch == config.training.epochs - 1:
             # try:
             # dist.barrier()
@@ -201,9 +199,17 @@ def main(config):  # noqa: C901
             #     reset_optimizer = False
             if reset_optimizer:
                 if is_adam:
-                    madonna.optimizers.change_adam_shapes(optimizer=optimizer, model=model, reset_buffers_zero=first)
+                    madonna.optimizers.change_adam_shapes(
+                        optimizer=optimizer,
+                        model=model,
+                        reset_buffers_zero=first,
+                    )
                 elif is_sgd:
-                    madonna.optimizers.change_sgd_shapes(optimizer=optimizer, model=model, reset_buffers_zero=first)
+                    madonna.optimizers.change_sgd_shapes(
+                        optimizer=optimizer,
+                        model=model,
+                        reset_buffers_zero=first,
+                    )
                 first = False
 
                 # resettime = time.perf_counter()

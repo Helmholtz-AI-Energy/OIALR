@@ -437,7 +437,8 @@ class QRConv2d(nn.modules.conv._ConvNd):
         bias (bool, optional): If ``True``, adds a learnable bias to the
             output. Default: ``True``
     """.format(
-            **reproducibility_notes, **nn.modules.conv.convolution_notes
+            **reproducibility_notes,
+            **nn.modules.conv.convolution_notes,
         )
         + r"""
 

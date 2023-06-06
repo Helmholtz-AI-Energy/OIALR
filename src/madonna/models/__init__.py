@@ -9,9 +9,9 @@ from .xox import XOXModel
 
 def get_tv_model(pretrained, name):
     if pretrained:
-        print(f"=> using pre-trained model '{name}'")
+        print(f"=> using pre-trained model: {name}")
         model = models.__dict__[name](pretrained=True)
     else:
-        print(f"=> creating model '{name}'")
+        print(f"=> creating model: {name}")
         model = models.__dict__[name]()
     return model
