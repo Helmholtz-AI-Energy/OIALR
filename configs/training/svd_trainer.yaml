@@ -35,7 +35,9 @@ optimizer:
   # momentum: 0.1
   # weight_decay: 1.0e-5
   # nesterov: True
-  _target_: torch.optim.Adam
+  # _target_: torch.optim.Adam
+  # _partial_: True
+  _target_: madonna.optimizers.SVDAdam
   _partial_: True
 
 init_opt_with_model: False

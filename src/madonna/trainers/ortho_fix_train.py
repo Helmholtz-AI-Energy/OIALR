@@ -160,7 +160,7 @@ def main(config):  # noqa: C901
         # with torch.no_grad():
         #     if epoch > config.training.svd_epoch_delay + 1:
         #         for n, p in model.named_parameters():
-        #             if n.endswith(".s"):
+        #             if n.endswith(".s") or n.endswith("_s"):
         #                 # # TODO: remove later if not working
         #                 # sdiag = torch.diag(self.s).clone()
         #                 # sdiag = torch.diag(p)
