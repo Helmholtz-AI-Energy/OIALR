@@ -20,6 +20,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
 
 import madonna
@@ -65,8 +66,6 @@ def main(config):  # noqa: C901
         model = model_hold(model).to(device)
         # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
-        from torch.nn.parallel import DistributedDataParallel as DDP
-
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
             print(model)
@@ -78,9 +77,11 @@ def main(config):  # noqa: C901
     # raise ValueError
 
     criterion = madonna.utils.get_criterion(config)
-    optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
+    # optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
+    optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
 
-    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, 10)
+    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer.opt1, 25)
+    sigma_sched, sigma_warmup = madonna.utils.get_lr_schedules(config, optimizer.sigma_opt, 25)
 
     # # optionally resume from a checkpoint
     # # TODO: add checkpointing
@@ -142,16 +143,25 @@ def main(config):  # noqa: C901
     #     warmup_steps = config.training.lr_warmup.warmup_period
     # except omegaconf.errors.ConfigAttributeError:
     #     log.info("No number of warmup steps specified")
+    all_stable = False
 
-    is_adam = isinstance(optimizer, torch.optim.Adam)
-    is_sgd = isinstance(optimizer, torch.optim.SGD)
-    first = True
+    # fibonacci spacing of stability updates
+    n1, n2 = 0, 1
+    start = config.training.svd_epoch_delay
+    fib_epochs = [n1 + start]
+    while n2 < config.training.epochs:
+        n1, n2 = n2, n1 + n2
+        fib_epochs.append(start + n2)
+    fib_epochs.pop()
+    fib_epochs.append(config.training.epochs - 1)
+    print(f"fib_epochs {fib_epochs}")
+
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            log.info(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
+            log.info(f"Begin epoch {epoch} LR: {optimizer.opt1.param_groups[0]['lr']}")
             mlflow.log_metrics(
-                metrics={"lr": optimizer.param_groups[0]["lr"]},
+                metrics={"lr": optimizer.opt1.param_groups[0]["lr"]},
                 step=epoch,
             )
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
@@ -188,33 +198,40 @@ def main(config):  # noqa: C901
             scaler=scaler,
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
+            all_stable=all_stable,
+            sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
         )
 
         # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
-        if epoch > config.training.svd_epoch_delay or epoch == config.training.epochs - 1:
+        if not config.baseline and epoch in fib_epochs:
             # try:
             # dist.barrier()
-            optimizer.zero_grad(set_to_none=True)
+            # if rank == 0:
+            #     for n, p in model.named_parameters():
+            #         if n.endswith(("_s", ".s")) and p.grad is not None:
+            #             print(p.grad.mean(), p.grad.min(), p.grad.max(), p.mean())
+            # try:
+            #     scaler.step(optimizer=optimizer.sigma_opt)
+            #     scaler.update()
+            # except AssertionError:
+            #     # if this fails its most likely because the sigma values dont have any grads yet
+            #     pass
+            # optimizer.step(step_sigma=True, step_opt1=False)
+            optimizer.zero_grad(set_to_none=True, reset_sigma=True)
             stabtime = time.perf_counter()
-            reset_optimizer = model.test_basis_stability_all_layers()
+            reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
+
+            if all_layers_stable and not all_stable:
+                # NOTE: this will only do something when it isnt baseline
+                # if rank == 0:
+                #     log.info("Deleting the full rank weights from the base optimizer")
+                # optimizer.remove_full_rank_weights()
+                all_stable = all_layers_stable
+            if reset_optimizer:
+                optimizer.reset_shapes_of_sigma(model)
+
             if rank == 0:
                 log.info(f"Stability time: {time.perf_counter() - stabtime}")
-            # except AttributeError:
-            #     reset_optimizer = False
-            if reset_optimizer:
-                if is_adam:
-                    madonna.optimizers.change_adam_shapes(
-                        optimizer=optimizer,
-                        model=model,
-                        reset_buffers_zero=first,
-                    )
-                elif is_sgd:
-                    madonna.optimizers.change_sgd_shapes(
-                        optimizer=optimizer,
-                        model=model,
-                        reset_buffers_zero=first,
-                    )
-                first = False
 
         # if model.skip_stability:
         # for n, p in model.named_parameters():
@@ -260,10 +277,18 @@ def main(config):  # noqa: C901
         elif scheduler is not None and not batch_warmup_step:
             scheduler.step()
 
+        if all_stable:
+            if sigma_warmup is not None:
+                with sigma_warmup.dampening():
+                    if not batch_warmup_step:
+                        sigma_sched.step()
+            elif sigma_sched is not None and not batch_warmup_step:
+                sigma_sched.step()
+
 
 def train(
     train_loader,
-    optimizer,
+    optimizer: madonna.optimizers.MixedSVDOpt,
     model,
     criterion,
     epoch,
@@ -273,7 +298,10 @@ def train(
     warmup_scheduler=None,
     scaler=None,
     log=log,
+    all_stable=False,
+    sigma_lrs=None,
 ):
+    train_time_start = time.perf_counter()
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
@@ -293,10 +321,32 @@ def train(
         batch_warmup_step = False
     # switch to train mode
     model.train()
+
+    # stages : move away from random
+    #           freeze non2d for stability
+    #           once stable -> train normally
+    #           once stagnant ? -> freeze non2d
+    # if not config.baseline:
+    #     if epoch < 2 * config.training.svd_epoch_delay:
+    #         # warmup steps
+    #         log.info("Warmup epoch")
+    #         pass
+    #     elif not all_stable:  # things are not all stable
+    #         log.info("\tNot stable, frozen non-2D weights")
+    #         optimizer.disable_train_non2d()
+    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
+    #     elif all_stable:
+    #         log.info("\tStable, NON frozen non-2D weights")
+    #         optimizer.enable_train_non2d()
+    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
+    # if not config.baseline and epoch > 10:
+    #     optimizer.disable_train_non2d()
+    #     model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
+
     # madonna.utils.change_batchnorm_tracking(model, tracking=False)
     end = time.time()
     for i, data in enumerate(train_loader):
-        optimizer.zero_grad()
+        optimizer.zero_grad(reset_sigma=False)
         if hasattr(config.data, "dali") and config.data.dali:
             images = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -322,21 +372,6 @@ def train(
         #     lr_scheduler.optimizer = optimizer
         #     warmup_scheduler.optimizer = optimizer
 
-        # if not config.baseline and dist.is_initialized():
-        #     with model.target_model.no_sync():
-        #         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
-        #             output = model(images)
-        #             loss = criterion(output, target)
-
-        #         if torch.isnan(loss):
-        #             for n, p in model.named_parameters():
-        #                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-        #             raise ValueError("NaN loss")
-
-        #         scaler.scale(loss).backward()
-        #         scaler.step(optimizer)
-        #         scaler.update()
-        # else:
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
@@ -347,8 +382,19 @@ def train(
             raise ValueError("NaN loss")
 
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
+        if optimizer.train_opt1:
+            scaler.step(optimizer.opt1)
+            scaler.update()
+        # if i % 4 == 3 or i == len(train_loader) - 1:
+        running_sigma = False
+        if not config.baseline:
+            try:
+                scaler.step(optimizer=optimizer.sigma_opt)
+                scaler.update()
+                running_sigma = True
+            except AssertionError:
+                # if this fails its most likely because the sigma values dont have any grads yet
+                pass
 
         # for n, p in model.named_parameters():
         #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}, {p.requires_grad}")
@@ -367,6 +413,13 @@ def train(
             with warmup_scheduler.dampening():
                 if batch_warmup_step:
                     lr_scheduler.step()
+
+        # sigma_lrs={'sched': sigma_sched, "warmup": sigma_warmup},
+        if running_sigma:
+            if sigma_lrs["warmup"] is not None:
+                with sigma_lrs["warmup"].dampening():
+                    if batch_warmup_step:
+                        sigma_lrs["sched"].step()
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -391,8 +444,10 @@ def train(
 
             # if argmax.std() == 0:
             #     log.error(f"ISSUE WITH NETWORK printing debugging info")
-            #     for n, p in model.named_parameters():
-            #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+    if config.rank == 0:
+        for n, p in model.named_parameters():
+            if n.endswith("bias"):
+                print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             #     raise ValueError
             # dist.barrier()
         # if i == 60:
@@ -417,6 +472,7 @@ def train(
                 "train loss": ls,
                 "train top1": t1,
                 "train top5": t5,
+                "train_time": time.perf_counter() - train_time_start,
             },
             step=epoch,
         )

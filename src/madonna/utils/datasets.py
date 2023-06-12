@@ -503,7 +503,7 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
 
     trans = [
         transforms.ToTensor(),
-        transforms.Resize(config.data.train_crop_size),
+        transforms.Resize(config.data.train_crop_size, antialias=True),
         cifar10_normalize,
     ]
     trans = transforms.Compose(trans)

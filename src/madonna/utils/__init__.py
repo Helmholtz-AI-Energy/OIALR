@@ -88,3 +88,34 @@ def get_lr_schedules(config, optim, len_ds=None):
     warmup_scheduler = hydra.utils.instantiate(config.training.lr_warmup)
     warmup_scheduler = warmup_scheduler(optim)
     return scheduler, warmup_scheduler
+
+
+def get_sigma_lr_schedules(config, sigma_optim, len_ds=None):
+    if config.baseline:
+        return None, None
+    if config.training.lr_schedule is None:
+        return None, None
+
+    sched_name = config.training.lr_schedule._target_.split(".")[0]
+
+    # sched_params = config["lr_schedule"]["params"]
+    if sched_name == "ExponentialLR":
+        # sched_params["last_epoch"] = config["epochs"] - config["start_epoch"]
+        config.training.lr_schedule.last_epoch = config.training.epochs - config.training.start_epoch
+    elif sched_name == "CosineAnnealingLR":
+        # sched_params["last_epoch"] = config['epochs'] - config['start_epoch']
+        config.training.lr_schedule.T_max = len_ds
+    elif sched_name == "CosineAnnealingWarmRestarts":
+        config.training.lr_schedule.T_0 = len_ds
+    elif sched_name == "CyclicLR":
+        config.training.lr_schedule.max_lr = config.training.lr
+        config.training.lr_schedule.step_size_up = len_ds
+
+    scheduler = hydra.utils.instantiate(config.training.lr_schedule)
+    scheduler = scheduler(sigma_optim)
+    if not config.training.lr_warmup:
+        return scheduler, None
+
+    warmup_scheduler = hydra.utils.instantiate(config.training.sigma_warmup)
+    warmup_scheduler = warmup_scheduler(sigma_optim)
+    return scheduler, warmup_scheduler

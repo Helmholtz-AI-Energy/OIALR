@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 600
+epochs: 200
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -17,7 +17,7 @@ lr: 0.0001
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR #torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   _partial_: True
-  step_size: 200
+  step_size: 100
   gamma: 0.5
   # T_max: 25
   # T_0: 25
@@ -35,15 +35,26 @@ optimizer:
   # momentum: 0.1
   # weight_decay: 1.0e-5
   # nesterov: True
-  # _target_: torch.optim.Adam
-  # _partial_: True
-  _target_: madonna.optimizers.SVDAdam
+  _target_: torch.optim.Adam
   _partial_: True
+
+sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
+  _partial_: True
+  _target_: torch.optim.Adam
+  # _target_: torch.optim.SGD
+  lr: 0.001
+  # momentum: 0.9
+  # weight_decay: 1.0e-5
+  # nesterov: True
+sigma_warmup: #null
+  _target_: pytorch_warmup.LinearWarmup
+  _partial_: True
+  warmup_period: 10
 
 init_opt_with_model: False
 print_freq: 10
 
-svd_epoch_delay: 1
+svd_epoch_delay: 12
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True

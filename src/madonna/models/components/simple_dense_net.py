@@ -35,7 +35,7 @@ class SimpleDenseNet(nn.Module):
         self.model = nn.Sequential(*layers)
 
     def forward(self, x):
-        batch_size, channels, width, height = x.size()
+        batch_size = x.shape[0]
 
         # (batch, 1, width, height) -> (batch, 1*width*height)
         x = x.view(batch_size, -1)

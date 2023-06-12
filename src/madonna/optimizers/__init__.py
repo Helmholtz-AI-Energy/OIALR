@@ -1,4 +1,4 @@
 from .myopt import *
 from .slimes import *
-from .svd_opt import SVDAdam
+from .svd_opt import MixedSVDOpt
 from .utils import *

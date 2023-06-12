@@ -6,35 +6,34 @@
 #SBATCH --gres=gpu:4
 #SBATCH --time=04:00:00
 #SBATCH --job-name=madonna-test
-#SBATCH --partition=sdil
-####SBATCH --account=hk-project-test-mlperf
-#SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
-
-####SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --partition=accelerated
+#SBATCH --account=hk-project-madonna
+####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
 
 ml purge
 
 # pmi2 cray_shasta
-# BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 # export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/"
+# BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/"
 
-# TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 # TOMOUNT+="${EXT_DATA_PREFIX},"
-# TOMOUNT+="${BASE_DIR},"
-# TOMOUNT+="/scratch,/tmp,"
-# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
-# export TOMOUNT="${TOMOUNT}"
+TOMOUNT+="${BASE_DIR},"
+TOMOUNT+="/scratch,/tmp,"
+TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+export TOMOUNT="${TOMOUNT}"
 
-TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
-TOMOUNT+='/etc/slurm/:/etc/slurm/,'
-# TOMOUNT+="${EXT_DATA_PREFIX},"
-# TOMOUNT+="${BASE_DIR},"
-# TOMOUNT+="/sys,/tmp,"
-export TOMOUNT+="/home/kit/scc/qv2382/"
+# TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+# TOMOUNT+='/etc/slurm/:/etc/slurm/,'
+# # TOMOUNT+="${EXT_DATA_PREFIX},"
+# # TOMOUNT+="${BASE_DIR},"
+# # TOMOUNT+="/sys,/tmp,"
+# export TOMOUNT+="/home/kit/scc/qv2382/"
 
 SRUN_PARAMS=(
-  --mpi="pmi2"
+  --mpi="pmix"
 #  --ntasks-per-node=4
   # --gpus-per-task=4
   --cpus-per-task=8
