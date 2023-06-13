@@ -795,11 +795,12 @@ class SVDLinear(nn.Module):
         self.weight += ret
 
         # normal update from cosine similarity stuff
-        uvh = self.u @ self.vh
-        csim = self.cossim(self.prev_uvh, uvh)
-        csmean, _ = csim.mean(), csim.std()
-        self.prev_uvh.zero_()
-        self.prev_uvh.add_(uvh)
+        # uvh = self.u @ self.vh
+        # csim = self.cossim(self.prev_uvh, uvh)
+        # csmean, _ = csim.mean(), csim.std()
+        # self.prev_uvh.zero_()
+        # self.prev_uvh.add_(uvh)
+        csmean = 1.0
         change_k = False
         if csmean >= self.uvhthreshold:
             self.uvh_stable = True
@@ -2162,12 +2163,13 @@ class SVDMultiheadAttention(nn.Module):
         # print(f"in full rank update: {torch.count_nonzero(torch.abs(s) < 1e-7)}")
 
         # normal update from cosine similarity stuff
-        uvh = u @ vh
-        prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
-        csim = self.cossim(prev_uvh, uvh)
-        csmean, _ = csim.mean(), csim.std()
+        # uvh = u @ vh
+        # prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
+        # csim = self.cossim(prev_uvh, uvh)
+        # csmean, _ = csim.mean(), csim.std()
 
-        setattr(self, f"prev_uvh_{qkvin}", uvh)
+        # setattr(self, f"prev_uvh_{qkvin}", uvh)
+        csmean = 1.0
         change_k = False
         if csmean >= self.uvhthreshold:
             setattr(self, f"uvh_stable_{qkvin}", True)

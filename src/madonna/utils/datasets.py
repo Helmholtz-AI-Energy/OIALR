@@ -13,6 +13,7 @@ import torchvision.transforms as transforms
 from omegaconf import DictConfig
 from PIL import ImageFile
 from timm.data.transforms_factory import create_transform
+import socket
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,9 @@ try:
     has_dali = True
 except ImportError:
     has_dali = False
+
+uc2 = socket.gethostname().startswith("uc2")
+horeka = socket.gethostname().startswith("hkn")
 
 
 __all__ = ["get_dataset"]
@@ -248,7 +252,12 @@ if has_dali:
 
     def _imagenet_dali_train(config):
         dsconfig = config["data"]
-        base_dir = dsconfig["data_dir"]
+        if uc2:
+            base_dir = config.data.data_dir_uc2
+        elif horeka:
+            base_dir = config.data.data_dir_horeka
+        else:
+            base_dir = dsconfig["data_dir"]
         batch_size = dsconfig["local_batch_size"]
         workers = dsconfig["num_workers"]
 
@@ -282,7 +291,12 @@ if has_dali:
 
     def _imagenet_dali_val(config):
         dsconfig = config["data"]
-        base_dir = dsconfig["data_dir"]
+        if uc2:
+            base_dir = config.data.data_dir_uc2
+        elif horeka:
+            base_dir = config.data.data_dir_horeka
+        else:
+            base_dir = dsconfig["data_dir"]
         batch_size = dsconfig["local_batch_size"]
         workers = dsconfig["num_workers"]
 
@@ -322,7 +336,12 @@ def imagenet_train_dataset_plus_loader(
     num_groups=None,
 ):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -384,7 +403,12 @@ def imagenet_get_val_dataset_n_loader(
     num_groups=None,
 ):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -434,7 +458,12 @@ def imagenet_get_val_dataset_n_loader(
 def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, num_groups=None):
     # CIFAR-10 dataset
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -496,7 +525,12 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
 
 def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
@@ -542,7 +576,12 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
 def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None, num_groups=None):
     # CIFAR-10 dataset
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
 
@@ -594,7 +633,12 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
 
 def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
@@ -637,7 +681,12 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
 def mnist_train_data(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     if dsconfig["resize"]:
@@ -672,7 +721,12 @@ def mnist_train_data(config, group_size=None, group_rank=None, num_groups=None):
 def mnist_val_data(config, group_size=None, group_rank=None, num_groups=None):
     dsconfig = config["data"]
     channels = config.model.mnist_channels if "mnist_channels" in config.model else 3
-    base_dir = dsconfig["data_dir"]
+    if uc2:
+        base_dir = config.data.data_dir_uc2
+    elif horeka:
+        base_dir = config.data.data_dir_horeka
+    else:
+        base_dir = dsconfig["data_dir"]
     batch_size = dsconfig["local_batch_size"]
     workers = dsconfig["num_workers"]
     if dsconfig["resize"]:

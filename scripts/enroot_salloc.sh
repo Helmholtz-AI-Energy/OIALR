@@ -27,10 +27,7 @@ if [ -z "${TIMELIMIT}" ]; then TIMELIMIT="8:00:00"; fi
 if [ -z "${GPUS_PER_NODE}" ]; then GPUS_PER_NODE="4"; fi
 if [ -z "${SLURM_NNODES}" ]; then SLURM_NNODES="1"; fi
 
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 
-
-export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 export UCX_MEMTYPE_CACHE=0
@@ -40,28 +37,43 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
-TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
-TOMOUNT+="${EXT_DATA_PREFIX},"
-TOMOUNT+="${BASE_DIR},"
-TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
-TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
-
-# TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
-# TOMOUNT+='/etc/slurm/:/etc/slurm/,'
-# # TOMOUNT+="${EXT_DATA_PREFIX},"
-# # TOMOUNT+="${BASE_DIR},"
-# # TOMOUNT+="/sys,/tmp,"
-# export TOMOUNT+="/home/kit/scc/qv2382/"
-
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
   # -A hk-project-test-mlperf \
+system=${HOSTNAME:0:3}
 
-salloc --partition=accelerated \
-  -N "${SLURM_NNODES}" \
-  --time "${TIMELIMIT}" \
-  --gres gpu:"${GPUS_PER_NODE}" \
-  --container-name=torch \
-  --container-mounts="${TOMOUNT}" \
-  --container-mount-home \
-  --container-writable \
-  -A hk-project-madonna
+if [ $system == "horeka" ]
+then
+  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+  export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
+  TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+  TOMOUNT+="${EXT_DATA_PREFIX},"
+  TOMOUNT+="${BASE_DIR},"
+  TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
+  TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+
+  salloc --partition=accelerated \
+    -N "${SLURM_NNODES}" \
+    --time "${TIMELIMIT}" \
+    --gres gpu:"${GPUS_PER_NODE}" \
+    --container-name=torch \
+    --container-mounts="${TOMOUNT}" \
+    --container-mount-home \
+    --container-writable \
+    -A hk-project-madonna
+elif [ $system == "uc2" ]
+then 
+  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+  TOMOUNT+='/etc/slurm/:/etc/slurm/,'
+  # TOMOUNT+="${EXT_DATA_PREFIX},"
+  # TOMOUNT+="${BASE_DIR},"
+  # TOMOUNT+="/sys,/tmp,"
+  export TOMOUNT+="/home/kit/scc/qv2382/"
+  salloc --partition=sdil \
+    -N "${SLURM_NNODES}" \
+    --time "${TIMELIMIT}" \
+    --gres gpu:"${GPUS_PER_NODE}" \
+    --container-name=torch \
+    --container-mounts="${TOMOUNT}" \
+    --container-mount-home \
+    --container-writable
+fi

@@ -8,8 +8,8 @@
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
-####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
-#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#####SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
 
 ml purge
 

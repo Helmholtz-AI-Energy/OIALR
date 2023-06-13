@@ -223,9 +223,9 @@ def main(config):  # noqa: C901
 
             if all_layers_stable and not all_stable:
                 # NOTE: this will only do something when it isnt baseline
-                # if rank == 0:
-                #     log.info("Deleting the full rank weights from the base optimizer")
-                # optimizer.remove_full_rank_weights()
+                if rank == 0:
+                    log.info("Deleting the full rank weights from the base optimizer")
+                optimizer.remove_full_rank_weights()
                 all_stable = all_layers_stable
             if reset_optimizer:
                 optimizer.reset_shapes_of_sigma(model)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import socket
 import time
 
 import mlflow
@@ -9,6 +10,9 @@ from mlflow.entities import Experiment
 from omegaconf import DictConfig
 
 from .utils import only_on_rank_n
+
+uc2 = socket.gethostname().startswith("uc2")
+horeka = socket.gethostname().startswith("hkn")
 
 __all__ = ["setup_mlflow"]
 
@@ -61,13 +65,24 @@ def restart_mlflow_server(config: DictConfig):  # noqa: E302
 
         subprocess.Popen(["pkill", "-f", "gunicorn"])
         print("Starting MLFlow server")
+
+        if uc2:
+            tracking = config.tracking.mlflow.tracking_uri_uc2
+            artifact = config.tracking.mlflow.artifact_location_uc2
+        elif horeka:
+            tracking = config.tracking.mlflow.tracking_uri_horeka
+            artifact = config.tracking.mlflow.artifact_location_horeka
+        else:
+            tracking = config.tracking.mlflow.tracking_uri
+            artifact = config.tracking.mlflow.artifact_location
+
         mlflow_server_cmd = [
             f"{mlflow_cmd}",
             "server",
             "--backend-store-uri",
-            f"{config.tracking.mlflow.tracking_uri}",
+            f"{tracking}",
             "--default-artifact-root",
-            f"{config.tracking.mlflow.artifact_location}",
+            f"{artifact}",
             "--port",
             f"{config.tracking.mlflow.port}",
         ]
