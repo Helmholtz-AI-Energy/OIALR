@@ -58,7 +58,7 @@ svd_epoch_delay: 12
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 400
+  stability_frequency: 100
   delay: 200
   uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.2

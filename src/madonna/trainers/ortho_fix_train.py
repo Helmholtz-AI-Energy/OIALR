@@ -79,6 +79,8 @@ def main(config):  # noqa: C901
     criterion = madonna.utils.get_criterion(config)
     # optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
     optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
+    if not config.baseline:
+        model.set_optimizer(optimizer)
 
     scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer.opt1, 25)
     sigma_sched, sigma_warmup = madonna.utils.get_lr_schedules(config, optimizer.sigma_opt, 25)
@@ -145,16 +147,16 @@ def main(config):  # noqa: C901
     #     log.info("No number of warmup steps specified")
     all_stable = False
 
-    # fibonacci spacing of stability updates
-    n1, n2 = 0, 1
-    start = config.training.svd_epoch_delay
-    fib_epochs = [n1 + start]
-    while n2 < config.training.epochs:
-        n1, n2 = n2, n1 + n2
-        fib_epochs.append(start + n2)
-    fib_epochs.pop()
-    fib_epochs.append(config.training.epochs - 1)
-    print(f"fib_epochs {fib_epochs}")
+    # # fibonacci spacing of stability updates
+    # n1, n2 = 0, 1
+    # start = config.training.svd_epoch_delay
+    # fib_epochs = [n1 + start]
+    # while n2 < config.training.epochs:
+    #     n1, n2 = n2, n1 + n2
+    #     fib_epochs.append(start + n2)
+    # fib_epochs.pop()
+    # fib_epochs.append(config.training.epochs - 1)
+    # print(f"fib_epochs {fib_epochs}")
 
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         if config["rank"] == 0:
@@ -198,40 +200,39 @@ def main(config):  # noqa: C901
             scaler=scaler,
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
-            all_stable=all_stable,
             sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
         )
 
         # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
-        if not config.baseline and epoch in fib_epochs:
-            # try:
-            # dist.barrier()
-            # if rank == 0:
-            #     for n, p in model.named_parameters():
-            #         if n.endswith(("_s", ".s")) and p.grad is not None:
-            #             print(p.grad.mean(), p.grad.min(), p.grad.max(), p.mean())
-            # try:
-            #     scaler.step(optimizer=optimizer.sigma_opt)
-            #     scaler.update()
-            # except AssertionError:
-            #     # if this fails its most likely because the sigma values dont have any grads yet
-            #     pass
-            # optimizer.step(step_sigma=True, step_opt1=False)
-            optimizer.zero_grad(set_to_none=True, reset_sigma=True)
-            stabtime = time.perf_counter()
-            reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
-
-            if all_layers_stable and not all_stable:
-                # NOTE: this will only do something when it isnt baseline
-                if rank == 0:
-                    log.info("Deleting the full rank weights from the base optimizer")
-                optimizer.remove_full_rank_weights()
-                all_stable = all_layers_stable
-            if reset_optimizer:
-                optimizer.reset_shapes_of_sigma(model)
-
-            if rank == 0:
-                log.info(f"Stability time: {time.perf_counter() - stabtime}")
+        # one block ---------------------------------------------------------------------------------------------
+        # if not config.baseline and epoch in fib_epochs:
+        #     # try:
+        #     # dist.barrier()
+        #     # if rank == 0:
+        #     #     for n, p in model.named_parameters():
+        #     #         if n.endswith(("_s", ".s")) and p.grad is not None:
+        #     #             print(p.grad.mean(), p.grad.min(), p.grad.max(), p.mean())
+        #     # try:
+        #     #     scaler.step(optimizer=optimizer.sigma_opt)
+        #     #     scaler.update()
+        #     # except AssertionError:
+        #     #     # if this fails its most likely because the sigma values dont have any grads yet
+        #     #     pass
+        #     # optimizer.step(step_sigma=True, step_opt1=False)
+        #     optimizer.zero_grad(set_to_none=True, reset_sigma=True)
+        #     stabtime = time.perf_counter()
+        #     reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
+        #     if all_layers_stable and not all_stable:
+        #         # NOTE: this will only do something when it isnt baseline
+        #         if rank == 0:
+        #             log.info("Deleting the full rank weights from the base optimizer")
+        #         optimizer.remove_full_rank_weights()
+        #         all_stable = all_layers_stable
+        #     if reset_optimizer:
+        #         optimizer.reset_shapes_of_sigma(model)
+        #     if rank == 0:
+        #         log.info(f"Stability time: {time.perf_counter() - stabtime}")
+        # -------------------------------------------------------------------------------------------------------
 
         # if model.skip_stability:
         # for n, p in model.named_parameters():
@@ -277,7 +278,7 @@ def main(config):  # noqa: C901
         elif scheduler is not None and not batch_warmup_step:
             scheduler.step()
 
-        if all_stable:
+        if model.all_stable:
             if sigma_warmup is not None:
                 with sigma_warmup.dampening():
                     if not batch_warmup_step:
@@ -298,7 +299,6 @@ def train(
     warmup_scheduler=None,
     scaler=None,
     log=log,
-    all_stable=False,
     sigma_lrs=None,
 ):
     train_time_start = time.perf_counter()
@@ -344,9 +344,10 @@ def train(
     #     model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
 
     # madonna.utils.change_batchnorm_tracking(model, tracking=False)
+
     end = time.time()
     for i, data in enumerate(train_loader):
-        optimizer.zero_grad(reset_sigma=False)
+        optimizer.zero_grad(reset_sigma=True)
         if hasattr(config.data, "dali") and config.data.dali:
             images = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -360,25 +361,13 @@ def train(
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        # try:
-        #     reset_optimizer = model.check_stability()
-        # except AttributeError:
-        #     reset_optimizer = False
-        # if reset_optimizer:
-        #     if dist.get_rank() == 0:
-        #         log.info("Reset Optimizer State")
-        #     optimizer = madonna.utils.get_optimizer(config, model.ddp_model, lr=optimizer.param_groups[0]['lr'])
-        #     # if resetting optimizer, need to also reset the lr scheduler and warmup
-        #     lr_scheduler.optimizer = optimizer
-        #     warmup_scheduler.optimizer = optimizer
-
         with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
             output = model(images)
             loss = criterion(output, target)
 
         if torch.isnan(loss):
-            for n, p in model.named_parameters():
-                print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+            # for n, p in model.named_parameters():
+            #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
 
         scaler.scale(loss).backward()
@@ -444,10 +433,10 @@ def train(
 
             # if argmax.std() == 0:
             #     log.error(f"ISSUE WITH NETWORK printing debugging info")
-    if config.rank == 0:
-        for n, p in model.named_parameters():
-            if n.endswith("bias"):
-                print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+    # if config.rank == 0:
+    #     for n, p in model.named_parameters():
+    #         if n.endswith("bias"):
+    #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             #     raise ValueError
             # dist.barrier()
         # if i == 60:

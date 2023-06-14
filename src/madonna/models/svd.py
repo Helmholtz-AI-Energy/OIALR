@@ -15,8 +15,10 @@ from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
+import time
 
 from ..utils import utils
+# from .. import optimizers
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +87,39 @@ class SVDFixingModel(nn.Module):
         for name, mod in self.ddp_model.named_modules():
             if hasattr(mod, "test_stability_distributed"):
                 self.svd_modules.append((name, mod))
+
+        self.fib1, self.fib2 = 0, 1
+        self.next_stability_iteration = self.delay + self.fib1
+        # n1, n2 = 0, 1
+        # start = 100 -> delay
+        # offset = 10 -> frequency
+        # fib_epochs = [n1 + start]
+        # while n2 < 200:
+        #     n1, n2 = n2, n1 + n2
+        #     fib_epochs.append(start + (n2 * offset))
+        #     print(fib_epochs)
+        # # fib_epochs.pop()
+        # # fib_epochs.append(200 - 1)
+        # print(f"fib_epochs {fib_epochs}")
         # print(self.svd_modules)
+        self.optimizer = None  # optimizers.MixedSVDOpt
+        # TODO: add me to forward function !!
+        # optimizer.zero_grad(set_to_none=True, reset_sigma=True)
+        #     stabtime = time.perf_counter()
+        #     reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
+
+        #     if all_layers_stable and not all_stable:
+        #         # NOTE: this will only do something when it isnt baseline
+        #         if rank == 0:
+        #             log.info("Deleting the full rank weights from the base optimizer")
+        #         optimizer.remove_full_rank_weights()
+        #         all_stable = all_layers_stable
+        #     if reset_optimizer:
+        #         optimizer.reset_shapes_of_sigma(model)
+        self.all_stable = False
+
+    def set_optimizer(self, optimizer):
+        self.optimizer = optimizer  # optimizers.MixedSVDOpt
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
@@ -252,6 +286,7 @@ class SVDFixingModel(nn.Module):
         calls = 0
         # mods_to_call = []
         # for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
+        # dist.barrier()
         for name, mod in self.svd_modules:
             working_rank = calls % sz
             mod.test_stability_distributed(name=name, working_rank=working_rank, nonblocking=True)
@@ -261,12 +296,14 @@ class SVDFixingModel(nn.Module):
             except AttributeError:
                 calls += 1
             total += 1
+        # dist.barrier()
         for n, mod in self.svd_modules:
             reset_opt, stable = mod.wait_inner_dim_reshape_bcast_usvh(nonblocking=True)
             if reset_opt:
                 reset_optimizer = True
             if not stable:
                 all_stable = False
+        # dist.barrier()
         for _, mod in self.svd_modules:
             mod.wait_on_usvh()
 
@@ -329,6 +366,38 @@ class SVDFixingModel(nn.Module):
         # if self.call_count > (self.stability_frequency * 4 + self.delay):
         #     return self.local_model(inputs)
         # try:
+        self.call_count += 1
+
+        if self.call_count == self.next_stability_iteration:
+            stabtime = time.perf_counter()
+            reset_optimizer, all_layers_stable = self.test_basis_stability_all_layers()
+
+            if all_layers_stable and not self.all_stable:
+                # NOTE: this will only do something when it isnt baseline
+                if self.rank == 0:
+                    log.info("Deleting the full rank weights from the base optimizer")
+                self.optimizer.remove_full_rank_weights()
+                self.all_stable = all_layers_stable
+            if reset_optimizer:
+                self.optimizer.reset_shapes_of_sigma(self)
+            self.optimizer.zero_grad(set_to_none=True, reset_sigma=True)
+
+            # self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+            # dist.barrier()
+
+            self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
+            self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
+
+            if self.rank == 0:
+                log.info(
+                    f"Stability time: {time.perf_counter() - stabtime}\t"
+                    f"Current iteration: {self.call_count}\t"
+                    f"Next iteration: {self.next_stability_iteration}"
+                )
+            for n, p in self.ddp_model.named_parameters():
+                if p.ndim == 2:
+                    print(f"{self.rank}: {n}\t{p.shape}\t{p.requires_grad}")
+
         return self.ddp_model(inputs)
         # except RuntimeError as err:
         #     if dist.get_rank() == 0:
@@ -843,7 +912,7 @@ class SVDLinear(nn.Module):
                 # if in the first iteration
                 # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
                 self.prev_uvh = torch.tensor(1, device=self.weight.device)  # doing this to satisfy 'not None'
-                self.wait_inner_dim = None
+                # self.wait_inner_dim = None
                 # return
             # receive the wait_k from the working process
             self.wait_inner_dim = dist.broadcast(
