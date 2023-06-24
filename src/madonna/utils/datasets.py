@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 from pathlib import Path
 
 import torch.distributed as dist
@@ -13,7 +14,6 @@ import torchvision.transforms as transforms
 from omegaconf import DictConfig
 from PIL import ImageFile
 from timm.data.transforms_factory import create_transform
-import socket
 
 log = logging.getLogger(__name__)
 

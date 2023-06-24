@@ -33,7 +33,7 @@ def change_adam_shapes(optimizer, model, reset_buffers_zero: bool = False, param
         # if dist.get_rank() == 0:
         #     print(n, optimizer.param_groups[0]["params"][c].shape, p.shape)
         settozero = False
-        if n.endswith(".s") and p.requires_grad and reset_buffers_zero:
+        if n.endswith((".s", "_s")) and p.requires_grad and reset_buffers_zero:
             settozero = True
 
         state = optimizer.state[p]
@@ -83,7 +83,7 @@ def change_sgd_shapes(optimizer, model, reset_buffers_zero: bool = False, param_
         # if dist.get_rank() == 0:
         #     print(n, optimizer.param_groups[0]["params"][c].shape, p.shape)
         settozero = False
-        if n.endswith(".s") and p.requires_grad and reset_buffers_zero:
+        if n.endswith((".s", "_s")) and p.requires_grad and reset_buffers_zero:
             settozero = True
 
         state = optimizer.state[p]

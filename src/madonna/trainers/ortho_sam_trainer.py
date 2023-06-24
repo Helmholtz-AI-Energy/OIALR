@@ -30,15 +30,11 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
+    torch.set_printoptions(precision=5)
     if config.seed is not None:
         cudnn.benchmark = True
         cudnn.deterministic = True
-        # torch.manual_seed(args.local_rank)
-        torch.set_printoptions(precision=5)
-        # if dist.is_initialized():
-        #     scale = dist.get_rank() % 4
-        # else:
-        #     scale = 0
+
         random.seed(int(config["seed"]))
         torch.manual_seed(int(config["seed"]))
 
@@ -54,17 +50,13 @@ def main(config):  # noqa: C901
             gpu = 0
         torch.cuda.set_device(gpu)
         device = torch.device(f"cuda:{gpu}")
-    # print('before get model')
     model = madonna.utils.get_model(config)
     if not config.cpu_training:
         model.cuda(gpu)
-    # print('before model wrapping')
 
     if not config.baseline:
-        # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
         model_hold = hydra.utils.instantiate(config.training.fixing_method)
         model = model_hold(model).to(device)
-        # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
@@ -72,18 +64,24 @@ def main(config):  # noqa: C901
     else:
         print(model)
 
-    # for n, p in model.named_parameters():
-    #     print(f"{n}, {p.shape}")
-    # raise ValueError
-
     criterion = madonna.utils.get_criterion(config)
-    # optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
-    optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
+    optimizer = madonna.utils.get_optimizer(config, model)
+    if not config.baseline:
+        madonna.optimizers.svd_sam.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
+        params = model.ddp_model.parameters()
+    else:
+        params = model.parameters()
+
     if not config.baseline:
         model.set_optimizer(optimizer)
 
-    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer.opt1, 25)
-    sigma_sched, sigma_warmup = madonna.utils.get_sigma_lr_schedules(config, optimizer.sigma_opt, 25)
+    dset_dict = madonna.utils.datasets.get_dataset(config)
+    train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
+    val_loader = dset_dict["val"]["loader"]
+
+    # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
+    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, len(train_loader))
+    sam_opt = madonna.optimizers.gsam.GSAM(params=params, base_optimizer=optimizer, config=config, scheduler=scheduler)
 
     # # optionally resume from a checkpoint
     # # TODO: add checkpointing
@@ -115,18 +113,6 @@ def main(config):  # noqa: C901
     #     else:
     #         print(f"=> no checkpoint found at: {config['resume']}")
 
-    # if optimizer.num_groups > 1:
-    #     dset_dict = madonna.utils.datasets.get_dataset(
-    #         config,
-    #         group_size=optimizer.local_size,
-    #         group_rank=optimizer.local_rank,
-    #         num_groups=optimizer.num_groups,
-    #     )
-    # else:
-    dset_dict = madonna.utils.datasets.get_dataset(config)
-    train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
-    val_loader = dset_dict["val"]["loader"]
-
     # # if config['evaluate']:
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
@@ -139,12 +125,8 @@ def main(config):  # noqa: C901
     else:
         batch_warmup_step = False
 
-    scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
+    # scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
-    # try:
-    #     warmup_steps = config.training.lr_warmup.warmup_period
-    # except omegaconf.errors.ConfigAttributeError:
-    #     log.info("No number of warmup steps specified")
 
     refactory_warmup = None
 
@@ -188,62 +170,21 @@ def main(config):  # noqa: C901
 
         train_loss, last_loss, refactory_warmup = train(
             train_loader=train_loader,
-            optimizer=optimizer,
             model=model,
             criterion=criterion,
             epoch=epoch,
             device=device,
             config=config,
-            scaler=scaler,
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
-            sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
+            sam_opt=sam_opt,
         )
-
-        # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
-        # # one block ---------------------------------------------------------------------------------------------
-        # if not config.baseline and epoch in fib_epochs:
-        #     # try:
-        #     # dist.barrier()
-        #     # if rank == 0:
-        #     #     for n, p in model.named_parameters():
-        #     #         if n.endswith(("_s", ".s")) and p.grad is not None:
-        #     #             print(p.grad.mean(), p.grad.min(), p.grad.max(), p.mean())
-        #     # try:
-        #     #     scaler.step(optimizer=optimizer.sigma_opt)
-        #     #     scaler.update()
-        #     # except AssertionError:
-        #     #     # if this fails its most likely because the sigma values dont have any grads yet
-        #     #     pass
-        #     # optimizer.step(step_sigma=True, step_opt1=False)
-        #     optimizer.zero_grad(set_to_none=True, reset_sigma=True)
-        #     stabtime = time.perf_counter()
-        #     reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
-        #     if all_layers_stable and not all_stable:
-        #         # NOTE: this will only do something when it isnt baseline
-        #         if rank == 0:
-        #             log.info("Deleting the full rank weights from the base optimizer")
-        #         optimizer.remove_full_rank_weights()
-        #         all_stable = all_layers_stable
-        #     if reset_optimizer:
-        #         optimizer.reset_shapes_of_sigma(model)
-        #     if rank == 0:
-        #         log.info(f"Stability time: {time.perf_counter() - stabtime}")
-        # # -------------------------------------------------------------------------------------------------------
-
-        # if model.skip_stability:
-        # for n, p in model.named_parameters():
-        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-        # model.sync_models()
-        # if epoch % 10 == 9 or epoch == config.training.epochs - 1:
-        #     if dist.get_rank() == 0:
-        #         for n, p in model.named_parameters():
-        #             print(f"{n} {p.requires_grad} sparcity: {torch.count_nonzero(torch.abs(p) < 1e-5) / p.numel()}")
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
+        val_time = time.perf_counter()
         _, val_loss = validate(
             val_loader=val_loader,
             model=model,
@@ -254,6 +195,7 @@ def main(config):  # noqa: C901
             print_on_rank=config.rank == 0,
             pg=None,
         )
+        val_time = time.perf_counter() - val_time
 
         if config.rank == 0:
             log.info(
@@ -276,34 +218,26 @@ def main(config):  # noqa: C901
         elif scheduler is not None and not batch_warmup_step:
             scheduler.step()
 
-        if not config.baseline and model.all_stable:
-            if sigma_warmup is not None:
-                with sigma_warmup.dampening():
-                    if not batch_warmup_step:
-                        sigma_sched.step()
-            elif sigma_sched is not None and not batch_warmup_step:
-                sigma_sched.step()
         # save max memory used (just take rank 0)
         if rank == 0 and config.enable_tracking:
             max_memory = torch.cuda.max_memory_allocated()
             mlflow.log_metric("max_memory", max_memory, step=epoch)
+            mlflow.log_metric("val_time", val_time, step=epoch)
 
 
 def train(
     train_loader,
-    optimizer: madonna.optimizers.MixedSVDOpt,
-    model,
+    model: madonna.models.svd.SVDFixingModel,
     criterion,
     epoch,
     device,
     config,
+    sam_opt,
     lr_scheduler=None,
     warmup_scheduler=None,
-    scaler=None,
-    log=log,
-    sigma_lrs=None,
     refactory_warmup=None,
 ):
+    # train_time_start = time.perf_counter()
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
@@ -323,28 +257,6 @@ def train(
         batch_warmup_step = False
     # switch to train mode
     model.train()
-
-    # stages : move away from random
-    #           freeze non2d for stability
-    #           once stable -> train normally
-    #           once stagnant ? -> freeze non2d
-    # if not config.baseline:
-    #     if epoch < 2 * config.training.svd_epoch_delay:
-    #         # warmup steps
-    #         log.info("Warmup epoch")
-    #         pass
-    #     elif not all_stable:  # things are not all stable
-    #         log.info("\tNot stable, frozen non-2D weights")
-    #         optimizer.disable_train_non2d()
-    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-    #     elif all_stable:
-    #         log.info("\tStable, NON frozen non-2D weights")
-    #         optimizer.enable_train_non2d()
-    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-    # if not config.baseline and epoch > 10:
-    #     optimizer.disable_train_non2d()
-    #     model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-
     # madonna.utils.change_batchnorm_tracking(model, tracking=False)
 
     model_time = 0
@@ -356,8 +268,9 @@ def train(
     # last_lr = 0
     steps_remaining = 0
     step_factors = None
+    # ddp_model = model.ddp_model if not config.baseline else model
     for i, data in enumerate(train_loader):
-        optimizer.zero_grad(reset_sigma=True)
+        # optimizer.zero_grad(reset_sigma=True)
         if hasattr(config.data, "dali") and config.data.dali:
             images = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -372,51 +285,29 @@ def train(
         target = target.to(device, non_blocking=True)
 
         t0 = time.perf_counter()
-        reset_lr_warmup = False
+        # reset_lr_warmup = False
         if not config.baseline:
-            reset_lr_warmup = model.model_stability_tracking()
-        if reset_lr_warmup:
-            # reset the LR to a small value to avoid degredation in training
-            # last_lr = optimizer.opt1.param_groups[0]["lr"]
-            step_factors = (
-                optimizer.opt1.param_groups[0]["lr"] / lr_reset_steps,
-                optimizer.sigma_opt.param_groups[0]["lr"] / lr_reset_steps,
-                optimizer.opt1.param_groups[0]["lr"],
-                optimizer.sigma_opt.param_groups[0]["lr"],
-            )
-            optimizer.opt1.param_groups[0]["lr"] /= lr_reset_steps
-            if len(optimizer.opt1.param_groups) > 1:
-                optimizer.opt1.param_groups[1]["lr"] /= lr_reset_steps
-            optimizer.sigma_opt.param_groups[0]["lr"] /= lr_reset_steps
-            steps_remaining = lr_reset_steps - 1
+            _ = model.model_stability_tracking()
+            # reset_lr_warmup = model.model_stability_tracking()
+        # TODO: should there be a reset to LR?
+        # if reset_lr_warmup:
+        #     # reset the LR to a small value to avoid degredation in training
+        #     # last_lr = optimizer.opt1.param_groups[0]["lr"]
+        #     step_factors = []
+        #     for group in sam_opt.base_optimizer.param_groups:
+        #         step_factors.append(group["lr"] / lr_reset_steps)
+        #         group["lr"] /= lr_reset_steps
+        #     steps_remaining = lr_reset_steps - 1
 
-        # if config.rank == 0 and i % 4 == 0:
-        #     _, lrs = optimizer.get_lrs()
-        #     print(f"LRS: {lrs}")
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
-            # NOTE: some things dont play well with autocast - one should not put anything aside from the model in here
-            output = model(images)
-            loss = criterion(output, target)
+        # == == == == == == SAM requires 2 passes over the model == == == == == == == == == ==
+        def loss_fn(predictions, targets):
+            return criterion(predictions, targets).mean()
 
-        if torch.isnan(loss):
-            # for n, p in model.named_parameters():
-            #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-            raise ValueError("NaN loss")
+        sam_opt.set_closure(loss_fn, images, target)
+        output, loss = sam_opt.step()
 
-        scaler.scale(loss).backward()
-        if optimizer.train_opt1:
-            scaler.step(optimizer.opt1)
-            scaler.update()
-        # if i % 4 == 3 or i == len(train_loader) - 1:
-        running_sigma = False
-        if not config.baseline:
-            try:
-                scaler.step(optimizer=optimizer.sigma_opt)
-                scaler.update()
-                running_sigma = True
-            except AssertionError:
-                # if this fails its most likely because the sigma values dont have any grads yet
-                pass
+        # == == == == == == == == == end SAM steps / training == == == == == == == == == ==
+
         model_time += time.perf_counter() - t0
 
         # for n, p in model.named_parameters():
@@ -433,25 +324,15 @@ def train(
         end = time.time()
 
         if steps_remaining > 0:
-            optimizer.opt1.param_groups[0]["lr"] += step_factors[0]
-            if len(optimizer.opt1.param_groups) > 1:
-                optimizer.opt1.param_groups[1]["lr"] += step_factors[0]
-            optimizer.sigma_opt.param_groups[0]["lr"] += step_factors[1]
-            steps_remaining -= 1
-            # lrdict, lrstr = optimizer.get_lrs()
-            # print(lrstr)
+            for c, group in enumerate(sam_opt.base_optimizer.param_groups):
+                group["lr"] += step_factors[c]
+            steps_remaining = lr_reset_steps - 1
+
         else:
             if warmup_scheduler is not None:
                 with warmup_scheduler.dampening():
                     if batch_warmup_step:
                         lr_scheduler.step()
-
-            # sigma_lrs={'sched': sigma_sched, "warmup": sigma_warmup},
-            if running_sigma:
-                if sigma_lrs["warmup"] is not None:
-                    with sigma_lrs["warmup"].dampening():
-                        if batch_warmup_step:
-                            sigma_lrs["sched"].step()
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -474,27 +355,8 @@ def train(
             )
             progress.display(i + 1, log=log)
 
-            # if argmax.std() == 0:
-            #     log.error(f"ISSUE WITH NETWORK printing debugging info")
-    # if config.rank == 0:
-    #     for n, p in model.named_parameters():
-    #         if n.endswith("bias"):
-    #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-    #     raise ValueError
-    # dist.barrier()
-    # if i == 60:
-    #     raise RuntimeError
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
-
-    if step_factors is not None and steps_remaining > 0:
-        optimizer.opt1.param_groups[0]["lr"] = step_factors[2]
-        if len(optimizer.opt1.param_groups) > 1:
-            optimizer.opt1.param_groups[1]["lr"] = step_factors[2]
-        optimizer.sigma_opt.param_groups[0]["lr"] = step_factors[3]
-
-    # if not config.baseline:
-    #     model.sync_models()
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -584,12 +446,6 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 # #     f"min: {argmax.min().item()}, std: {argmax.std().item()}",
                 # # )
                 # # progress.display(i + 1, log=log)
-
-                # if argmax.std() == 0:
-                #     log.error(f"ISSUE WITH NETWORK printing debugging info")
-                #     for n, p in model.named_parameters():
-                #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-                #     raise ValueError
 
                 # if (i % config.training.print_freq == 0 or i == num_elem) and print_on_rank:
                 if (i % 50 == 0 or i == num_elem) and print_on_rank:

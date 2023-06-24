@@ -1,5 +1,6 @@
 import logging
 import math
+import time
 from copy import copy, deepcopy
 from time import perf_counter
 from typing import Optional, Tuple, Union
@@ -15,9 +16,10 @@ from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
-import time
 
+from ..optimizers.svd_sam import reset_all_states
 from ..utils import utils
+
 # from .. import optimizers
 
 log = logging.getLogger(__name__)
@@ -233,8 +235,10 @@ class SVDFixingModel(nn.Module):
                 mod.wait_on_kusvh()
                 print(f"done with waiting for {name}")
                 try:
-                    mod._qkv_same_embed_dim
-                    calls += 3
+                    if mod._qkv_same_embed_dim:
+                        calls += 1
+                    else:
+                        calls += 3
                 except AttributeError:
                     calls += 1
                 total += 1
@@ -291,8 +295,10 @@ class SVDFixingModel(nn.Module):
             working_rank = calls % sz
             mod.test_stability_distributed(name=name, working_rank=working_rank, nonblocking=True)
             try:  # only a module in the attention layers and its just faster to try to get something
-                mod._qkv_same_embed_dim
-                calls += 3
+                if mod._qkv_same_embed_dim:
+                    calls += 1
+                else:
+                    calls += 3
             except AttributeError:
                 calls += 1
             total += 1
@@ -362,49 +368,65 @@ class SVDFixingModel(nn.Module):
                 # self.train()
         return ret
 
-    def forward(self, inputs):
-        # if self.call_count > (self.stability_frequency * 4 + self.delay):
-        #     return self.local_model(inputs)
-        # try:
+    @torch.no_grad()
+    def model_stability_tracking(self):
+        # TODO: Should this be moved to the training script? might be easier...
         self.call_count += 1
+        if self.call_count != self.next_stability_iteration:
+            return False
 
-        if self.call_count == self.next_stability_iteration:
-            stabtime = time.perf_counter()
-            reset_optimizer, all_layers_stable = self.test_basis_stability_all_layers()
+        stabtime = time.perf_counter()
+        reset_optimizer, all_layers_stable = self.test_basis_stability_all_layers()
 
-            if all_layers_stable and not self.all_stable:
-                # NOTE: this will only do something when it isnt baseline
-                if self.rank == 0:
-                    log.info("Deleting the full rank weights from the base optimizer")
-                self.optimizer.remove_full_rank_weights()
-                self.all_stable = all_layers_stable
-            if reset_optimizer:
-                self.optimizer.reset_shapes_of_sigma(self)
-            self.optimizer.zero_grad(set_to_none=True, reset_sigma=True)
+        if all_layers_stable and not self.all_stable:
+            # NOTE: no need to remove the full_rank_weights, they will cause a few extra clock ticks but nothing more
+            # self.optimizer.remove_full_rank_weights()
+            reset_all_states(self.optimizer)
+            self.all_stable = all_layers_stable
+        if reset_optimizer:
+            reset_all_states(self.optimizer)
+            # self.insert_noise(noise_level=1e-3)
+            # self.optimizer.reset_shapes_of_sigma(self)
+        self.optimizer.zero_grad(set_to_none=True)
 
-            # self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
-            # dist.barrier()
+        # self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+        # dist.barrier()
 
-            self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
-            self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
+        self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
+        self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
 
-            if self.rank == 0:
-                log.info(
-                    f"Stability time: {time.perf_counter() - stabtime}\t"
-                    f"Current iteration: {self.call_count}\t"
-                    f"Next iteration: {self.next_stability_iteration}"
-                )
-            for n, p in self.ddp_model.named_parameters():
-                if p.ndim == 2:
-                    print(f"{self.rank}: {n}\t{p.shape}\t{p.requires_grad}")
+        if self.rank == 0:
+            log.info(
+                f"Stability time: {time.perf_counter() - stabtime}\t"
+                f"Current iteration: {self.call_count}\t"
+                f"Next iteration: {self.next_stability_iteration}",
+            )
+        return True
 
+    @torch.no_grad()
+    def insert_noise(self, noise_level=1e-1):
+        for n, p in self.ddp_model.named_parameters():
+            if n.endswith(".s") or n.endswith("_s"):
+                # # TODO: remove later if not working
+                # sdiag = torch.diag(self.s).clone()
+                sdiag = torch.diag(p)
+                # sdiag_diff1 = torch.diff(sdiag, n=1) * 0.001
+                # sdiag_diff2 = torch.diff(sdiag, n=2) * 0.0001
+                # # sdiag_diff3 = torch.diff(sdiag, n=3) * 0.001
+                # for i in range(p.shape[0] - 1):
+                #     p[i, i + 1] = sdiag_diff1[i]
+                #     if i < p.shape[0] - 2:
+                #         p[i, i + 2] = sdiag_diff2[i]
+
+                mask = torch.abs(p) <= 1e-7
+                # umask = torch.abs(p) > 1e-7
+
+                # print(f"{n} -> {torch.count_nonzero(mask)}")
+                p[mask] *= 0
+                p[mask] += noise_level * torch.rand_like(p[mask]) * sdiag.min()
+
+    def forward(self, inputs):
         return self.ddp_model(inputs)
-        # except RuntimeError as err:
-        #     if dist.get_rank() == 0:
-        #         print("failed forward!!")
-        #         for c, n, p in enumerate(self.ddp_model.named_parameters()):
-        #             print(f"{n}: {p.requires_grad} - {c}")
-        #     return self.ddp_model(inputs)
 
     @torch.no_grad()
     def track_interior_slices_mlflow(self, config, epoch):
@@ -425,7 +447,7 @@ class SVDFixingModel(nn.Module):
             return
         rank = dist.get_rank()
         if rank == 0:
-            log.info("Syncing layer.weight on all layers")
+            log.info("Syncing layers which require grad on all layers")
         sz = dist.get_world_size()
         waits = []
         for n, p in self.local_model.named_parameters():
@@ -725,15 +747,16 @@ class SVDLinear(nn.Module):
                 newk = s.shape[0]
             else:
                 newk = nz[0].item()
-        if newk < 0.5 * prevk:
-            newk = int(prevk * 0.5)
-            log.info(f"Values of S after dropping slice value by only 50% of suggestion: {s[:5]}")
+        if newk < 0.25 * prevk:
+            newk = int(prevk * 0.25)
+            log.info(f"Values of S after dropping slice value by only 25% of suggestion: {s[:5]}")
         if newk < self.vh.shape[1] * 0.05:
             newk = int(self.vh.shape[1] * 0.05)
-        change_k = newk != self.inner_dim
+        change_k = newk != prevk
         self.inner_dim.mul_(0)
         self.inner_dim.add_(newk)
-        self._update_usvh_shapes()
+        if change_k:
+            self._update_usvh_shapes()
         return change_k
 
     @torch.no_grad()
@@ -782,20 +805,22 @@ class SVDLinear(nn.Module):
 
     @torch.no_grad()
     def _full_rank_weight_stability(self):
-        log.debug("linear in normal stability update")
         w = self.weight.T if self.trans else self.weight
         # w = self.get_weight()
         # w = w.T if self.trans else w
         dtp = w.dtype
-        u, s, vh = torch.linalg.svd(w.to(torch.float32), full_matrices=False)  # , driver="gesvd")
+        w = w.to(torch.float32)
+        u, s, vh = torch.linalg.svd(w, full_matrices=False)  # , driver="gesvd")
         u = u.to(dtp)
         s = s.to(dtp)
         vh = vh.to(dtp)
         uvh = u @ vh
         csim = self.cossim(self.prev_uvh, uvh)
         csmean, _ = csim.mean(), csim.std()
+        # comp = w - (u @ torch.diag(s) @ vh)
         print(
-            f"normal stability update: {w.mean():.4f} {w.min():.4f} {w.max():.4f} similarity: {csim.mean():.4f} {csim.std():.4f}",
+            f"normal stability update: {w.mean():.4f} {w.min():.4f} {w.max():.4f} similarity: {csim.mean():.4f} {csim.std():.4f}\t",
+            # f"{comp.mean():.4f}\t{comp.min():.4f}\t{comp.max():.4f}"
         )
         self.prev_uvh.zero_()
         self.prev_uvh.add_(uvh)
@@ -829,7 +854,11 @@ class SVDLinear(nn.Module):
         # if self.rank == working_rank:
         # log.info("in full rank sigma update of usvh")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
-        usig, sig, vhsig = torch.linalg.svd(self.s)  # square mat, full mat arg doesnt matter
+        s = self.s.to(torch.float32)
+        usig, sig, vhsig = torch.linalg.svd(s)  # square mat, full mat arg doesnt matter
+        usig = usig.to(self.s.dtype)
+        sig = sig.to(self.s.dtype)
+        vhsig = vhsig.to(self.s.dtype)
         # usig[torch.abs(usig) < 1e-5] *= 0
         # vhsig[torch.abs(vhsig) < 1e-5] *= 0
         # sig[torch.abs(sig) < 1e-6] *= 0
@@ -858,10 +887,10 @@ class SVDLinear(nn.Module):
         self.s.zero_()
         self.s.add_(torch.diag(sig))
         # to be safe: set weight to be the same here too
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        ret = w.T if self.trans else w
-        self.weight *= 0
-        self.weight += ret
+        # w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+        # ret = w.T if self.trans else w
+        # self.weight *= 0
+        # self.weight += ret
 
         # normal update from cosine similarity stuff
         # uvh = self.u @ self.vh
@@ -870,16 +899,13 @@ class SVDLinear(nn.Module):
         # self.prev_uvh.zero_()
         # self.prev_uvh.add_(uvh)
         csmean = 1.0
-        change_k = False
-        if csmean >= self.uvhthreshold:
-            self.uvh_stable = True
-
-            self.weight.requires_grad = False
-            self.u.requires_grad = False
-            self.vh.requires_grad = False
-            self.s.requires_grad = True
-
-            change_k = self._update_inner_dim_and_shapes()
+        # change_k = False
+        self.uvh_stable = True
+        self.weight.requires_grad = False
+        self.u.requires_grad = False
+        self.vh.requires_grad = False
+        self.s.requires_grad = True
+        change_k = self._update_inner_dim_and_shapes()
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
@@ -978,14 +1004,14 @@ class SVDLinear(nn.Module):
         self.inner_dim_buffer[0] = self.inner_dim.to(torch.float)
         self.inner_dim_buffer[1] = status["csmean"]
         self.inner_dim_buffer[2] = status["change_k"]
-        if status["csmean"] >= self.uvhthreshold:
-            self.uvh_stable = True
+        # if status["csmean"] >= self.uvhthreshold:
+        #     self.uvh_stable = True
 
-            self.weight.requires_grad = False
-            self.weight.grad = None
-            self.u.requires_grad = False
-            self.vh.requires_grad = False
-            self.s.requires_grad = True
+        #     self.weight.requires_grad = False
+        #     self.weight.grad = None
+        #     self.u.requires_grad = False
+        #     self.vh.requires_grad = False
+        #     self.s.requires_grad = True
         self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
 
     @torch.no_grad()
@@ -993,7 +1019,7 @@ class SVDLinear(nn.Module):
         # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
         reset_optimizer = False
         if self.last_send_rank is None:  # skip all comms
-            return reset_optimizer
+            return reset_optimizer, True
         # self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=self.last_send_rank, async_op=False)
         if self.wait_inner_dim is not None:
             self.wait_inner_dim.wait()
@@ -1172,7 +1198,7 @@ class SVDMultiheadAttention(nn.Module):
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
-        self._qkv_same_embed_dim = False  # self.kdim == embed_dim and self.vdim == embed_dim
+        self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
 
         self.num_heads = num_heads
         self.dropout = dropout
@@ -1334,18 +1360,18 @@ class SVDMultiheadAttention(nn.Module):
         self.rank = dist.get_rank() if dist.is_initialized() else 0
         self.size = dist.get_world_size() if dist.is_initialized() else 1
 
-        self.last_send_ranks = {"q": None, "k": None, "v": None, "in_bias": None}
+        self.last_send_ranks = {"q": None, "k": None, "v": None, "in_proj": None}
         self.waits = {
             "q": {"u": None, "s": None, "vh": None, "inner_dim": None},
             "k": {"u": None, "s": None, "vh": None, "inner_dim": None},
             "v": {"u": None, "s": None, "vh": None, "inner_dim": None},
-            "in_bias": {"u": None, "s": None, "vh": None, "inner_dim": None},
+            "in_proj": {"u": None, "s": None, "vh": None, "inner_dim": None},
         }
         self.inner_dim_buffers = {
             "q": torch.zeros(3),
             "k": torch.zeros(3),
             "v": torch.zeros(3),
-            "in_bias": torch.zeros(3),
+            "in_proj": torch.zeros(3),
         }
 
         with torch.no_grad():  # set class params from existing
@@ -1639,10 +1665,14 @@ class SVDMultiheadAttention(nn.Module):
             # they don't!
             why_not_fast_path = "non-self attention was used (query, key, and value are not the same Tensor)"
         elif self.in_proj_bias is not None and query.dtype != self.in_proj_bias.dtype:
-            why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_bias ({self.in_proj_bias.dtype}) don't match"
+            why_not_fast_path = (
+                f"dtypes of query ({query.dtype}) and self.in_proj_bias ({self.in_proj_bias.dtype}) don't match"
+            )
         elif self.in_proj_weight is not None and query.dtype != self.in_proj_weight.dtype:
             # this case will fail anyway, but at least they'll get a useful error message.
-            why_not_fast_path = f"dtypes of query ({query.dtype}) and self.in_proj_weight ({self.in_proj_weight.dtype}) don't match"
+            why_not_fast_path = (
+                f"dtypes of query ({query.dtype}) and self.in_proj_weight ({self.in_proj_weight.dtype}) don't match"
+            )
         elif self.training:
             why_not_fast_path = "training is enabled"
         elif not self.batch_first:
@@ -2007,16 +2037,12 @@ class SVDMultiheadAttention(nn.Module):
         """
         stable = getattr(self, f"uvh_stable_{qkvin}")
         prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
-        if (
-            prev_uvh is not None
-            and not (self.full_rank_sigma and stable and self.update_from_simga)
-            and stable
-        ):
+        if prev_uvh is not None and not (self.full_rank_sigma and stable and self.update_from_simga) and stable:
             # early out here without any communication
             self.last_send_ranks[qkvin] = None
-            u, s, vh, _ = self._get_usvh_from_qkvin
+            u, s, vh, _ = self._get_usvh_from_qkvin(qkvin=qkvin)
             if working_rank == self.rank:
-                log.info(f"{name[-30]} - {qkvin}: All Frozen, [{u.shape[0]} {s.shape[0]} {vh.shape[1]}]")
+                log.info(f"{name[-30]} - {qkvin}: All shapes Frozen, [{u.shape[0]} {s.shape[0]} {vh.shape[1]}]")
             return
 
         self.last_send_ranks[qkvin] = working_rank
@@ -2119,7 +2145,11 @@ class SVDMultiheadAttention(nn.Module):
 
         if status["csmean"] >= self.uvhthreshold:
             setattr(self, f"uvh_stable_{qkvin}", True)
-            getattr(self, f"{qkvin}_proj_weight").requires_grad = False
+            try:
+                getattr(self, f"{qkvin}_proj_weight").requires_grad = False
+            except AttributeError:
+                # for in_proj, we dont need the proj part
+                getattr(self, f"{qkvin}_weight").requires_grad = False
             u.requires_grad = False
             s.requires_grad = True
             vh.requires_grad = False
@@ -2168,7 +2198,8 @@ class SVDMultiheadAttention(nn.Module):
         # w = w.T if self.trans else w
         prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
         dtp = w.dtype
-        u, s, vh = torch.linalg.svd(w.to(torch.float32), full_matrices=False)  # , driver="gesvd")
+        w = w.to(torch.float32)
+        u, s, vh = torch.linalg.svd(w, full_matrices=False)  # , driver="gesvd")
         u = u.to(dtp)
         s = s.to(dtp)
         vh = vh.to(dtp)
@@ -2200,10 +2231,16 @@ class SVDMultiheadAttention(nn.Module):
             log.debug("in full rank sigma update of usvh")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
         u, s, vh, _ = self._get_usvh_from_qkvin(qkvin)
+        dtp = s.dtype
+        s = s.to(torch.float32)
         usig, sig, vhsig = torch.linalg.svd(s)  # square mat, full mat arg doesnt matter
         # usig[torch.abs(usig) < 1e-5] *= 0
         # vhsig[torch.abs(vhsig) < 1e-5] *= 0
         # sig[torch.abs(sig) < 1e-6] *= 0
+
+        usig = usig.to(dtp)
+        sig = sig.to(dtp)
+        vhsig = vhsig.to(dtp)
 
         # # cutoff vectors with only small changes --------------------------------------
         # # in this case, remove the irrelevant vectors here not after multi!
@@ -2251,7 +2288,7 @@ class SVDMultiheadAttention(nn.Module):
         # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
         reset_optimizer = False
         if self.last_send_ranks[qkvin] is None:
-            return reset_optimizer
+            return reset_optimizer, True
         if self.waits[qkvin]["inner_dim"] is not None:
             self.waits[qkvin]["inner_dim"].wait()
             self.waits[qkvin]["inner_dim"] = None
@@ -2264,8 +2301,12 @@ class SVDMultiheadAttention(nn.Module):
                 if self.inner_dim_buffers[qkvin][1] >= self.uvhthreshold:
                     # stable = getattr(self, f"uvh_stable_{qkvin}")
                     setattr(self, f"uvh_stable_{qkvin}", True)
-                    getattr(self, f"{qkvin}_proj_weight").requires_grad = False
-                    getattr(self, f"{qkvin}_proj_weight").grad = None
+                    try:
+                        getattr(self, f"{qkvin}_proj_weight").requires_grad = False
+                        getattr(self, f"{qkvin}_proj_weight").grad = None
+                    except AttributeError:
+                        getattr(self, f"{qkvin}_weight").requires_grad = False
+                        getattr(self, f"{qkvin}_weight").grad = None
                     u, s, vh, _ = self._get_usvh_from_qkvin(qkvin)
                     u.requires_grad = False
                     s.requires_grad = True
@@ -2292,15 +2333,16 @@ class SVDMultiheadAttention(nn.Module):
 
     def wait_on_usvh(self):
         if self._qkv_same_embed_dim:
-            self._wait_on_usvh_abs("in_bias")
+            self._wait_on_usvh_abs("in_proj")
         for qkv in "qkv":
             self._wait_on_usvh_abs(qkv)
 
     @torch.no_grad()
     def test_stability_distributed(self, name, working_rank=0, nonblocking=True):
         if self.in_proj_weight is not None:
-            return self._test_stability_general(
+            return self._test_stability_distributed_abs(
                 qkvin="in_proj",
+                name=name,
                 working_rank=working_rank,
                 nonblocking=nonblocking,
             )
@@ -2353,13 +2395,14 @@ class SVDMultiheadAttention(nn.Module):
         else:
             newsl = nz[0].item()
 
-        if newsl < 0.5 * prevsl:
+        if newsl < 0.25 * prevsl:
             # TODO: log message?
-            newsl = int(prevsl * 0.5)
+            newsl = int(prevsl * 0.25)
+            log.info(f"Values of S after dropping slice value by only 25% of suggestion: {sdiag[:5]}")
         sl.mul_(0)
         sl.add_(newsl)
-
-        self._update_usvh_shapes(qkvin)
+        if prevsl != newsl:
+            self._update_usvh_shapes(qkvin)
         return prevsl != newsl
 
     @torch.no_grad()

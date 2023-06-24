@@ -91,27 +91,28 @@ def get_lr_schedules(config, optim, len_ds=None):
 
 
 def get_sigma_lr_schedules(config, sigma_optim, len_ds=None):
-    if config.baseline:
-        return None, None
-    if config.training.lr_schedule is None:
+    if config.baseline or "sigma_warmup" not in config.training.keys():
         return None, None
 
-    sched_name = config.training.lr_schedule._target_.split(".")[0]
+    if config.training.sigma_warmup is None:
+        return None, None
+
+    sched_name = config.training.sigma_warmup._target_.split(".")[0]
 
     # sched_params = config["lr_schedule"]["params"]
     if sched_name == "ExponentialLR":
         # sched_params["last_epoch"] = config["epochs"] - config["start_epoch"]
-        config.training.lr_schedule.last_epoch = config.training.epochs - config.training.start_epoch
+        config.training.sigma_warmup.last_epoch = config.training.epochs - config.training.start_epoch
     elif sched_name == "CosineAnnealingLR":
         # sched_params["last_epoch"] = config['epochs'] - config['start_epoch']
-        config.training.lr_schedule.T_max = len_ds
+        config.training.sigma_warmup.T_max = len_ds
     elif sched_name == "CosineAnnealingWarmRestarts":
-        config.training.lr_schedule.T_0 = len_ds
+        config.training.sigma_warmup.T_0 = len_ds
     elif sched_name == "CyclicLR":
-        config.training.lr_schedule.max_lr = config.training.lr
-        config.training.lr_schedule.step_size_up = len_ds
+        config.training.sigma_warmup.max_lr = config.training.lr
+        config.training.sigma_warmup.step_size_up = len_ds
 
-    scheduler = hydra.utils.instantiate(config.training.lr_schedule)
+    scheduler = hydra.utils.instantiate(config.training.sigma_warmup)
     scheduler = scheduler(sigma_optim)
     if not config.training.lr_warmup:
         return scheduler, None
@@ -119,3 +120,15 @@ def get_sigma_lr_schedules(config, sigma_optim, len_ds=None):
     warmup_scheduler = hydra.utils.instantiate(config.training.sigma_warmup)
     warmup_scheduler = warmup_scheduler(sigma_optim)
     return scheduler, warmup_scheduler
+
+
+def get_refactory_lr_warmup(config, opt, lr):
+    if config.baseline:
+        return None
+    # TODO: need to reset the optimizer to the max LR before initializing the warmup scheduler
+    for group in opt.param_groups:
+        group["lr"] = lr
+
+    warmup_scheduler = hydra.utils.instantiate(config.training.refactory_warmup)
+    warmup_scheduler = warmup_scheduler(opt)
+    return warmup_scheduler

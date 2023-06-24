@@ -38,22 +38,8 @@ optimizer:
   _target_: torch.optim.Adam
   _partial_: True
 
-sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  _partial_: True
-  _target_: torch.optim.Adam
-  # _target_: torch.optim.SGD
+sigma_optimizer:
   lr: 0.001
-  # momentum: 0.9
-  # weight_decay: 1.0e-5
-  # nesterov: True
-# sigma_warmup: #null
-#   _target_: pytorch_warmup.LinearWarmup
-#   _partial_: True
-#   warmup_period: 1
-# refactory_warmup:
-#   _target_: pytorch_warmup.LinearWarmup
-#   _partial_: True
-#   warmup_period: 50
 
 lr_reset_period: 3
 
@@ -74,3 +60,13 @@ fixing_method:
   keep_last_layer: True
   update_from_simga: True
   reinit_shapes: True
+
+
+gsam:
+  adaptive: True
+  perturb_eps: 1.0e-12
+  alpha: 0.5
+  max_grad_norm: -1
+  rho_max_value: 2.0
+  rho_min_value: 0.5
+  grad_reduce: mean

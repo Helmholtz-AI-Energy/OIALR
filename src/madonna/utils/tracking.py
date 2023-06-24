@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import socket
+import subprocess
 import time
 
 import mlflow

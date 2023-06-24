@@ -289,8 +289,7 @@ class MyOpt(object):
         if self.best_local_loss is None or self.best_local_loss > current_loss:  # assume minimize
             bll = f"{self.best_local_loss:.5f}" if self.best_local_loss is not None else "None"
             log.info(
-                f"New local best: {current_loss:.5f} v {bll}\t\t"
-                f"step: {self.phases_dict['explore']['step']}",
+                f"New local best: {current_loss:.5f} v {bll}\t\t" f"step: {self.phases_dict['explore']['step']}",
             )
             self.best_local_loss = current_loss
             self._store_best_network_in_buffers()
@@ -405,8 +404,7 @@ class MyOpt(object):
             self.phases_dict["explore"]["last_best"] = sn
         else:
             log.debug(
-                f"moving in same direction step num: {sn}, "
-                f"last_best: {lb} -> {self.phases_dict['losses'][-3:]}",
+                f"moving in same direction step num: {sn}, " f"last_best: {lb} -> {self.phases_dict['losses'][-3:]}",
             )
 
     # ====================== Exploitation / Contraction functions ==================================

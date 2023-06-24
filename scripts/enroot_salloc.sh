@@ -41,7 +41,7 @@ export NCCL_COLLNET_ENABLE=0
   # -A hk-project-test-mlperf \
 system=${HOSTNAME:0:3}
 
-if [ $system == "horeka" ]
+if [ $system == "hkn" ]
 then
   BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
   export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
@@ -61,7 +61,7 @@ then
     --container-writable \
     -A hk-project-madonna
 elif [ $system == "uc2" ]
-then 
+then
   TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
   TOMOUNT+='/etc/slurm/:/etc/slurm/,'
   # TOMOUNT+="${EXT_DATA_PREFIX},"
