@@ -1,11 +1,12 @@
 dataset: imagenet
-data_dir_horeka: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/imagenet/" # data_dir is specified in config.yaml
+# data_dir_horeka: "/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets/imagenet/" # data_dir is specified in config.yaml
+data_dir_horeka: "/hkfs/home/dataset/datasets/imagenet-2012/original/imagenet-raw/ILSVRC/Data/CLS-LOC/"
 # data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
 data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
-local_batch_size: 200
+local_batch_size: 256
 num_workers: 8
 pin_memory: True
-timm_transforms: False
+timm_transforms: True
 persistent_workers: True
 distributed_sample: True
 prefetch_factor: 4

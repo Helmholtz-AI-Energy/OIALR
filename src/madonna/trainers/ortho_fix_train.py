@@ -5,6 +5,7 @@ import os
 import random
 import shutil
 import time
+from collections import defaultdict
 from enum import Enum
 from pathlib import Path
 
@@ -20,10 +21,41 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+from rich import print as rprint
+from rich.columns import Columns
+from rich.console import Console
+from torch.autograd.grad_mode import no_grad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
 
 import madonna
+
+
+@no_grad()
+def _group_tensors_by_device_and_dtype(tensorlistlist, with_indices=False):
+    assert all(
+        [not x or len(x) == len(tensorlistlist[0]) for x in tensorlistlist],
+    ), "all specified tensorlists must match in length"
+    per_device_and_dtype_tensors = defaultdict(
+        lambda: [[] for _ in range(len(tensorlistlist) + (1 if with_indices else 0))],
+    )
+    for i, t in enumerate(tensorlistlist[0]):
+        key = (t.device, t.dtype)
+        for j in range(len(tensorlistlist)):
+            # a tensorlist may be empty/None
+            if tensorlistlist[j]:
+                per_device_and_dtype_tensors[key][j].append(tensorlistlist[j][i])
+        if with_indices:
+            # tack on previous index
+            per_device_and_dtype_tensors[key][j + 1].append(i)
+    return per_device_and_dtype_tensors
+
+
+def _has_foreach_support(tensors, device: torch.device) -> bool:
+    if device.type not in ["cpu", "cuda"] or torch.jit.is_scripting():
+        return False
+    return all([t is None or type(t) == torch.Tensor for t in tensors])
+
 
 best_acc1 = 0
 log = logging.getLogger(__name__)
@@ -61,10 +93,8 @@ def main(config):  # noqa: C901
     # print('before model wrapping')
 
     if not config.baseline:
-        # model = madonna.models.QRFixingModel(model, **config.training.qr_fixing)
         model_hold = hydra.utils.instantiate(config.training.fixing_method)
         model = model_hold(model).to(device)
-        # model = madonna.models.QROrthoFixingModel(model, **config.training.fixing_method)
     elif dist.is_initialized():
         model = DDP(model)  # , device_ids=[config.rank])
         if dist.get_rank() == 0:
@@ -72,60 +102,84 @@ def main(config):  # noqa: C901
     else:
         print(model)
 
-    # for n, p in model.named_parameters():
-    #     print(f"{n}, {p.shape}")
-    # raise ValueError
-
     criterion = madonna.utils.get_criterion(config)
-    # optimizer = madonna.utils.get_optimizer(config, model)  # -> madonna.optimizers.myopt.MyOpt
-    optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
+    optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.min_lr)
+    if not config.baseline:
+        madonna.optimizers.svd_sam.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
+        # params = model.ddp_model.parameters()
+        ddp_model = model.ddp_model
+    else:
+        # params = model.parameters()
+        ddp_model = model
+
     if not config.baseline:
         model.set_optimizer(optimizer)
 
-    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer.opt1, 25)
-    sigma_sched, sigma_warmup = madonna.utils.get_sigma_lr_schedules(config, optimizer.sigma_opt, 25)
-
-    # # optionally resume from a checkpoint
-    # # TODO: add checkpointing
-    # # Reminder: when resuming from a single checkpoint, make sure to call init_model with
-    # # keep_rank0=True
-    # if "resume" in config:
-    #     if os.path.isfile(config["resume"]):
-    #         print(f"=> loading checkpoint: {config['resume']}")
-    #         if config["gpu"] is None:
-    #             checkpoint = torch.load(config["resume"])
-    #         elif torch.cuda.is_available():
-    #             # Map model to be loaded to specified single gpu.
-    #             loc = f"cuda:{config['gpu']}"
-    #             checkpoint = torch.load(config["resume"], map_location=loc)
-    #         config["start_epoch"] = checkpoint["epoch"]
-    #         # best_acc1 = checkpoint["best_acc1"]
-    #         # if config["gpu"] is not None:
-    #         #     # best_acc1 may be from a checkpoint from a different GPU
-    #         #     best_acc1 = best_acc1.to(config["gpu"])
-    #         model.load_state_dict(checkpoint["state_dict"])
-    #         # optimizer.load_state_dict(checkpoint["optimizer"])
-    #         scheduler.load_state_dict(checkpoint["scheduler"])
-    #         print(
-    #             "=> loaded checkpoint '{}' (epoch {})".format(
-    #                 config["resume"],
-    #                 checkpoint["epoch"],
-    #             ),
-    #         )
-    #     else:
-    #         print(f"=> no checkpoint found at: {config['resume']}")
-
-    # if optimizer.num_groups > 1:
-    #     dset_dict = madonna.utils.datasets.get_dataset(
-    #         config,
-    #         group_size=optimizer.local_size,
-    #         group_rank=optimizer.local_rank,
-    #         num_groups=optimizer.num_groups,
-    #     )
-    # else:
     dset_dict = madonna.utils.datasets.get_dataset(config)
     train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
     val_loader = dset_dict["val"]["loader"]
+
+    # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
+    scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, len(train_loader))
+    # optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
+    # if not config.baseline:
+    #     model.set_optimizer(optimizer)
+    # sigma_sched, sigma_warmup = madonna.utils.get_sigma_lr_schedules(config, optimizer.sigma_opt, 25)
+    warmup_scheduler = LRWarmupLinear(config, optimizer=optimizer)
+    # optionally resume from a checkpoint
+    # Reminder: when resuming from a single checkpoint, make sure to call init_model with
+    start_epoch = config.training.start_epoch
+    if config.training.checkpoint is not None:
+        if os.path.isfile(config.training.checkpoint):
+            print(f"=> loading checkpoint: {config.training.checkpoint}")
+            if torch.cuda.is_available():
+                # Map model to be loaded to specified single gpu.
+                loc = f"cuda:{gpu}"
+                checkpoint = torch.load(config.training.checkpoint, map_location=loc)
+            start_epoch = checkpoint["epoch"]
+
+            ddp_model.load_state_dict(checkpoint["state_dict"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            scheduler.load_state_dict(checkpoint["scheduler"])
+            print(
+                "=> loaded checkpoint '{}' (epoch {})".format(
+                    config.training.checkpoint,
+                    start_epoch,
+                ),
+            )
+            LRWarmupLinear.current_step = len(train_loader) * start_epoch
+            print(f"new warmup step: {LRWarmupLinear.current_step}")
+            if not config.baseline:
+                optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr
+            # optimizer should have the correct LR from the loading point
+            if not config.baseline:
+                if "next_stability_iteration" in checkpoint:
+                    model.next_stability_iteration = checkpoint["next_stability_iteration"]
+                if "call_count" in checkpoint:
+                    model.call_count = checkpoint["call_count"]
+        else:
+            print(f"=> no checkpoint found at: {config.training.checkpoint}")
+
+    # if start_epoch == 0:
+    # set the learning rate to be based on the min_lr
+    groups = optimizer.param_groups
+    if not config.baseline:
+        groups = groups[:-1]
+    for group in groups:
+        group["lr"] = config.training.min_lr + (warmup_scheduler.add_value * start_epoch)
+    if not config.baseline:
+        optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr + (
+            warmup_scheduler.sigma_add * start_epoch
+        )
+
+    out_base = None
+    if "checkpoint_out_root" in config.training and config.training.checkpoint_out_root is not None:
+        out_base = Path(config.training.checkpoint_out_root)
+        model_name = config.model.name
+        dataset_name = config.data.dataset
+        out_base /= "baseline" if config.baseline else "svd"
+        out_base = out_base / f"{model_name}-{dataset_name}"
+        out_base.mkdir(parents=True, exist_ok=True)
 
     # # if config['evaluate']:
     # #     validate(val_loader, dlrt_trainer, config)
@@ -135,9 +189,9 @@ def main(config):  # noqa: C901
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
-        batch_warmup_step = True
+        batch_lr_step = True
     else:
-        batch_warmup_step = False
+        batch_lr_step = False
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -147,16 +201,15 @@ def main(config):  # noqa: C901
     #     log.info("No number of warmup steps specified")
 
     refactory_warmup = None
-
-    for epoch in range(config.training["start_epoch"], config.training["epochs"]):
+    for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            lr_dict, prnt_str = optimizer.get_lrs()
+            lr_list, prnt_str = get_lrs(optimizer)
             log.info(f"Begin epoch {epoch} LRs: {prnt_str}")
-            metrics = {"lr": lr_dict["non2d"]}
-            if not config.baseline:
-                metrics["sigma_lr"] = lr_dict["sigma"]
+            metrics = {"lr": lr_list[0]}
+            # if not config.baseline:
+            #     metrics["sigma_lr"] = lr_dict["sigma"]
             mlflow.log_metrics(
                 metrics=metrics,
                 step=epoch,
@@ -197,7 +250,7 @@ def main(config):  # noqa: C901
             scaler=scaler,
             lr_scheduler=scheduler,
             warmup_scheduler=warmup_scheduler,
-            sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
+            # sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
         )
 
@@ -267,26 +320,43 @@ def main(config):  # noqa: C901
                 if config.enable_tracking:
                     mlflow.log_metric("perc_parmas", perc, step=epoch)
                 log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
-                model.track_interior_slices_mlflow(config, epoch)
+                # model.track_interior_slices_mlflow(config, epoch)
 
-        if warmup_scheduler is not None:
-            with warmup_scheduler.dampening():
-                if not batch_warmup_step:
-                    scheduler.step()
-        elif scheduler is not None and not batch_warmup_step:
+        if warmup_scheduler is not None and not warmup_scheduler.warming_up:
+            warmup_scheduler.step()
+        if scheduler is not None and not batch_lr_step:
             scheduler.step()
 
-        if not config.baseline and model.all_stable:
-            if sigma_warmup is not None:
-                with sigma_warmup.dampening():
-                    if not batch_warmup_step:
-                        sigma_sched.step()
-            elif sigma_sched is not None and not batch_warmup_step:
-                sigma_sched.step()
         # save max memory used (just take rank 0)
         if rank == 0 and config.enable_tracking:
             max_memory = torch.cuda.max_memory_allocated()
             mlflow.log_metric("max_memory", max_memory, step=epoch)
+
+        if rank == 0 and out_base is not None:
+            # save checkpoints
+            filename = out_base / f"epoch{epoch}.pth.tar"
+            save_dict = {
+                "epoch": epoch + 1,
+                "state_dict": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "slurm_id": config.slurm_id,
+                "mlflow_run_name": mlflow.active_run().info.run_id,
+            }
+            if not config.baseline:
+                save_dict["next_stability_iteration"] = model.next_stability_iteration
+                save_dict["call_count"] = model.call_count
+            torch.save(save_dict, filename)
+            log.info(f"Checkpoint to file {filename}")
+
+
+def get_lrs(opt):
+    out_lrs = []
+    prnt_str = ""
+    for group in opt.param_groups:
+        out_lrs.append(group["lr"])
+        prnt_str += f"group {len(out_lrs)}: lr {group['lr']:.6f}\t"
+    return out_lrs, prnt_str
 
 
 def train(
@@ -318,35 +388,11 @@ def train(
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
-        batch_warmup_step = True
+        batch_lr_step = True
     else:
-        batch_warmup_step = False
+        batch_lr_step = False
     # switch to train mode
     model.train()
-
-    # stages : move away from random
-    #           freeze non2d for stability
-    #           once stable -> train normally
-    #           once stagnant ? -> freeze non2d
-    # if not config.baseline:
-    #     if epoch < 2 * config.training.svd_epoch_delay:
-    #         # warmup steps
-    #         log.info("Warmup epoch")
-    #         pass
-    #     elif not all_stable:  # things are not all stable
-    #         log.info("\tNot stable, frozen non-2D weights")
-    #         optimizer.disable_train_non2d()
-    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-    #     elif all_stable:
-    #         log.info("\tStable, NON frozen non-2D weights")
-    #         optimizer.enable_train_non2d()
-    #         model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-    # if not config.baseline and epoch > 10:
-    #     optimizer.disable_train_non2d()
-    #     model.ddp_model = DDP(model.local_model, find_unused_parameters=False, static_graph=False)
-
-    # madonna.utils.change_batchnorm_tracking(model, tracking=False)
-
     model_time = 0
     if refactory_warmup is None:
         refactory_warmup = {}
@@ -356,8 +402,10 @@ def train(
     # last_lr = 0
     steps_remaining = 0
     step_factors = None
+    print_norms = []
+
     for i, data in enumerate(train_loader):
-        optimizer.zero_grad(reset_sigma=True)
+        optimizer.zero_grad(set_to_none=True)
         if hasattr(config.data, "dali") and config.data.dali:
             images = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -372,51 +420,68 @@ def train(
         target = target.to(device, non_blocking=True)
 
         t0 = time.perf_counter()
-        reset_lr_warmup = False
+        # reset_lr_warmup = False
         if not config.baseline:
-            reset_lr_warmup = model.model_stability_tracking()
-        if reset_lr_warmup:
-            # reset the LR to a small value to avoid degredation in training
-            # last_lr = optimizer.opt1.param_groups[0]["lr"]
-            step_factors = (
-                optimizer.opt1.param_groups[0]["lr"] / lr_reset_steps,
-                optimizer.sigma_opt.param_groups[0]["lr"] / lr_reset_steps,
-                optimizer.opt1.param_groups[0]["lr"],
-                optimizer.sigma_opt.param_groups[0]["lr"],
-            )
-            optimizer.opt1.param_groups[0]["lr"] /= lr_reset_steps
-            if len(optimizer.opt1.param_groups) > 1:
-                optimizer.opt1.param_groups[1]["lr"] /= lr_reset_steps
-            optimizer.sigma_opt.param_groups[0]["lr"] /= lr_reset_steps
-            steps_remaining = lr_reset_steps - 1
+            _ = model.model_stability_tracking()
+        # if reset_lr_warmup:
+        #     # reset the LR to a small value to avoid degredation in training
+        #     # last_lr = optimizer.opt1.param_groups[0]["lr"]
+        #     step_factors = (
+        #         optimizer.opt1.param_groups[0]["lr"] / lr_reset_steps,
+        #         optimizer.sigma_opt.param_groups[0]["lr"] / lr_reset_steps,
+        #         optimizer.opt1.param_groups[0]["lr"],
+        #         optimizer.sigma_opt.param_groups[0]["lr"],
+        #     )
+        #     optimizer.opt1.param_groups[0]["lr"] /= lr_reset_steps
+        #     if len(optimizer.opt1.param_groups) > 1:
+        #         optimizer.opt1.param_groups[1]["lr"] /= lr_reset_steps
+        #     optimizer.sigma_opt.param_groups[0]["lr"] /= lr_reset_steps
+        #     steps_remaining = lr_reset_steps - 1
 
         # if config.rank == 0 and i % 4 == 0:
         #     _, lrs = optimizer.get_lrs()
         #     print(f"LRS: {lrs}")
-        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=config.model.autocast):
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
             # NOTE: some things dont play well with autocast - one should not put anything aside from the model in here
             output = model(images)
             loss = criterion(output, target)
 
         if torch.isnan(loss):
-            # for n, p in model.named_parameters():
-            #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+            for n, p in model.named_parameters():
+                print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
-
         scaler.scale(loss).backward()
-        if optimizer.train_opt1:
-            scaler.step(optimizer.opt1)
-            scaler.update()
+        md = model if config.baseline else model.ddp_model
+        # TODO: move this back into the if block with scaling
+
+        # grads = [p.grad for p in model.parameters() if p.grad is not None]
+        # norm_type = 2.0
+        # if len(grads) == 0:
+        #     return torch.tensor(0.)
+        # first_device = grads[0].device
+        # grouped_grads = _group_tensors_by_device_and_dtype([[g.detach() for g in grads]])  # type: ignore[assignment]
+        # foreach = None
+        # norms = []
+        # for ((device, _), [grads]) in grouped_grads.items():
+        #     if (foreach is None or foreach) and _has_foreach_support(grads, device=device):
+        #         norms.extend(torch._foreach_norm(grads, norm_type))
+        #     elif foreach:
+        #         raise RuntimeError(f'foreach=True was passed, but can\'t use the foreach API on {device.type} tensors')
+        #     else:
+        #         norms.extend([torch.norm(g, norm_type) for g in grads])
+
+        # total_norm = torch.norm(torch.stack([norm.to(first_device) for norm in norms]), norm_type)
+        # print_norms.append(f"{total_norm.item():.5f}")
+
+        if config.training.max_grad_norm != -1:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(md.parameters(), config.training.max_grad_norm)
+
+        scaler.step(optimizer)
+        scaler.update()
         # if i % 4 == 3 or i == len(train_loader) - 1:
-        running_sigma = False
-        if not config.baseline:
-            try:
-                scaler.step(optimizer=optimizer.sigma_opt)
-                scaler.update()
-                running_sigma = True
-            except AssertionError:
-                # if this fails its most likely because the sigma values dont have any grads yet
-                pass
+        # TODO: running sigma?
+        # running_sigma = False
         model_time += time.perf_counter() - t0
 
         # for n, p in model.named_parameters():
@@ -433,25 +498,14 @@ def train(
         end = time.time()
 
         if steps_remaining > 0:
-            optimizer.opt1.param_groups[0]["lr"] += step_factors[0]
-            if len(optimizer.opt1.param_groups) > 1:
-                optimizer.opt1.param_groups[1]["lr"] += step_factors[0]
-            optimizer.sigma_opt.param_groups[0]["lr"] += step_factors[1]
-            steps_remaining -= 1
-            # lrdict, lrstr = optimizer.get_lrs()
-            # print(lrstr)
+            for c, group in enumerate(optimizer.param_groups):
+                group["lr"] += step_factors[c]
+            steps_remaining = lr_reset_steps - 1
         else:
-            if warmup_scheduler is not None:
-                with warmup_scheduler.dampening():
-                    if batch_warmup_step:
-                        lr_scheduler.step()
-
-            # sigma_lrs={'sched': sigma_sched, "warmup": sigma_warmup},
-            if running_sigma:
-                if sigma_lrs["warmup"] is not None:
-                    with sigma_lrs["warmup"].dampening():
-                        if batch_warmup_step:
-                            sigma_lrs["sched"].step()
+            # warmup scheduler
+            warmup_scheduler.step()
+            if batch_lr_step and not warmup_scheduler.warming_up:
+                lr_scheduler.step()
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -474,27 +528,38 @@ def train(
             )
             progress.display(i + 1, log=log)
 
-            # if argmax.std() == 0:
-            #     log.error(f"ISSUE WITH NETWORK printing debugging info")
+        optimizer.zero_grad()
+
     # if config.rank == 0:
     #     for n, p in model.named_parameters():
     #         if n.endswith("bias"):
     #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
     #     raise ValueError
-    # dist.barrier()
-    # if i == 60:
-    #     raise RuntimeError
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
 
-    if step_factors is not None and steps_remaining > 0:
-        optimizer.opt1.param_groups[0]["lr"] = step_factors[2]
-        if len(optimizer.opt1.param_groups) > 1:
-            optimizer.opt1.param_groups[1]["lr"] = step_factors[2]
-        optimizer.sigma_opt.param_groups[0]["lr"] = step_factors[3]
+    if config.rank == 0:
+        columns = Columns(print_norms, equal=True, width=20)
+        console = Console(width=100)
+        console.print(columns)
+    #     table = Table(title="Param grads")
 
-    # if not config.baseline:
-    #     model.sync_models()
+    #     table.add_column("Name")
+    #     table.add_column("param norm")
+
+    #     dictionary={"Lionel Messi":35, "Cristiano Ronaldo":37, "Raheem Sterling":28, "Kylian Mbappé":24, "Mohamed Salah":30}
+
+    #     for name,age in dictionary.items():
+    #         table.add_row(name,str(age))
+
+    #     console = Console()
+    #     console.print(table)
+
+    # if step_factors is not None and steps_remaining > 0:
+    #     optimizer.opt1.param_groups[0]["lr"] = step_factors[2]
+    #     if len(optimizer.opt1.param_groups) > 1:
+    #         optimizer.opt1.param_groups[1]["lr"] = step_factors[2]
+    #     optimizer.sigma_opt.param_groups[0]["lr"] = step_factors[3]
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -564,6 +629,11 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
 
                 data_time.update(time.time() - end)
 
+                if torch.any(torch.isnan(images)):
+                    # for n, p in model.named_parameters():
+                    # print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+                    raise ValueError("NaN in images... - VAL")
+
                 # compute output
                 output = model(images)
                 loss = criterion(output, target)
@@ -578,6 +648,11 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 # measure elapsed time
                 batch_time.update(time.time() - end)
                 end = time.time()
+
+                if torch.isnan(loss):
+                    for n, p in model.named_parameters():
+                        print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
+                    raise ValueError("NaN loss - VAL")
                 # argmax = torch.argmax(output, dim=1).to(torch.float32)
                 # # print(
                 # #     f"output mean: {argmax.mean().item()}, max: {argmax.max().item()}, ",
@@ -664,6 +739,57 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
         log.info(f"Data loading time avg: {data_time.avg}")
 
     return top1.avg, losses.avg
+
+
+class LRWarmupLinear(object):
+    def __init__(self, config, optimizer) -> None:
+        self.min_lr = config.training.min_lr
+        self.steps = config.training.lr_warmup_steps
+        if config.training.lr_warmup_step_size is not None:
+            self.add_value = config.training.lr_warmup_step_size
+            self.max_lr = self.min_lr + (self.steps * self.add_value)
+        else:
+            self.max_lr = config.training.max_lr
+            self.add_value = (self.max_lr - self.min_lr) / self.steps
+
+        self.current_step = 0
+        self.warming_up = True
+        self.optimizer = optimizer
+        self.config = config
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.min_lr
+        self.sigma_steps = -1
+        if not config.baseline:
+            self.sigma_min = config.training.sigma_optimizer.min_lr
+            self.sigma_steps = config.training.sigma_optimizer.steps
+            self.optimizer.param_groups[-1]["lr"] = self.sigma_min
+
+            if config.training.sigma_optimizer.lr_warmup_step_size is not None:
+                self.sigma_add = config.training.sigma_optimizer.lr_warmup_step_size
+                self.sigma_max = self.sigma_min + (self.sigma_steps * self.sigma_add)
+            else:
+                self.sigma_max = config.training.sigma_optimizer.max_lr
+                self.sigma_add = (self.sigma_max - self.sigma_min) / self.sigma_steps
+
+    @torch.no_grad()
+    def step(self):
+        self.current_step += 1
+        # if self.current_step > self.steps:
+        #     self.warming_up = False
+        #     return
+        grps = self.optimizer.param_groups
+        if not self.config.baseline:
+            grps = grps[:-1]
+        if self.current_step <= self.steps:
+            for group in grps:
+                group["lr"] += self.add_value
+                if group["lr"] > self.max_lr:
+                    group["lr"] = self.max_lr
+        if not self.config.baseline and self.current_step <= self.sigma_steps:
+            sigma_group = self.optimizer.param_groups[-1]
+            sigma_group["lr"] += self.sigma_add
+            if sigma_group["lr"] > self.sigma_max:
+                sigma_group["lr"] = self.sigma_max
 
 
 def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):

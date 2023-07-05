@@ -2,10 +2,10 @@
 
 defaults:
   - _self_
-  - data: cifar10.yaml # mnist.yaml # imagenet.yaml #
+  - data: cifar10.yaml # imagenet.yaml # mnist.yaml #
   - model: vit.yaml # cirsean4.yaml # conv_dense.yaml # general_torchvision.yaml #
   - tracking: mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
-  - training: svd_trainer.yaml # qr_fix_trainer.yaml #
+  - training: svd_trainer.yaml # gsam_trainer.yaml # qr_fix_trainer.yaml #
   - log_dir: default.yaml
   # experiment configs allow for version control of specific configurations
   # e.g. hyperparameters for each combination of model and data

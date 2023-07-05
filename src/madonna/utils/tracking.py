@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import shutil
 import socket
 import subprocess
 import time
+from pathlib import Path
 
 import mlflow
 from mlflow.entities import Experiment
@@ -33,6 +35,7 @@ def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None
     #         return
     # if rank != 0:
     #     return
+    create_mlflow_backup(config)
     restart_mlflow_server(config)
     # Connect to the MLFlow client for tracking this training - only on rank0!
     mlflow_server = f"http://127.0.0.1:{config.tracking.mlflow.port}"
@@ -42,6 +45,20 @@ def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None
 
     experiment = mlflow.set_experiment(f"{config.data.dataset}-{config.model.name}")
     return experiment
+
+
+@only_on_rank_n(run_on_rank=0)
+def create_mlflow_backup(config: DictConfig):
+    if uc2:
+        tracking = Path(str(config.tracking.mlflow.tracking_uri_uc2).split(":")[-1])
+    elif horeka:
+        tracking = Path(str(config.tracking.mlflow.tracking_uri_horeka).split(":")[-1])
+    else:
+        tracking = Path(str(config.tracking.mlflow.tracking_uri).split(":")[-1])
+    folder = tracking.parent
+    backup_folder = folder / "backup"
+    backup_folder.mkdir(exist_ok=True)
+    shutil.copy(tracking, backup_folder / tracking.name)
 
 
 @only_on_rank_n(run_on_rank=0)

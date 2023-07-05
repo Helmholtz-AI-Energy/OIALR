@@ -1,6 +1,7 @@
 import logging
 import math
 import time
+from collections import defaultdict
 from copy import copy, deepcopy
 from time import perf_counter
 from typing import Optional, Tuple, Union
@@ -10,6 +11,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.optim as optim
 from torch import Tensor
 from torch._torch_docs import reproducibility_notes
 from torch.nn import Parameter
@@ -17,12 +19,42 @@ from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
 
-from ..optimizers.svd_sam import reset_all_states
-from ..utils import utils
+# from ..utils import utils
+# from ..optimizers.utils import change_adam_shapes
 
 # from .. import optimizers
 
 log = logging.getLogger(__name__)
+
+
+def change_adam_shapes(optimizer):
+    """
+    reset the shapes of the Adam optimizer buffers to be the same shape as the model parameters
+
+    if `reset_buffers_zero`: reset the buffer to zero after reshaping it
+    """
+    resettime = time.perf_counter()
+    rank = 0 if not dist.is_initialized() else dist.get_rank()
+    # instead of resetting optimizer, slice off bits of the saved states
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state[p]
+            if len(list(state.keys())) > 0:
+                for k in ["exp_avg", "exp_avg_sq"]:
+                    if state[k].shape != p.shape:
+                        sl = []
+                        for d in range(p.ndim):
+                            sl.append(slice(0, p.shape[d]))
+                        # print(type(state[k]))
+                        state[k] = state[k][tuple(sl)]
+                if group["amsgrad"]:
+                    if state["max_exp_avg_sq"].shape != p.shape:
+                        sl = []
+                        for d in range(p.ndim):
+                            sl.append(slice(0, p.shape[d]))
+                        state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
+    if rank == 0:
+        log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
 
 class SVDFixingModel(nn.Module):
@@ -73,6 +105,10 @@ class SVDFixingModel(nn.Module):
         # raise ValueError("")
         self.stability_frequency = stability_frequency
         self.call_count = 0
+        self.num_stability_layvers_to_check = 0
+        self.call_count_stability = 0
+        self.layer_count_selector = torch.Generator()
+        self.layer_count_selector.manual_seed(123456)
         self.skip_stability = False
         self.delay = delay
         self.stable_list = []
@@ -86,10 +122,19 @@ class SVDFixingModel(nn.Module):
 
         self.base_trainable_parameters = num
         self.svd_modules = []
+        calls = 0
+        sz = 1 if not dist.is_initialized() else dist.get_world_size()
         for name, mod in self.ddp_model.named_modules():
             if hasattr(mod, "test_stability_distributed"):
-                self.svd_modules.append((name, mod))
-
+                working_rank = calls % sz
+                self.svd_modules.append((name, mod, working_rank))
+                try:  # only a module in the attention layers and its just faster to try to get something
+                    if mod._qkv_same_embed_dim:
+                        calls += 1
+                    else:
+                        calls += 3
+                except AttributeError:
+                    calls += 1
         self.fib1, self.fib2 = 0, 1
         self.next_stability_iteration = self.delay + self.fib1
         # n1, n2 = 0, 1
@@ -105,6 +150,8 @@ class SVDFixingModel(nn.Module):
         # print(f"fib_epochs {fib_epochs}")
         # print(self.svd_modules)
         self.optimizer = None  # optimizers.MixedSVDOpt
+        self.local_generator = torch.Generator()
+        self.local_generator.manual_seed(self.rank)
         # TODO: add me to forward function !!
         # optimizer.zero_grad(set_to_none=True, reset_sigma=True)
         #     stabtime = time.perf_counter()
@@ -119,6 +166,13 @@ class SVDFixingModel(nn.Module):
         #     if reset_optimizer:
         #         optimizer.reset_shapes_of_sigma(model)
         self.all_stable = False
+        self.state_dict = self.ddp_model.state_dict
+        self.parameters = self.ddp_model.parameters
+        self.named_parameters = self.ddp_model.named_parameters
+        self.named_buffers = self.ddp_model.named_buffers
+        self.named_children = self.ddp_model.named_children
+        self.children = self.ddp_model.children
+        self.cuda = self.ddp_model.cuda
 
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer  # optimizers.MixedSVDOpt
@@ -281,36 +335,35 @@ class SVDFixingModel(nn.Module):
         # if self.skip_stability:
         #     return
         rank = dist.get_rank() if dist.is_initialized() else 0
-        sz = dist.get_world_size() if dist.is_initialized() else 1
+        # sz = dist.get_world_size() if dist.is_initialized() else 1
         if rank == 0:
             log.info("Testing Stability")
         all_stable = True
-        total = 0
         reset_optimizer = False
-        calls = 0
-        # mods_to_call = []
-        # for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
-        # dist.barrier()
-        for name, mod in self.svd_modules:
-            working_rank = calls % sz
+        # want to select a number of layers to run the stability on
+        # increate the number based on the num_stability_checks
+        inds = torch.arange(len(self.svd_modules))
+        self.num_stability_layvers_to_check += int(inds[-1].item() * 0.1)
+        # work in factors of 5% of the network
+        cutoff = self.num_stability_layvers_to_check
+        inds = inds[-cutoff:]
+        if self.rank == 0:
+            log.info(f"num layers for svd: {len(self.svd_modules)} cutoff: {cutoff} {len(inds)}")
+        # self.svd_modules -> name, module, working rank
+        for i in inds:
+            name, mod, working_rank = self.svd_modules[i.item()]
             mod.test_stability_distributed(name=name, working_rank=working_rank, nonblocking=True)
-            try:  # only a module in the attention layers and its just faster to try to get something
-                if mod._qkv_same_embed_dim:
-                    calls += 1
-                else:
-                    calls += 3
-            except AttributeError:
-                calls += 1
-            total += 1
         # dist.barrier()
-        for n, mod in self.svd_modules:
+        for i in inds:
+            name, mod, working_rank = self.svd_modules[i.item()]
             reset_opt, stable = mod.wait_inner_dim_reshape_bcast_usvh(nonblocking=True)
             if reset_opt:
                 reset_optimizer = True
             if not stable:
                 all_stable = False
         # dist.barrier()
-        for _, mod in self.svd_modules:
+        for i in inds:
+            _, mod, working_rank = self.svd_modules[i.item()]
             mod.wait_on_usvh()
 
         if dist.is_initialized():  # and reset_optimizer:
@@ -318,9 +371,6 @@ class SVDFixingModel(nn.Module):
             # need to re-init DDP to have the correct buckets
             # TODO: this might be a preformance hit
             ddp_time = perf_counter()
-            # del self.ddp_model
-            # print("before reinit ddp")
-
             self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
             if dist.get_rank() == 0:
                 log.info(f"Reinit DDP. Time taken: {perf_counter() - ddp_time}")
@@ -368,12 +418,19 @@ class SVDFixingModel(nn.Module):
                 # self.train()
         return ret
 
+    @staticmethod
+    def reset_all_states(optimizer: optim.Optimizer):
+        # reset op1 first
+        # for group in self.opt1.param_groups:
+        optimizer.state = defaultdict(dict)
+
     @torch.no_grad()
     def model_stability_tracking(self):
         # TODO: Should this be moved to the training script? might be easier...
         self.call_count += 1
         if self.call_count != self.next_stability_iteration:
             return False
+        self.call_count_stability += 1
 
         stabtime = time.perf_counter()
         reset_optimizer, all_layers_stable = self.test_basis_stability_all_layers()
@@ -381,19 +438,22 @@ class SVDFixingModel(nn.Module):
         if all_layers_stable and not self.all_stable:
             # NOTE: no need to remove the full_rank_weights, they will cause a few extra clock ticks but nothing more
             # self.optimizer.remove_full_rank_weights()
-            reset_all_states(self.optimizer)
+            # self.reset_all_states(self.optimizer)
             self.all_stable = all_layers_stable
         if reset_optimizer:
-            reset_all_states(self.optimizer)
-            # self.insert_noise(noise_level=1e-3)
+            change_adam_shapes(self.optimizer)
+            # self.reset_all_states(self.optimizer)
+            # self.insert_noise(noise_level=1e-2)
             # self.optimizer.reset_shapes_of_sigma(self)
         self.optimizer.zero_grad(set_to_none=True)
 
         # self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
         # dist.barrier()
 
-        self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
-        self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
+        # self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
+        # self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
+        self.next_stability_iteration += self.stability_frequency
+        self.next_stability_iteration = int(self.next_stability_iteration)
 
         if self.rank == 0:
             log.info(
@@ -406,7 +466,7 @@ class SVDFixingModel(nn.Module):
     @torch.no_grad()
     def insert_noise(self, noise_level=1e-1):
         for n, p in self.ddp_model.named_parameters():
-            if n.endswith(".s") or n.endswith("_s"):
+            if n.endswith(".s") or n.endswith("_s") and p.requires_grad:
                 # # TODO: remove later if not working
                 # sdiag = torch.diag(self.s).clone()
                 sdiag = torch.diag(p)
@@ -418,12 +478,26 @@ class SVDFixingModel(nn.Module):
                 #     if i < p.shape[0] - 2:
                 #         p[i, i + 2] = sdiag_diff2[i]
 
-                mask = torch.abs(p) <= 1e-7
+                # mask = torch.abs(p) <= 1e-5
                 # umask = torch.abs(p) > 1e-7
 
                 # print(f"{n} -> {torch.count_nonzero(mask)}")
-                p[mask] *= 0
-                p[mask] += noise_level * torch.rand_like(p[mask]) * sdiag.min()
+                # p[mask] *= 0
+                # p[mask] += noise_level * torch.rand_like(p[mask]) * sdiag.min()
+                # rand = torch.rand(
+                #     p[mask].shape, generator=self.local_generator, device=p.device, dtype=p.dtype
+                # )
+                # p[mask] += (1 / sdiag[0]) * rand * noise_level
+                if self.local_generator.device != p.device:
+                    self.local_generator = torch.Generator(device=p.device)
+                    self.local_generator.manual_seed(self.rank + 10000)
+                rand = torch.rand(
+                    p.shape,
+                    generator=self.local_generator,
+                    device=p.device,
+                    dtype=p.dtype,
+                )
+                p += (1 / sdiag[0]) * rand / (self.call_count_stability)
 
     def forward(self, inputs):
         return self.ddp_model(inputs)
@@ -739,19 +813,24 @@ class SVDLinear(nn.Module):
         # adjust K to slice of less important singular values
         s = torch.diag(self.s) if self.s.ndim == 2 else self.s
         prevk = self.inner_dim.clone()
+        # new plan for cutoff - instead of using s[0] use 1% of the minimum
+        # this will enforce that the array never shrinks below 1%
         if self.uvh_stable:
-            cutoff = s[0] * self.sigma_cutoff_fraction
+            # cutoff = s[0] * self.sigma_cutoff_fraction
+            min_dim = int(self.vh.shape[-1] * 0.01)  # always TS
+            cutoff = s[min_dim] * self.sigma_cutoff_fraction
             nz = torch.nonzero(s < cutoff)
             if len(nz) == 0:
                 # In this case ALL of the basis vectors are useful
                 newk = s.shape[0]
             else:
                 newk = nz[0].item()
-        if newk < 0.25 * prevk:
-            newk = int(prevk * 0.25)
-            log.info(f"Values of S after dropping slice value by only 25% of suggestion: {s[:5]}")
-        if newk < self.vh.shape[1] * 0.05:
-            newk = int(self.vh.shape[1] * 0.05)
+
+        # if newk < 0.5 * prevk:
+        #     newk = int(prevk * 0.5)
+        #     log.info(f"Values of S after dropping slice value by only 50% of suggestion: {s[:5]}")
+        # if newk < self.vh.shape[1] * 0.05:
+        #     newk = int(self.vh.shape[1] * 0.05)
         change_k = newk != prevk
         self.inner_dim.mul_(0)
         self.inner_dim.add_(newk)
@@ -899,13 +978,21 @@ class SVDLinear(nn.Module):
         # self.prev_uvh.zero_()
         # self.prev_uvh.add_(uvh)
         csmean = 1.0
+
+        # rand_noise = torch.rand_like(self.s) * torch.diag(self.s).min() * 0.1
+        # rand_noise.fill_diagonal_(0)
+        # self.s.add(rand_noise)
+
+        # csmean = 1.0
         # change_k = False
         self.uvh_stable = True
         self.weight.requires_grad = False
         self.u.requires_grad = False
         self.vh.requires_grad = False
         self.s.requires_grad = True
-        change_k = self._update_inner_dim_and_shapes()
+        change_k = False
+        if csmean >= self.uvhthreshold:
+            change_k = self._update_inner_dim_and_shapes()
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
@@ -2273,9 +2360,13 @@ class SVDMultiheadAttention(nn.Module):
         # prev_uvh = getattr(self, f"prev_uvh_{qkvin}")
         # csim = self.cossim(prev_uvh, uvh)
         # csmean, _ = csim.mean(), csim.std()
+        csmean = 1.0
+        # rand_noise = torch.rand_like(s) * sig.min() * 0.1
+        # rand_noise.fill_diagonal_(0)
+        # s.add(rand_noise)
 
         # setattr(self, f"prev_uvh_{qkvin}", uvh)
-        csmean = 1.0
+        # csmean = 1.0
         change_k = False
         if csmean >= self.uvhthreshold:
             setattr(self, f"uvh_stable_{qkvin}", True)
@@ -2387,7 +2478,8 @@ class SVDMultiheadAttention(nn.Module):
         sdiag = torch.diag(s) if self.full_rank_sigma else s
         prevsl = sl.clone()
         # if getattr(self, f"uvh_stable_{qkvin}"):
-        cutoff = sdiag[0] * self.sigma_cutoff_fraction
+        min_dim = int(vh.shape[-1] * 0.01)  # always TS
+        cutoff = sdiag[min_dim] * self.sigma_cutoff_fraction
         nz = torch.nonzero(sdiag < cutoff)
         if len(nz) == 0:
             # In this case ALL of the basis vectors are useful
@@ -2395,10 +2487,10 @@ class SVDMultiheadAttention(nn.Module):
         else:
             newsl = nz[0].item()
 
-        if newsl < 0.25 * prevsl:
-            # TODO: log message?
-            newsl = int(prevsl * 0.25)
-            log.info(f"Values of S after dropping slice value by only 25% of suggestion: {sdiag[:5]}")
+        # if newsl < 0.5 * prevsl:
+        #     # TODO: log message?
+        #     newsl = int(prevsl * 0.5)
+        #     log.info(f"Values of S after dropping slice value by only 50% of suggestion: {sdiag[:5]}")
         sl.mul_(0)
         sl.add_(newsl)
         if prevsl != newsl:
