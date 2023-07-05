@@ -3,9 +3,10 @@ import math
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch.distributed import ReduceOp
 
-from .util import disable_running_stats, enable_running_stats
+from ..models.utils import disable_running_stats, enable_running_stats
 
 
 class GSAM(torch.optim.Optimizer):
@@ -70,16 +71,17 @@ class GSAM(torch.optim.Optimizer):
                     e_w *= torch.pow(p, 2)
                 p.add_(e_w)  # climb to the local maximum "w + e(w)"
                 self.state[p]["e_w"] = e_w
+                p.grad = None
 
     @torch.no_grad()
     def unperturb(self):
-        for p in self.state:
-            if "e_w" in self.state[p]:
-                p.data.sub_(self.state[p]["e_w"])
-        # for group in self.param_groups:
-        #     for p in group['params']:
-        #         if 'e_w' in self.state[p].keys():
-        #             p.data.sub_(self.state[p]['e_w'])
+        # for p in self.state:
+        #     if "e_w" in self.state[p]:
+        #         p.data.sub_(self.state[p]["e_w"])
+        for group in self.param_groups:
+            for p in group["params"]:
+                if "e_w" in self.state[p].keys():
+                    p.data.sub_(self.state[p]["e_w"])
 
     @torch.no_grad()
     def gradient_decompose(self, alpha=0.0):
@@ -112,8 +114,8 @@ class GSAM(torch.optim.Optimizer):
 
     @torch.no_grad()
     def _sync_grad(self):
-        if torch.distributed.is_initialized():  # synchronize final gardients
-            ws = torch.distributed.get_world_size()
+        if dist.is_initialized():  # synchronize final gardients
+            ws = dist.get_world_size()
             for group in self.param_groups:
                 for p in group["params"]:
                     if p.grad is None:
@@ -130,6 +132,17 @@ class GSAM(torch.optim.Optimizer):
         # shared_device = self.param_groups[0]["params"][0].device
         # put everything on the same device, in case of model parallelism
         if not by:
+            # norm_list = []
+            # for group in self.param_groups:
+            #     for p in group["params"]:
+            #         if p.grad is not None:
+            #             out = 1.0
+            #             if weight_adaptive:
+            #                 out = torch.abs(p.data)
+            #             out = out * p.grad
+            #             out = out.norm(p=2)
+            #             norm_list.append(out)
+            # norm = torch.norm(torch.stack(norm_list), p=2)
             norm = torch.norm(
                 torch.stack(
                     [
@@ -175,12 +188,12 @@ class GSAM(torch.optim.Optimizer):
         def get_grad():
             self.base_optimizer.zero_grad(set_to_none=True)
             with torch.enable_grad():
-                with torch.cuda.amp.autocast(device_type="cuda", dtype=torch.float16, enabled=self.amp):
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.amp):
                     outputs = self.model(inputs)
                     loss = loss_fn(outputs, targets, **kwargs)
-            loss_value = loss.item()
 
-            self.scaler.scale(loss).backward()
+                self.scaler.scale(loss).backward()
+                loss_value = loss
 
             return outputs, loss_value
 
@@ -192,7 +205,7 @@ class GSAM(torch.optim.Optimizer):
         #     get_grad = closure
         # else:
         get_grad = self.forward_backward_func
-
+        # outputs, loss_value = get_grad()
         with self.maybe_no_sync():
             # get gradient
             outputs, loss_value = get_grad()
@@ -206,8 +219,8 @@ class GSAM(torch.optim.Optimizer):
             self.gradient_decompose(self.alpha)
             # unperturb
             self.unperturb()
-        # synchronize gradients across workers
-        self._sync_grad()
+            # synchronize gradients across workers
+            self._sync_grad()
 
         if self.max_grad_norm != -1:
             self.scaler.unscale_(self.param_groups)
@@ -219,7 +232,7 @@ class GSAM(torch.optim.Optimizer):
         self.scaler.step(self.base_optimizer)
         self.scaler.update()
 
-        # enable running stats
+        # # enable running stats
         enable_running_stats(self.model)
 
         return outputs, loss_value

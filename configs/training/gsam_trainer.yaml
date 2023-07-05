@@ -1,9 +1,9 @@
 start_epoch: 0
-epochs: 200
+epochs: 300
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
-trainer: "ortho_fix_train"
+trainer: "ortho_sam_train"
 init_ddp: True
 
 # ckpt path
@@ -13,21 +13,21 @@ criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 0.0001
+lr: 1.0e-4
 lr_schedule:
   _target_: torch.optim.lr_scheduler.StepLR #torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   _partial_: True
-  step_size: 200
+  step_size: 300
   gamma: 0.5
   # T_max: 25
   # T_0: 25
-lr_warmup: #null
-  _target_: pytorch_warmup.LinearWarmup
-  _partial_: True
-  warmup_period: 20
+lr_warmup: null
+min_lr: 1.0e-6
+max_lr: 1.0e-4
+lr_warmup_steps: 200
 
-lr_warmup_step_frequency: "epoch"
-lr_warmup_step_args: null
+# lr_warmup_step_frequency: "epoch"
+# lr_warmup_step_args: null
 
 optimizer:
   # _target_: torch.optim.SGD
@@ -35,11 +35,13 @@ optimizer:
   # momentum: 0.1
   # weight_decay: 1.0e-5
   # nesterov: True
-  _target_: torch.optim.Adam
+  _target_: torch.optim.AdamW
   _partial_: True
+  weight_decay: 0.1
 
 sigma_optimizer:
-  lr: 0.001
+  max_lr: null
+  min_lr: null
 
 lr_reset_period: 3
 
@@ -50,10 +52,10 @@ svd_epoch_delay: 2
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 128
-  delay: 64
+  stability_frequency: 50
+  delay: 50
   uvhthreshold: 0.99
-  sigma_cutoff_fraction: 0.1
+  sigma_cutoff_fraction: 0.25
   sync_usv: False
   full_rank_sigma: True
   keep_first_layer: False
@@ -61,12 +63,10 @@ fixing_method:
   update_from_simga: True
   reinit_shapes: True
 
-
-gsam:
+sam:
   adaptive: True
   perturb_eps: 1.0e-12
-  alpha: 0.5
+  alpha: 0.6
   max_grad_norm: -1
-  rho_max_value: 2.0
-  rho_min_value: 0.5
+  rho: 2.0
   grad_reduce: mean

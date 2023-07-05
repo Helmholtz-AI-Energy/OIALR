@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import time
 from collections import defaultdict
@@ -7,7 +8,8 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from torch.optim.optimizer import _params_t
+
+from ..models.utils import disable_running_stats, enable_running_stats
 
 log = logging.getLogger(__name__)
 
@@ -28,21 +30,6 @@ optimizer.second_step(zero_grad=True)
 
 since we have the other logic to use about the freezing, we need to call the SVD checking at the end of the step itself.
 
-major wrinkle:
-    - currently using mutliple optimizers/groups
-
-TODO:
-- [x] create optimzier which uses multiple groups instead of multiple optimizers
-    this locks us in to the same optimizer for the network as a whole, but maybe that is better
-- [ ] import SAM functions (since using multiple groups of the same optimzier it shouldnt be too bad)
-- [x] create reset shapes function for new optimization strategy
-- [x] create reset_all_states function
-- [x] create function in svdmodel to enable and disable batchnorms
-
-NOTE:
-- if we do it with functions and change a normal optimizer
-    then we need to modify the function which changes the shapes of the state tensors
-        not super hard, it will just look a the state and the parameter associated with it
 """
 
 
@@ -69,18 +56,20 @@ def change_optimizer_group_for_svd(optimizer: optim.Optimizer, model, config):
         params_non2d.append(last)
 
     # get optimizer kwargs from config
-    opt_kwargs = config.training.optimizer
+    opt_kwargs = dict(config.training.optimizer)
     try:  # remove the target and partial flags - Hydra specific stuff
         del opt_kwargs["_target_"]
         del opt_kwargs["_partial_"]
     except AttributeError:
         pass
     # delete the current parameter groups
+    opt_kwargs["lr"] = config.training.min_lr
     optimizer.param_groups = []
     # add the groups 0 -> non2d
     optimizer.add_param_group({"params": params_non2d, **opt_kwargs})
     optimizer.add_param_group({"params": params_weights, **opt_kwargs})
-    opt_kwargs["lr"] = config.trainign.sigma_optimizer.lr
+    if config.training.sigma_optimizer.min_lr is not None:
+        opt_kwargs["lr"] = config.training.sigma_optimizer.min_lr
     optimizer.add_param_group({"params": params_sigma, **opt_kwargs})
 
 
@@ -109,12 +98,6 @@ def reset_sigma_opt_shapes(optimizer: optim.Optimizer):
                     state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
     if rank == 0:
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
-
-
-def reset_all_states(optimizer: optim.Optimizer):
-    # reset op1 first
-    # for group in self.opt1.param_groups:
-    optimizer.state = defaultdict(dict)
 
 
 class SAM(optim.Optimizer):
@@ -155,15 +138,24 @@ class SAM(optim.Optimizer):
     optimizer.second_step(zero_grad=True)
     """
 
-    def __init__(self, params, base_optimizer, rho=0.05, adaptive=False, **kwargs):
+    def __init__(self, params, base_optimizer, model, config, **kwargs):
+        self.scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
+        self.amp = config.model.autocast
+        rho = config.training.sam.rho
+        adaptive = config.training.sam.adaptive
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
 
         defaults = dict(rho=rho, adaptive=adaptive, **kwargs)
         super(SAM, self).__init__(params, defaults)
 
-        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
+        self.base_optimizer = base_optimizer
         self.param_groups = self.base_optimizer.param_groups
         self.defaults.update(self.base_optimizer.defaults)
+        for group in self.param_groups:
+            group["rho"] = rho
+            group["adaptive"] = adaptive
+        self.model = model
+        self.max_grad_norm = -1
 
     @torch.no_grad()
     def first_step(self, zero_grad=True):
@@ -195,24 +187,76 @@ class SAM(optim.Optimizer):
         #             continue
         #         p.data = self.state[p]["old_p"]  # get back to "w" from "w + e(w)"
 
-        self.base_optimizer.step()  # do the actual "sharpness-aware" update
+        if self.max_grad_norm != -1:
+            self.scaler.unscale_(self.param_groups)
+            torch.nn.utils.clip_grad_norm_(self.param_groups, self.max_grad_norm)
+        self.scaler.step(self.base_optimizer)
+        self.scaler.update()
 
         if zero_grad:
             self.zero_grad(set_to_none=True)
 
+    def maybe_no_sync(self):
+        if torch.distributed.is_initialized():
+            return self.model.no_sync()
+        else:
+            return contextlib.ExitStack()
+
+    # @torch.no_grad()
+    # def step(self, closure=None):
+    #     assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
+    #     closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass
+
+    #     self.first_step(zero_grad=True)
+    #     closure()
+    #     self.second_step()
+
+    @torch.no_grad()
+    def set_closure(self, loss_fn, inputs, targets, **kwargs):
+        # create self.forward_backward_func, which is a function such that
+        # self.forward_backward_func() automatically performs forward and backward passes.
+        # This function does not take any arguments, and the inputs and targets data
+        # should be pre-set in the definition of partial-function
+
+        def get_grad():
+            self.base_optimizer.zero_grad(set_to_none=True)
+            with torch.enable_grad():
+                with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=self.amp):
+                    outputs = self.model(inputs)
+                    loss = loss_fn(outputs, targets, **kwargs)
+
+                self.scaler.scale(loss).backward()
+                loss_value = loss
+
+            return outputs, loss_value
+
+        self.forward_backward_func = get_grad
+
     @torch.no_grad()
     def step(self, closure=None):
-        assert closure is not None, "Sharpness Aware Minimization requires closure, but it was not provided"
-        closure = torch.enable_grad()(closure)  # the closure should do a full forward-backward pass
+        # if closure:
+        #     get_grad = closure
+        # else:
+        get_grad = self.forward_backward_func
+        # outputs, loss_value = get_grad()
 
-        self.first_step(zero_grad=True)
-        closure()
-        self.second_step()
+        # enable running stats
+        with self.maybe_no_sync():
+            enable_running_stats(self.model)
+            # get gradient
+            outputs, loss_value = get_grad()
+            self.first_step(zero_grad=True)
+            # disable running stats for second pass
+        disable_running_stats(self.model)
+        # get gradient at perturbed weights
+        get_grad()
+        self.second_step(zero_grad=True)
+
+        return outputs, loss_value
 
     def _grad_norm(self):
-        shared_device = self.param_groups[0]["params"][
-            0
-        ].device  # put everything on the same device, in case of model parallelism
+        shared_device = self.param_groups[0]["params"][0].device
+        # put everything on the same device, in case of model parallelism
         norm = torch.norm(
             torch.stack(
                 [

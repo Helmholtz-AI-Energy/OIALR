@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 200
+epochs: 600
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -7,27 +7,35 @@ trainer: "ortho_fix_train"
 init_ddp: True
 
 # ckpt path
-resume_from_checkpoint: null
+checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
+checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+resume_run: False
 
 criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 0.0001
+lr: 1.0e-3  # depricated
+sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
+  min_lr: 1.0e-6
+  max_lr: 0.5e-3  # depricated
+  lr_warmup_step_size: null # 2.5e-7
+  steps: 2000
+# refactory_warmup:
+#   warmup_period: 50
+min_lr: 1.0e-6
+max_lr: 0.5e-3  # depricated
+lr_warmup_step_size: null # 2.5e-7
+lr_warmup_steps: 2000
+
 lr_schedule:
-  _target_: torch.optim.lr_scheduler.StepLR #torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
+  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   _partial_: True
   step_size: 200
-  gamma: 0.5
-  # T_max: 25
-  # T_0: 25
-lr_warmup: #null
-  _target_: pytorch_warmup.LinearWarmup
-  _partial_: True
-  warmup_period: 20
-
-lr_warmup_step_frequency: "epoch"
-lr_warmup_step_args: null
+  gamma: 0.1
+  # T_max: 313
+  # T_0: 25  # warm restarts
+lr_warmup: null
 
 optimizer:
   # _target_: torch.optim.SGD
@@ -37,36 +45,22 @@ optimizer:
   # nesterov: True
   _target_: torch.optim.Adam
   _partial_: True
-
-sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  _partial_: True
-  _target_: torch.optim.Adam
-  # _target_: torch.optim.SGD
-  lr: 0.001
-  # momentum: 0.9
-  # weight_decay: 1.0e-5
-  # nesterov: True
-# sigma_warmup: #null
-#   _target_: pytorch_warmup.LinearWarmup
-#   _partial_: True
-#   warmup_period: 1
-# refactory_warmup:
-#   _target_: pytorch_warmup.LinearWarmup
-#   _partial_: True
-#   warmup_period: 50
+  # weight_decay: 1.0e-4
+  # fused: True
+max_grad_norm: 1.0
 
 lr_reset_period: 3
 
 init_opt_with_model: False
-print_freq: 10
+print_freq: 50
 
 svd_epoch_delay: 2
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 128
-  delay: 64
-  uvhthreshold: 0.99
+  stability_frequency: 200
+  delay: 200
+  uvhthreshold: 0.9
   sigma_cutoff_fraction: 0.1
   sync_usv: False
   full_rank_sigma: True

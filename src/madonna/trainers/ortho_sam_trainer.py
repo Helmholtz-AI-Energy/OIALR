@@ -65,12 +65,14 @@ def main(config):  # noqa: C901
         print(model)
 
     criterion = madonna.utils.get_criterion(config)
-    optimizer = madonna.utils.get_optimizer(config, model)
+    optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.min_lr)
     if not config.baseline:
         madonna.optimizers.svd_sam.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
         params = model.ddp_model.parameters()
+        ddp_model = model.ddp_model
     else:
         params = model.parameters()
+        ddp_model = model
 
     if not config.baseline:
         model.set_optimizer(optimizer)
@@ -80,9 +82,9 @@ def main(config):  # noqa: C901
     val_loader = dset_dict["val"]["loader"]
 
     # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
-    scheduler, warmup_scheduler = madonna.utils.get_lr_schedules(config, optimizer, len(train_loader))
-    sam_opt = madonna.optimizers.gsam.GSAM(params=params, base_optimizer=optimizer, config=config, scheduler=scheduler)
-
+    scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, len(train_loader))
+    sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, config=config, model=ddp_model)
+    warmup_scheduler = LRWarmupLinear(config, optimizer=sam_opt.base_optimizer)
     # # optionally resume from a checkpoint
     # # TODO: add checkpointing
     # # Reminder: when resuming from a single checkpoint, make sure to call init_model with
@@ -121,24 +123,25 @@ def main(config):  # noqa: C901
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
-        batch_warmup_step = True
+        batch_lr_step = True
     else:
-        batch_warmup_step = False
+        batch_lr_step = False
 
     # scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     refactory_warmup = None
-
+    for group in sam_opt.param_groups:
+        group["lr"] += config.training.min_lr
     for epoch in range(config.training["start_epoch"], config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
-            lr_dict, prnt_str = optimizer.get_lrs()
+            lr_list, prnt_str = get_lrs(optimizer)
             log.info(f"Begin epoch {epoch} LRs: {prnt_str}")
-            metrics = {"lr": lr_dict["non2d"]}
-            if not config.baseline:
-                metrics["sigma_lr"] = lr_dict["sigma"]
+            metrics = {"lr": lr_list[0]}
+            # if not config.baseline:
+            #     metrics["sigma_lr"] = lr_dict["sigma"]
             mlflow.log_metrics(
                 metrics=metrics,
                 step=epoch,
@@ -211,11 +214,9 @@ def main(config):  # noqa: C901
                 log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
                 model.track_interior_slices_mlflow(config, epoch)
 
-        if warmup_scheduler is not None:
-            with warmup_scheduler.dampening():
-                if not batch_warmup_step:
-                    scheduler.step()
-        elif scheduler is not None and not batch_warmup_step:
+        if warmup_scheduler is not None and not warmup_scheduler.warming_up:
+            warmup_scheduler.step()
+        if scheduler is not None and not batch_lr_step:
             scheduler.step()
 
         # save max memory used (just take rank 0)
@@ -252,9 +253,9 @@ def train(
         "CosineAnnealingWarmRestarts",
         "CosineAnnealingLR",
     ]:
-        batch_warmup_step = True
+        batch_lr_step = True
     else:
-        batch_warmup_step = False
+        batch_lr_step = False
     # switch to train mode
     model.train()
     # madonna.utils.change_batchnorm_tracking(model, tracking=False)
@@ -287,8 +288,9 @@ def train(
         t0 = time.perf_counter()
         # reset_lr_warmup = False
         if not config.baseline:
+            # _ = model.model_stability_tracking()
             _ = model.model_stability_tracking()
-            # reset_lr_warmup = model.model_stability_tracking()
+            sam_opt.model = model.ddp_model
         # TODO: should there be a reset to LR?
         # if reset_lr_warmup:
         #     # reset the LR to a small value to avoid degredation in training
@@ -301,7 +303,7 @@ def train(
 
         # == == == == == == SAM requires 2 passes over the model == == == == == == == == == ==
         def loss_fn(predictions, targets):
-            return criterion(predictions, targets).mean()
+            return criterion(predictions, targets)
 
         sam_opt.set_closure(loss_fn, images, target)
         output, loss = sam_opt.step()
@@ -327,12 +329,12 @@ def train(
             for c, group in enumerate(sam_opt.base_optimizer.param_groups):
                 group["lr"] += step_factors[c]
             steps_remaining = lr_reset_steps - 1
-
         else:
-            if warmup_scheduler is not None:
-                with warmup_scheduler.dampening():
-                    if batch_warmup_step:
-                        lr_scheduler.step()
+            # warmup scheduler
+            warmup_scheduler.step()
+            if batch_lr_step and not warmup_scheduler.warming_up:
+                lr_scheduler.step()
+        # sam_opt.update_rho_t()
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -522,10 +524,41 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
     return top1.avg, losses.avg
 
 
+def get_lrs(opt):
+    out_lrs = []
+    prnt_str = ""
+    for group in opt.param_groups:
+        out_lrs.append(group["lr"])
+        prnt_str += f"group {len(out_lrs)}: lr {group['lr']:.6f}\t"
+    return out_lrs, prnt_str
+
+
 def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, "model_best.pth.tar")
+
+
+class LRWarmupLinear(object):
+    def __init__(self, config, optimizer) -> None:
+        self.max_lr = config.training.lr
+        self.min_lr = config.training.min_lr
+        self.steps = config.training.lr_warmup_steps
+        self.add_value = (self.max_lr - self.min_lr) / self.steps
+        self.current_step = 0
+        self.warming_up = True
+        self.optimizer = optimizer
+        for group in self.optimizer.param_groups:
+            group["lr"] = self.min_lr
+
+    @torch.no_grad()
+    def step(self):
+        self.current_step += 1
+        if self.current_step > self.steps:
+            self.warming_up = False
+            return
+        for group in self.optimizer.param_groups:
+            group["lr"] += self.add_value
 
 
 class Summary(Enum):
