@@ -53,7 +53,7 @@ TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
 TOMOUNT+="/home/kit/scc/qv2382/"
-# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 
 export TOMOUNT=$TOMOUNT
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64

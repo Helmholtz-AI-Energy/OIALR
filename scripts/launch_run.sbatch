@@ -4,12 +4,12 @@
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=04:00:00
+#SBATCH --time=05:00:00
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
-#SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
-#####SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
 
 ml purge
 
@@ -18,11 +18,13 @@ BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
 # export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 # BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/"
 
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
-# TOMOUNT+="${EXT_DATA_PREFIX},"
+TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
-TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 export TOMOUNT="${TOMOUNT}"
 
 # TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
@@ -33,7 +35,7 @@ export TOMOUNT="${TOMOUNT}"
 # export TOMOUNT+="/home/kit/scc/qv2382/"
 
 SRUN_PARAMS=(
-  --mpi="pmix"
+  --mpi="pmi2"
 #  --ntasks-per-node=4
   # --gpus-per-task=4
   --cpus-per-task=8
@@ -61,4 +63,4 @@ export NCCL_COLLNET_ENABLE=0
 # export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export CONFIG_NAME="ortho_train.yaml"
 
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}scripts/train.py"
+srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='baseline' baseline=True"

@@ -48,8 +48,8 @@ then
   TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
   TOMOUNT+="${EXT_DATA_PREFIX},"
   TOMOUNT+="${BASE_DIR},"
-  TOMOUNT+="/scratch,/tmp,/opt/intel/lib/intel64,"
-  TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt/datasets"
+  TOMOUNT+="/scratch,/tmp,"
+  TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 
   salloc --partition=accelerated \
     -N "${SLURM_NNODES}" \

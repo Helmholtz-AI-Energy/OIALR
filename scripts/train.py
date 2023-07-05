@@ -3,6 +3,7 @@ import os
 
 import hydra
 import mlflow
+import torch
 from mpi4py import MPI
 from omegaconf import DictConfig, OmegaConf, open_dict
 from rich.pretty import pprint
@@ -50,6 +51,8 @@ def main(config: DictConfig):
         fn = madonna.trainers.my_opt_trainer.main
     elif config.training.trainer == "ortho_fix_train":
         fn = madonna.trainers.ortho_fix_train.main
+    elif config.training.trainer == "ortho_sam_train":
+        fn = madonna.trainers.ortho_sam_trainer.main
     else:
         raise ValueError(f"unknown trainer: {config.trainer.trainer}")
 
@@ -59,12 +62,23 @@ def main(config: DictConfig):
     if rank == 0 and config.enable_tracking:
         _ = utils.tracking.setup_mlflow(config, verbose=False)
 
+        run_id = None
+        skip_namechange = False
+        if config.training.checkpoint is not None:
+            checkpoint = torch.load(config.training.checkpoint)
+            if "mlflow_run_name" in checkpoint and config.training.resume_run:
+                skip_namechange = True
+                run_id = str(checkpoint["mlflow_run_name"])
+                print(run_id)
+
         # run_id -> adaptive needs to be unique, roll random int?
         # run_name = f"" f"full-rank-everybatch-{os.environ['SLURM_JOBID']}"
-        with mlflow.start_run() as run:
+        with mlflow.start_run(run_id=run_id) as run:
             mlflow.log_param("Slurm jobid", os.environ["SLURM_JOBID"])
-            run_name = f"{config['name']}-" + run.info.run_name
-            mlflow.set_tag("mlflow.runName", run_name)
+            if not skip_namechange:
+                # dont need to change the name of existing runs
+                run_name = f"{config['name']}-" + run.info.run_name
+                mlflow.set_tag("mlflow.runName", run_name)
 
             # print("run_name:", run_name)
             # print("tracking uri:", mlflow.get_tracking_uri())
