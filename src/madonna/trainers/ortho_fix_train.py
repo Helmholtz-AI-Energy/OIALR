@@ -124,8 +124,7 @@ def main(config):  # noqa: C901
     # optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
     # if not config.baseline:
     #     model.set_optimizer(optimizer)
-    # sigma_sched, sigma_warmup = madonna.utils.get_sigma_lr_schedules(config, optimizer.sigma_opt, 25)
-    warmup_scheduler = LRWarmupLinear(config, optimizer=optimizer, model=model)
+
     # optionally resume from a checkpoint
     # Reminder: when resuming from a single checkpoint, make sure to call init_model with
     start_epoch = config.training.start_epoch
@@ -147,11 +146,11 @@ def main(config):  # noqa: C901
                     start_epoch,
                 ),
             )
-            LRWarmupLinear.current_step = len(train_loader) * start_epoch
-            print(f"new warmup step: {LRWarmupLinear.current_step}")
-            if not config.baseline:
-                optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr
-            # optimizer should have the correct LR from the loading point
+            # LRWarmupLinear.current_step = len(train_loader) * start_epoch
+            # print(f"new warmup step: {LRWarmupLinear.current_step}")
+            # if not config.baseline:
+            #     optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr
+            # # optimizer should have the correct LR from the loading point
             if not config.baseline:
                 if "next_stability_iteration" in checkpoint:
                     model.next_stability_iteration = checkpoint["next_stability_iteration"]
@@ -185,13 +184,6 @@ def main(config):  # noqa: C901
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
     #
-    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[-1] in [
-        "CosineAnnealingWarmRestarts",
-        "CosineAnnealingLR",
-    ]:
-        batch_lr_step = True
-    else:
-        batch_lr_step = False
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
@@ -249,7 +241,6 @@ def main(config):  # noqa: C901
             config=config,
             scaler=scaler,
             lr_scheduler=scheduler,
-            warmup_scheduler=warmup_scheduler,
             # sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
         )
@@ -322,10 +313,7 @@ def main(config):  # noqa: C901
                 log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
                 # model.track_interior_slices_mlflow(config, epoch)
 
-        if warmup_scheduler is not None and not warmup_scheduler.warming_up:
-            warmup_scheduler.step()
-        if scheduler is not None and not batch_lr_step:
-            scheduler.step()
+        scheduler.step()
 
         # save max memory used (just take rank 0)
         if rank == 0 and config.enable_tracking:
@@ -368,7 +356,6 @@ def train(
     device,
     config,
     lr_scheduler=None,
-    warmup_scheduler=None,
     scaler=None,
     log=log,
     sigma_lrs=None,
@@ -384,13 +371,6 @@ def train(
         [batch_time, data_time, losses, top1, top5],
         prefix=f"Epoch: [{epoch}]",
     )
-    if warmup_scheduler is not None and config.training.lr_schedule._target_.split(".")[-1] in [
-        "CosineAnnealingWarmRestarts",
-        "CosineAnnealingLR",
-    ]:
-        batch_lr_step = True
-    else:
-        batch_lr_step = False
     # switch to train mode
     model.train()
     model_time = 0
@@ -502,10 +482,7 @@ def train(
                 group["lr"] += step_factors[c]
             steps_remaining = lr_reset_steps - 1
         else:
-            # warmup scheduler
-            warmup_scheduler.step()
-            if batch_lr_step and not warmup_scheduler.warming_up:
-                lr_scheduler.step()
+            lr_scheduler.step()
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
