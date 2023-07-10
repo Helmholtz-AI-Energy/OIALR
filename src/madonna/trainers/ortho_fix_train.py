@@ -125,7 +125,7 @@ def main(config):  # noqa: C901
     # if not config.baseline:
     #     model.set_optimizer(optimizer)
     # sigma_sched, sigma_warmup = madonna.utils.get_sigma_lr_schedules(config, optimizer.sigma_opt, 25)
-    warmup_scheduler = LRWarmupLinear(config, optimizer=optimizer)
+    warmup_scheduler = LRWarmupLinear(config, optimizer=optimizer, model=model)
     # optionally resume from a checkpoint
     # Reminder: when resuming from a single checkpoint, make sure to call init_model with
     start_epoch = config.training.start_epoch
@@ -162,15 +162,15 @@ def main(config):  # noqa: C901
 
     # if start_epoch == 0:
     # set the learning rate to be based on the min_lr
-    groups = optimizer.param_groups
-    if not config.baseline:
-        groups = groups[:-1]
-    for group in groups:
-        group["lr"] = config.training.min_lr + (warmup_scheduler.add_value * start_epoch)
-    if not config.baseline:
-        optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr + (
-            warmup_scheduler.sigma_add * start_epoch
-        )
+    # groups = optimizer.param_groups
+    # if not config.baseline:
+    #     groups = groups[:-1]
+    # for group in groups:
+    #     group["lr"] = config.training.min_lr + (warmup_scheduler.add_value * start_epoch)
+    # if not config.baseline:
+    #     optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr + (
+    #         warmup_scheduler.sigma_add * start_epoch
+    #     )
 
     out_base = None
     if "checkpoint_out_root" in config.training and config.training.checkpoint_out_root is not None:
@@ -178,7 +178,7 @@ def main(config):  # noqa: C901
         model_name = config.model.name
         dataset_name = config.data.dataset
         out_base /= "baseline" if config.baseline else "svd"
-        out_base = out_base / f"{model_name}-{dataset_name}"
+        out_base = out_base / f"{model_name}-{dataset_name}" / "1gpu"
         out_base.mkdir(parents=True, exist_ok=True)
 
     # # if config['evaluate']:
@@ -742,7 +742,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
 
 
 class LRWarmupLinear(object):
-    def __init__(self, config, optimizer) -> None:
+    def __init__(self, config, optimizer, model) -> None:
         self.min_lr = config.training.min_lr
         self.steps = config.training.lr_warmup_steps
         if config.training.lr_warmup_step_size is not None:
@@ -751,13 +751,18 @@ class LRWarmupLinear(object):
         else:
             self.max_lr = config.training.max_lr
             self.add_value = (self.max_lr - self.min_lr) / self.steps
-
         self.current_step = 0
         self.warming_up = True
         self.optimizer = optimizer
         self.config = config
         for group in self.optimizer.param_groups:
+            group["lr_step"] = self.add_value
+            group["lr_max"] = self.max_lr
             group["lr"] = self.min_lr
+
+        # for last layer group -> need to adjust step as well (need a different max value)
+        # self.adjust_last_layer_lr(model=model, config=config)
+
         self.sigma_steps = -1
         if not config.baseline:
             self.sigma_min = config.training.sigma_optimizer.min_lr
@@ -770,6 +775,30 @@ class LRWarmupLinear(object):
             else:
                 self.sigma_max = config.training.sigma_optimizer.max_lr
                 self.sigma_add = (self.sigma_max - self.sigma_min) / self.sigma_steps
+            sigma_group = self.optimizer.param_groups[-1]
+            sigma_group["lr_step"] = self.sigma_add
+            sigma_group["lr_max"] = self.sigma_max
+
+    def adjust_last_layer_lr(self, model, config):
+        # todo: make this better to actually do this programatically...
+        if not config.baseline:
+            raise RuntimeError("if not baseline, fix this function!!")
+        param_list = [[n, p] for n, p in model.named_parameters()]
+        last_name = param_list[-1][0].split(".")[:-1]
+        last_name = ".".join(last_name)
+        # get params of the last layer
+        last_layer_params = []
+        for n, p in param_list:
+            if n.startswith(last_name) and p.requires_grad:
+                last_layer_params.append(p)
+        # TODO: update this to work with the other param groups from SVD...
+        group0 = self.optimizer.param_groups[0]
+        group0["params"] = group0["params"][: -1 * len(last_layer_params)]
+        self.optimizer.add_param_group({"params": last_layer_params, "lr": self.min_lr})
+        last_layer_group = self.optimizer.param_groups[-1]
+        last_layer_group["lr_max"] = self.max_lr * 0.1
+        last_layer_group["lr_step"] = self.add_value
+        # print(self.optimizer.param_groups[0]["lr"], self.optimizer.param_groups[1]["lr"])
 
     @torch.no_grad()
     def step(self):
@@ -781,10 +810,13 @@ class LRWarmupLinear(object):
         if not self.config.baseline:
             grps = grps[:-1]
         if self.current_step <= self.steps:
+            # if grps[0]["lr"] < self.max_lr:
+            # TODO: end warmup and dont go here anymore??
             for group in grps:
-                group["lr"] += self.add_value
-                if group["lr"] > self.max_lr:
-                    group["lr"] = self.max_lr
+                if group["lr"] >= group["lr_max"]:
+                    group["lr"] = group["lr_max"]
+                else:
+                    group["lr"] += group["lr_step"]
         if not self.config.baseline and self.current_step <= self.sigma_steps:
             sigma_group = self.optimizer.param_groups[-1]
             sigma_group["lr"] += self.sigma_add
