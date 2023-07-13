@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf, open_dict
 from rich.pretty import pprint
 
 import madonna
+import wandb
 from madonna import utils
 
 try:
@@ -42,6 +43,7 @@ def main(config: DictConfig):
     with open_dict(config):
         config["world_size"] = size
         config["rank"] = rank
+        config["global_batch_size"] = config.data.local_batch_size * size
 
     if config.training.trainer == "slime":
         fn = madonna.trainers.slime_trainer.main
@@ -59,7 +61,7 @@ def main(config: DictConfig):
     if rank == 0:
         pprint(dict(config))
 
-    if rank == 0 and config.enable_tracking:
+    if rank == 0 and config.enable_tracking and config.tracker == "mlflow":
         _ = utils.tracking.setup_mlflow(config, verbose=False)
 
         run_id = None
@@ -91,6 +93,16 @@ def main(config: DictConfig):
             madonna.utils.tracking.log_config(config)
             # hydra.utils.call(config.training.script, config)
             fn(config)
+    elif rank == 0 and config.enable_tracking and config.tracker == "wandb":
+        wandb.login()
+        wandb.init(
+            name=str(config.name),
+            project=str(config.tracking.project),
+            config=OmegaConf.to_container(config),
+            group=f"{config.data.dataset}-{config.model.name}",
+        )
+        fn(config)
+        wandb.finish()
     else:
         # hydra.utils.call(config.training.script, config)
         fn(config)

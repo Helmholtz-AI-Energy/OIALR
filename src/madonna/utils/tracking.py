@@ -11,6 +11,8 @@ import mlflow
 from mlflow.entities import Experiment
 from omegaconf import DictConfig
 
+import wandb
+
 from .utils import only_on_rank_n
 
 uc2 = socket.gethostname().startswith("uc2")
@@ -131,3 +133,28 @@ def log_config(config, keys=None):  # noqa: E302
             else:
                 lpkeys = f"{k}"
             mlflow.log_param(lpkeys, config[k])
+
+
+@only_on_rank_n(0)
+def log_config_wandb(config, keys=None):  # noqa: E302
+    # mlflow.log_params(config)
+    for k in config:
+        if isinstance(config[k], DictConfig):
+            for k2 in config[k]:
+                if isinstance(config[k][k2], DictConfig):
+                    wandb.log(config[k][k2], keys=f"{k}-{k2}")
+                else:
+                    # mlflow.log_param(f"{cat}-{k}-{k2}", config[cat][k][k2])
+                    if keys is not None:
+                        lpkeys = f"{keys}-{k}-{k2}"
+                    else:
+                        lpkeys = f"{k}-{k2}"
+                    wandb.log(lpkeys, config[k][k2])
+        elif k == "_partial_":
+            continue
+        else:
+            if keys is not None:
+                lpkeys = f"{keys}-{k}"
+            else:
+                lpkeys = f"{k}"
+            wandb.log(lpkeys, config[k])

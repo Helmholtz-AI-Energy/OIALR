@@ -3,6 +3,8 @@ from __future__ import annotations
 import hydra
 import torch.nn as nn
 import torch.optim
+from omegaconf import open_dict
+from timm.scheduler import create_scheduler
 
 from . import comm, datasets, tracking
 from .utils import *
@@ -65,8 +67,18 @@ def get_lr_schedules(config, optim, len_ds=None):
     if config.training.lr_schedule is None:
         return None, None
 
-    sched_name = config.training.lr_schedule._target_.split(".")[0]
+    if config.training.lr_schedule._target_ is None:
+        # Using timm lr schedulers if its None..
+        with open_dict(config):
+            if config.training.epochs > config.training.lr_schedule.warmup_epochs:
+                epochs = config.training.epochs - config.training.lr_schedule.warmup_epochs
+                config.training.lr_schedule.epochs = epochs
+            # else:
+            #     config.training.lr_schedule.epochs = config.training.epochs
+        scheduler, _ = create_scheduler(args=config.training.lr_schedule, optimizer=optim, updates_per_epoch=len_ds)
+        return scheduler, None
 
+    sched_name = config.training.lr_schedule._target_.split(".")[0]
     # sched_params = config["lr_schedule"]["params"]
     if sched_name == "ExponentialLR":
         # sched_params["last_epoch"] = config["epochs"] - config["start_epoch"]

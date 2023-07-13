@@ -13,3 +13,6 @@ prefetch_factor: 4
 distributed_sample_val: True
 train_crop_size: 224
 dali: False
+
+use_real: True
+real_label_location: "/hkfs/work/workspace/scratch/qv2382-madonna/datasets/imagenet-real/reassessed-imagenet/real.json"

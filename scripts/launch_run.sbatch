@@ -26,6 +26,7 @@ TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
 TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 export TOMOUNT="${TOMOUNT}"
+export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
 
 # TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
 # TOMOUNT+='/etc/slurm/:/etc/slurm/,'

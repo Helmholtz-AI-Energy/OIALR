@@ -63,13 +63,13 @@ def change_optimizer_group_for_svd(optimizer: optim.Optimizer, model, config):
     except AttributeError:
         pass
     # delete the current parameter groups
-    opt_kwargs["lr"] = config.training.min_lr
+    opt_kwargs["lr"] = config.training.lr
     optimizer.param_groups = []
     # add the groups 0 -> non2d
     optimizer.add_param_group({"params": params_non2d, **opt_kwargs})
     optimizer.add_param_group({"params": params_weights, **opt_kwargs})
-    if config.training.sigma_optimizer.min_lr is not None:
-        opt_kwargs["lr"] = config.training.sigma_optimizer.min_lr
+    if config.training.sigma_optimizer.lr is not None:
+        opt_kwargs["lr"] = config.training.sigma_optimizer.lr
     optimizer.add_param_group({"params": params_sigma, **opt_kwargs})
 
 

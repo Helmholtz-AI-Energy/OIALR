@@ -36,6 +36,7 @@ export SHARP_COLL_LOG_LEVEL=3
 export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
+export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
 
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
   # -A hk-project-test-mlperf \

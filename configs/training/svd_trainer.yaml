@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 600
+epochs: 150
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -8,34 +8,35 @@ init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+checkpoint_out_root: null  # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
 resume_run: False
 
 criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 1.0e-3  # depricated
 sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  min_lr: 1.0e-6
-  max_lr: 0.5e-3  # depricated
-  lr_warmup_step_size: null # 2.5e-7
-  steps: 2000
-# refactory_warmup:
-#   warmup_period: 50
-min_lr: 1.0e-6
-max_lr: 0.5e-3  # depricated
-lr_warmup_step_size: null # 2.5e-7
-lr_warmup_steps: 2000
+  lr: 1.0e-3
 
+lr: 1.0e-3
+lr_reset_period: 3
 lr_schedule:
-  _target_: torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
-  _partial_: True
-  step_size: 200
-  gamma: 0.1
-  # T_max: 313
-  # T_0: 25  # warm restarts
-lr_warmup: null
+  _target_: null
+  # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
+  sched: cosine  # cosine LR scheduler from timm
+  # epochs: 100  # number of epochs for the cycle to run for
+  warmup_epochs: 40
+  cooldown_epochs: 10
+  # patience_epochs: 10  # only useful for Plateau LR scheduler
+  # decay_rate: 0.5
+  min_lr: 1.0e-5  # min LR of cosine annealing pattern
+  warmup_lr: 1.0e-5  # starting point of warmup
+  warmup_prefix: True  # default
+  lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
+  lr_cycle_limit: 1000
+  lr_cycle_decay: 0.1  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+  lr_k_decay: 1.  # default
+  sched_on_updates: True
 
 optimizer:
   # _target_: torch.optim.SGD
@@ -49,18 +50,17 @@ optimizer:
   # fused: True
 max_grad_norm: 1.0
 
-lr_reset_period: 3
-
 init_opt_with_model: False
 print_freq: 50
 
-svd_epoch_delay: 2
+svd_epoch_delay: 20
+svd_epoch_freq: 10
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 200
+  stability_frequency: 100
   delay: 200
-  uvhthreshold: 0.9
+  uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.1
   sync_usv: False
   full_rank_sigma: True

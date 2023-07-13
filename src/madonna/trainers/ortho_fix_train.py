@@ -29,6 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
 
 import madonna
+import wandb
 
 
 @no_grad()
@@ -97,13 +98,13 @@ def main(config):  # noqa: C901
         model = model_hold(model).to(device)
     elif dist.is_initialized():
         model = DDP(model)  # , device_ids=[config.rank])
-        if dist.get_rank() == 0:
-            print(model)
-    else:
-        print(model)
+        # if dist.get_rank() == 0:
+        # print(model)
+    # else:
+    #     print(model)
 
     criterion = madonna.utils.get_criterion(config)
-    optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.min_lr)
+    optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.lr)
     if not config.baseline:
         madonna.optimizers.svd_sam.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
         # params = model.ddp_model.parameters()
@@ -120,7 +121,8 @@ def main(config):  # noqa: C901
     val_loader = dset_dict["val"]["loader"]
 
     # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
-    scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, len(train_loader))
+    train_len = len(train_loader)
+    scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, train_len)
     # optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
     # if not config.baseline:
     #     model.set_optimizer(optimizer)
@@ -156,6 +158,11 @@ def main(config):  # noqa: C901
                     model.next_stability_iteration = checkpoint["next_stability_iteration"]
                 if "call_count" in checkpoint:
                     model.call_count = checkpoint["call_count"]
+            if scheduler is not None and start_epoch > 0:
+                if True:  # args.sched_on_updates: FIXME
+                    scheduler.step_update(start_epoch * len(train_loader))
+                else:
+                    scheduler.step(start_epoch)
         else:
             print(f"=> no checkpoint found at: {config.training.checkpoint}")
 
@@ -193,6 +200,7 @@ def main(config):  # noqa: C901
     #     log.info("No number of warmup steps specified")
 
     refactory_warmup = None
+    len_train = len(train_loader)
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
@@ -202,10 +210,12 @@ def main(config):  # noqa: C901
             metrics = {"lr": lr_list[0]}
             # if not config.baseline:
             #     metrics["sigma_lr"] = lr_dict["sigma"]
-            mlflow.log_metrics(
-                metrics=metrics,
-                step=epoch,
-            )
+            # mlflow.log_metrics(
+            #     metrics=metrics,
+            #     step=epoch,
+            # )
+            if config.enable_tracking:
+                wandb.log(metrics, step=epoch * len_train)
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -244,6 +254,12 @@ def main(config):  # noqa: C901
             # sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
         )
+        if (
+            not config.baseline
+            and epoch >= config.training.svd_epoch_delay
+            and epoch % config.training.svd_epoch_freq == 0
+        ):
+            _ = model.model_stability_tracking(force=True)
 
         # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
         # # one block ---------------------------------------------------------------------------------------------
@@ -297,6 +313,7 @@ def main(config):  # noqa: C901
             device=device,
             print_on_rank=config.rank == 0,
             pg=None,
+            len_train=len_train,
         )
 
         if config.rank == 0:
@@ -309,16 +326,16 @@ def main(config):  # noqa: C901
             if hasattr(model, "get_perc_params_all_layers"):
                 perc, trainable, normal = model.get_perc_params_all_layers(module=model.ddp_model)
                 if config.enable_tracking:
-                    mlflow.log_metric("perc_parmas", perc, step=epoch)
+                    # mlflow.log_metric("perc_parmas", perc, step=epoch)
+                    wandb.log({"perc_parmas": perc}, step=(epoch + 1) * len_train)
                 log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
                 # model.track_interior_slices_mlflow(config, epoch)
 
-        scheduler.step()
-
         # save max memory used (just take rank 0)
-        if rank == 0 and config.enable_tracking:
-            max_memory = torch.cuda.max_memory_allocated()
-            mlflow.log_metric("max_memory", max_memory, step=epoch)
+        # if rank == 0 and config.enable_tracking:
+        #     max_memory = torch.cuda.max_memory_allocated()
+        #     # mlflow.log_metric("max_memory", max_memory, step=epoch)
+        #     wandb.log({"max_memory": max_memory})
 
         if rank == 0 and out_base is not None:
             # save checkpoints
@@ -329,13 +346,16 @@ def main(config):  # noqa: C901
                 "optimizer": optimizer.state_dict(),
                 "scheduler": scheduler.state_dict(),
                 "slurm_id": config.slurm_id,
-                "mlflow_run_name": mlflow.active_run().info.run_id,
+                # "mlflow_run_name": mlflow.active_run().info.run_id,
             }
             if not config.baseline:
                 save_dict["next_stability_iteration"] = model.next_stability_iteration
                 save_dict["call_count"] = model.call_count
             torch.save(save_dict, filename)
             log.info(f"Checkpoint to file {filename}")
+
+        # set up next epoch after saving everything
+        scheduler.step(epoch + 1, metric=val_loss)
 
 
 def get_lrs(opt):
@@ -383,7 +403,9 @@ def train(
     steps_remaining = 0
     step_factors = None
     print_norms = []
-
+    len_train = len(train_loader)
+    updates_per_epoch = len(train_loader)
+    num_updates = epoch * updates_per_epoch
     for i, data in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
         if hasattr(config.data, "dali") and config.data.dali:
@@ -401,8 +423,8 @@ def train(
 
         t0 = time.perf_counter()
         # reset_lr_warmup = False
-        if not config.baseline:
-            _ = model.model_stability_tracking()
+        # if not config.baseline:
+        #     _ = model.model_stability_tracking()
         # if reset_lr_warmup:
         #     # reset the LR to a small value to avoid degredation in training
         #     # last_lr = optimizer.opt1.param_groups[0]["lr"]
@@ -476,13 +498,14 @@ def train(
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-
+        num_updates += 1
         if steps_remaining > 0:
             for c, group in enumerate(optimizer.param_groups):
                 group["lr"] += step_factors[c]
             steps_remaining = lr_reset_steps - 1
         else:
-            lr_scheduler.step()
+            # TODO: this will only work for timm schedulers
+            lr_scheduler.step_update(num_updates=num_updates, metric=loss)
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -547,15 +570,24 @@ def train(
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
-        mlflow.log_metrics(
-            metrics={
+        wandb.log(
+            {
                 "train loss": ls,
                 "train top1": t1,
                 "train top5": t5,
                 "train_time": model_time,
             },
-            step=epoch,
+            step=(epoch + 1) * len_train,
         )
+        # mlflow.log_metrics(
+        #     metrics={
+        #         "train loss": ls,
+        #         "train top1": t1,
+        #         "train top5": t5,
+        #         "train_time": model_time,
+        #     },
+        #     step=epoch,
+        # )
     return losses.avg, loss, refactory_warmup
 
 
@@ -587,7 +619,7 @@ def save_selected_weights(network, epoch, config):
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg):
+def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg, len_train):
     def run_validate(loader, base_progress=0):
         # rank = 0 if not dist.is_initialized() else dist.get_rank()
         with torch.no_grad():
@@ -704,14 +736,22 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
-        mlflow.log_metrics(
-            metrics={
+        wandb.log(
+            {
                 "val loss": ls,
                 "val top1": t1,
                 "val top5": t5,
             },
-            step=epoch,
+            step=(epoch + 1) * len_train,
         )
+        # mlflow.log_metrics(
+        #     metrics={
+        #         "val loss": ls,
+        #         "val top1": t1,
+        #         "val top5": t5,
+        #     },
+        #     step=epoch,
+        # )
     if config.rank == 0:
         log.info(f"Data loading time avg: {data_time.avg}")
 

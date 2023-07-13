@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import socket
 from pathlib import Path
@@ -358,9 +359,14 @@ def imagenet_train_dataset_plus_loader(
         transform = create_transform(
             train_crop_size,
             is_training=True,
-            auto_augment="rand-m9-mstd0.5",
+            auto_augment="rand-m9-mstd0.5-inc1",
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225),
+            crop_pct=0.9,
+            scale=[0.08, 1.0],
+            interpolation="random",  # todo: bicubic?
+            re_prob=0.25,
+            re_mode="pixel",
         )
     else:
         transform = transforms.Compose(
@@ -417,18 +423,47 @@ def imagenet_get_val_dataset_n_loader(
     elif config.data.dali:
         raise ImportError("Attempt to use DALI but DALI not installed")
 
-    val_dir = Path(base_dir) / "val"
-    val_dataset = datasets.ImageFolder(
-        str(val_dir),
-        transforms.Compose(
+    if dsconfig["timm_transforms"]:
+        transform = create_transform(
+            224,
+            is_training=False,
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            crop_pct=0.9,
+            use_prefetcher=False,
+            interpolation="bicubic",
+        )
+    else:
+        transform = transforms.Compose(
             [
                 transforms.Resize(256),
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 imagenet_normalize,
             ],
-        ),
+        )
+
+    val_dir = Path(base_dir) / "val"
+    val_dataset = datasets.ImageFolder(
+        str(val_dir),
+        transform,
     )
+    if dsconfig.use_real:
+        # if want to use real labels, need to load them and set them to be the same as the images
+        # can do this by setting the `target` attribute of the dataset
+        new_labels = []
+        with open(dsconfig.real_label_location) as fl:
+            real_labels = json.load(fl)
+        inds_to_remove = []
+        # not all images have labels in ReaL -> need to remove those elements from the dataset
+        for c, lab in enumerate(real_labels):  # real_labels is a list of lists
+            if len(lab) > 0:
+                new_labels.append(lab)
+            else:
+                inds_to_remove.append(c)
+        for rem in reversed(inds_to_remove):
+            del val_dataset.samples[rem]
+        val_dataset.targets = new_labels
 
     if dist.is_initialized() and dsconfig["distributed_sample_val"]:
         val_sampler = datadist.DistributedSampler(val_dataset)
@@ -474,9 +509,15 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
         transform = create_transform(
             train_crop_size,
             is_training=True,
-            auto_augment="rand-m9-mstd0.5",
+            auto_augment="rand-m9-mstd0.5-inc1",
             mean=(0.4914, 0.4822, 0.4465),
             std=(0.2023, 0.1994, 0.2010),
+            crop_pct=1.0,
+            scale=[0.8, 1.0],
+            interpolation="random",
+            re_prob=0.25,
+            re_mode="pixel",
+            use_prefetcher=True,
         )
     else:
         trans_list = [
@@ -535,12 +576,23 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
     # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [
-        transforms.ToTensor(),
-        transforms.Resize(config.data.train_crop_size, antialias=True),
-        cifar10_normalize,
-    ]
-    trans = transforms.Compose(trans)
+    if dsconfig["timm_transforms"]:
+        trans = create_transform(
+            config.data.train_crop_size,
+            is_training=False,
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2023, 0.1994, 0.2010],
+            crop_pct=1.0,
+            use_prefetcher=True,
+            interpolation="bicubic",
+        )
+    else:
+        trans = [
+            transforms.ToTensor(),
+            transforms.Resize(config.data.train_crop_size, antialias=True),
+            cifar10_normalize,
+        ]
+        trans = transforms.Compose(trans)
 
     test_dataset = datasets.CIFAR10(
         root=str(val_dir),

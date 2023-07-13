@@ -2,9 +2,9 @@
 
 defaults:
   - _self_
-  - data: cifar10.yaml # imagenet.yaml # mnist.yaml #
+  - data: imagenet.yaml # cifar10.yaml # mnist.yaml #
   - model: vit.yaml # cirsean4.yaml # conv_dense.yaml # general_torchvision.yaml #
-  - tracking: mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
+  - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: svd_trainer.yaml # gsam_trainer.yaml # qr_fix_trainer.yaml #
   - log_dir: default.yaml
   # experiment configs allow for version control of specific configurations
@@ -38,6 +38,7 @@ baseline: False
 comm_method: "nccl"
 cpu_training: False
 enable_tracking: True
+tracker: wandb
 
 
 
