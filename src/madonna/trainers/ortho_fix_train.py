@@ -106,7 +106,7 @@ def main(config):  # noqa: C901
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.lr)
     if not config.baseline:
-        madonna.optimizers.svd_sam.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
+        madonna.models.utils.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
         # params = model.ddp_model.parameters()
         ddp_model = model.ddp_model
     else:

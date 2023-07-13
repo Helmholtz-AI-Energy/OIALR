@@ -12,6 +12,7 @@ from torch.nn.utils import parametrizations, parametrize
 
 from ..utils import change_adam_shapes
 from .attention import SVDMultiheadAttention
+from .conv import SVDConv2d
 from .linear import SVDLinear
 
 # from ..utils import utils
@@ -197,6 +198,29 @@ class SVDFixingModel(nn.Module):
                 self.last_layer = [module, name]
             else:
                 self.first_layer = False
+        elif isinstance(module, nn.Conv2d):
+            if not self.first_layer:
+                module_output = SVDConv2d(
+                    in_channels=module.in_channels,
+                    out_channels=module.out_channels,
+                    kernel_size=module.kernel_size,
+                    padding=module.padding,
+                    dilation=module.dilation,
+                    groups=module.groups,
+                    bias=module.bias is not None,
+                    padding_mode=module.padding_mode,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                    uvhthreshold=self.uvhthreshold,
+                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    sync_usv=self.sync_usv,
+                    full_rank_sigma=self.full_rank_sigma,
+                    start_bias=module.bias,
+                    start_weight=module.weight,
+                    start_padding=module.padding,
+                    update_from_simga=self.update_from_simga,
+                    reinit_shapes=self.reinit_shapes,
+                )
         for n, child in module.named_children():
             module_output.add_module(
                 f"{n}",

@@ -1,11 +1,14 @@
 import logging
 import math
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.parallel import DistributedDataParallel as DDP
+from torch import Tensor
+from torch.nn.common_types import _size_1_t, _size_2_t, _size_3_t
+from torch.nn.utils import _pair, _reverse_repeat_tuple, _single, _triple
 
 # from ..utils import utils
 # from ..optimizers.utils import change_adam_shapes
@@ -15,53 +18,23 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 log = logging.getLogger(__name__)
 
 
-class SVDLinear(nn.Module):
-    r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
-
-    This module supports :ref:`TensorFloat32<tf32_on_ampere>`.
-
-    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
-
-    Args:
-        in_features: size of each input sample
-        out_features: size of each output sample
-        bias: If set to ``False``, the layer will not learn an additive bias.
-            Default: ``True``
-
-    Shape:
-        - Input: :math:`(*, H_{in})` where :math:`*` means any number of
-          dimensions including none and :math:`H_{in} = \text{in\_features}`.
-        - Output: :math:`(*, H_{out})` where all but the last dimension
-          are the same shape as the input and :math:`H_{out} = \text{out\_features}`.
-
-    Attributes:
-        weight: the learnable weights of the module of shape
-            :math:`(\text{out\_features}, \text{in\_features})`. The values are
-            initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`, where
-            :math:`k = \frac{1}{\text{in\_features}}`
-        bias:   the learnable bias of the module of shape :math:`(\text{out\_features})`.
-                If :attr:`bias` is ``True``, the values are initialized from
-                :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})` where
-                :math:`k = \frac{1}{\text{in\_features}}`
-
-    Examples::
-
-        >>> m = nn.Linear(20, 30)
-        >>> input = torch.randn(128, 20)
-        >>> output = m(input)
-        >>> print(output.size())
-        torch.Size([128, 30])
+class SVDConv2d(nn.modules.conv._ConvNd):
+    __doc__ = r"""
+    TODO: link to torch conv2D docs
+    add other docs about this function itself
     """
-    __constants__ = ["in_features", "out_features"]
-    in_features: int
-    out_features: int
-    weight: torch.Tensor
 
     def __init__(
         self,
-        in_features: int,
-        out_features: int,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: _size_2_t,
+        stride: _size_2_t = 1,
+        padding: Union[str, _size_2_t] = 0,
+        dilation: _size_2_t = 1,
+        groups: int = 1,
         bias: bool = True,
+        padding_mode: str = "zeros",  # TODO: refine this type
         device=None,
         dtype=None,
         uvhthreshold: float = 0.9,
@@ -74,46 +47,59 @@ class SVDLinear(nn.Module):
         reinit_shapes=False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
-        super(SVDLinear, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
+        kernel_size_ = _pair(kernel_size)
+        stride_ = _pair(stride)
+        padding_ = padding if isinstance(padding, str) else _pair(padding)
+        dilation_ = _pair(dilation)
+        super().__init__(
+            in_channels,
+            out_channels,
+            kernel_size_,
+            stride_,
+            padding_,
+            dilation_,
+            False,
+            _pair(0),
+            groups,
+            bias,
+            padding_mode,
+            **factory_kwargs,
+        )
+        # new things ------------------------------------
+        """
+        TODO: uvh_stable, uvh_threshold, trans, inner_dim
+        """
+        with torch.no_grad():
+            if start_weight is not None:
+                self.weight.zero_()
+                self.weight.add_(start_weight)
+            if start_bias is not None:
+                self.bias.zero_()
+                self.bias.add_(start_bias)
+
         self.full_rank_sigma = full_rank_sigma
         self.update_from_simga = full_rank_sigma and update_from_simga
         self.reinit_shapes = reinit_shapes
 
-        if start_weight is not None:
-            self.weight = start_weight
-        else:
-            self.weight = torch.empty((out_features, in_features), **factory_kwargs)
-        self.weight = nn.Parameter(self.weight)
-
-        if out_features >= in_features:  # simplest case (no transpose)
+        weight_shape = self.weight.shape
+        m = weight_shape[0]
+        n = weight_shape[1] * weight_shape[2] * weight_shape[3]
+        k = min(m, n)
+        # svd shapes: [m, n] -> u[m, k] * s[k, k] * vh [k, n]    k-> min(m, n)
+        if m >= n:
             self.trans = False
-            w = self.weight
-        else:
+        else:  # need to flip m and n
             self.trans = True
-            w = self.weight.T
-
-        # u, s, vh = torch.linalg.svd(w, full_matrices=False)
-        k = min(tuple(w.shape))
-        self.u = torch.zeros((w.shape[0], k), **factory_kwargs)
-        self.vh = torch.zeros((k, w.shape[1]), **factory_kwargs)
-        self.s = torch.zeros((k, k) if self.full_rank_sigma else k, **factory_kwargs)
+            hold = m
+            n = m
+            m = hold
+        self.u = torch.zeros((m, k), **factory_kwargs)
+        self.vh = torch.zeros(k if not full_rank_sigma else (k, k), **factory_kwargs)
+        self.s = torch.zeros((k, n), **factory_kwargs)
 
         self.u = nn.Parameter(self.u, requires_grad=False)
         self.s = nn.Parameter(self.s, requires_grad=False)
         self.vh = nn.Parameter(self.vh, requires_grad=False)
-
-        if bias:
-            if start_bias is None:
-                self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
-            else:
-                self.bias = nn.Parameter(start_bias)
-        else:
-            self.register_parameter("bias", None)
-
-        if start_weight is None:
-            self.reset_parameters()
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -124,7 +110,7 @@ class SVDLinear(nn.Module):
         # self.vh_stable = False
         self.vh_prev = None
         self.s_prev = None
-        self.inner_dim = torch.tensor(min(in_features, out_features), dtype=torch.int)
+        self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
@@ -138,20 +124,28 @@ class SVDLinear(nn.Module):
         self.last_send_rank = None
         self.prev_uvh = None
 
-    def reset_parameters(self) -> None:
-        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
-        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
-        # https://github.com/pytorch/pytorch/issues/57109
+    def _conv_forward(self, input: Tensor, weight: Tensor, bias: Optional[Tensor]):
+        # From nn.conv2d
+        if self.padding_mode != "zeros":
+            return F.conv2d(
+                F.pad(input, self._reversed_padding_repeated_twice, mode=self.padding_mode),
+                weight,
+                bias,
+                self.stride,
+                _pair(0),
+                self.dilation,
+                self.groups,
+            )
+        return F.conv2d(
+            input,
+            weight,
+            bias,
+            self.stride,
+            self.padding,
+            self.dilation,
+            self.groups,
+        )
 
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-
-        if self.bias is not None:
-            # w = (self.q @ self.r).T if self.trans else self.q @ self.r
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
-
-    # @torch.compile()  # TODO: compiling seems to be weird here...might need to compile two different functions?
     def get_weight(self):
         if not self.uvh_stable:
             # if both are not stable -> normal training
@@ -178,114 +172,28 @@ class SVDLinear(nn.Module):
         s = self.s if self.full_rank_sigma else torch.diag(self.s)
 
         w = torch.linalg.multi_dot([u, s, vh])
-        ret = w.T if self.trans else w
+        if self.trans:
+            ret = w.reshape(
+                self.in_channels,
+                self.out_channels // self.groups,
+                *self.kernel_size,
+            )
+        else:
+            ret = w.reshape(
+                self.out_channels,
+                self.in_channels // self.groups,
+                *self.kernel_size,
+            )
         # eps = torch.finfo(ret.dtype).eps * 10
         # ret[torch.abs(ret) < eps] *= 0
         with torch.no_grad():
             self.weight *= 0
             self.weight += ret
-        # if dist.get_rank() == 0:
-        #     log.info("Using USV")
         return ret
 
-    # @torch.compile()
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        w = self.get_weight()
-        # if self.bias is None:
-        #     self.bias.requires_grad = False
-        # print(f"bias is None? {self.bias is None}")
-        return F.linear(input, w, self.bias)
-
-    # @torch.no_grad()
-    # def test_stability_old(self, working_rank=0, nonblocking=True):
-    #     # TODO: should we make sure to have S be the same across processes?
-    #     if self.rank != working_rank:
-    #         self.inner_dim = self.inner_dim.to(self.weight.device)
-    #         self.bcast_kusvh(src=working_rank)
-    #         return 4, self.inner_dim, 0.0, True, True
-    #     # updating usv in full rank is different!
-
-    #     # if self.uvh_stable and not self.update_from_simga:
-    #     #     # sdiff = self.s_prev - self.s
-    #     #     # self.s_prev = self.s.data.clone()
-    #     #     # if rank == 0:
-    #     #     #     print(f"s diff: {sdiff.mean():.4f}, {sdiff.min():.4f}, {sdiff.max():.4f}")
-    #     #     # switch back to check on the SVD stuff??
-    #     #     # self.uvh_stable = False
-    #     #     perc_params, _, _ = self.get_perc_params()
-    #     #     return 3, self.k, perc_params, True, False
-    #     set_usvh = True
-    #     if self.full_rank_sigma and self.uvh_stable and self.update_from_simga:
-    #         self._full_rank_update_usv()
-    #         # self.uvh_stable = False
-    #         # self._update_k()
-    #         # set_usvh = False
-    #         u, s, vh = self.u, self.s, self.vh
-    #         uvh = u @ vh
-    #         # self.update_from_simga = False
-    #         perc_params, _, _ = self.get_perc_params()
-    #         # return 2, self.k, perc_params, True, False
-    #     else:
-    #         w = self.weight.T if self.trans else self.weight
-    #         # w = self.get_weight()
-    #         # w = w.T if self.trans else w
-    #         dtp = w.dtype
-    #         u, s, vh = torch.linalg.svd(w.to(torch.float32), full_matrices=False)  # , driver="gesvd")
-    #         u = u.to(dtp)
-    #         s = s.to(dtp)
-    #         vh = vh.to(dtp)
-    #         uvh = u @ vh
-    #         if self.prev_uvh is None:
-    #             if self.rank == working_rank:
-    #                 log.info("linear in first stability update")
-    #             self.prev_uvh = uvh
-    #             self.u.zero_()
-    #             self.u.add_(u)
-    #             self.s.zero_()
-    #             self.s.add_(torch.diag(s) if self.full_rank_sigma else s)
-    #             self.vh.zero_()
-    #             self.vh.add_(vh)
-
-    #             self.inner_dim = self.inner_dim.to(device=s.device)
-    #             # send to other ranks
-    #             self.bcast_kusvh(src=working_rank)
-    #             return 0, self.inner_dim, 1.0, self.uvh_stable, False
-    #         self.prev_uvh = uvh
-    #         if self.rank == working_rank:
-    #             log.info("linear in normal stability update")
-
-    #     # use cosine similarity (dot product for orthonormal) to determine similarity
-    #     csim = self.cossim(self.prev_uvh, uvh)
-    #     self.prev_uvh = uvh
-    #     csmean, _ = csim.mean(), csim.std()
-    #     self.prev_uvh = uvh
-    #     change_k = False
-    #     if csmean > self.uvhthreshold:
-    #         self.uvh_stable = True
-
-    #         self.u.zero_()
-    #         self.u.add_(u)
-    #         self.vh.zero_()
-    #         self.vh.add_(vh)
-    #         if self.full_rank_sigma:
-    #             self.s.zero_()
-    #             self.s[: self.inner_dim, : self.inner_dim].add_(torch.diag(s[: self.inner_dim]))
-    #         else:
-    #             self.s.zero_()
-    #             self.s[: self.inner_dim].add_(s[: self.inner_dim])
-
-    #         self.weight.requires_grad = False
-    #         self.u.requires_grad = False
-    #         self.vh.requires_grad = False
-    #         self.s.requires_grad = True
-
-    #         change_k = self._update_inner_dim()
-    #         self._update_usvh_shapes()
-    #     perc_params, _, _ = self.get_perc_params()
-
-    #     # send to other ranks
-    #     self.bcast_kusvh(src=working_rank)
-    #     return csmean, self.inner_dim, perc_params, self.uvh_stable, change_k
+    def forward(self, input: Tensor) -> Tensor:
+        weight = self.get_weight()
+        return self._conv_forward(input, weight, self.bias)
 
     @torch.no_grad()
     def _update_inner_dim_and_shapes(self):
@@ -440,12 +348,6 @@ class SVDLinear(nn.Module):
         # self.prev_uvh.add_(uvh)
         csmean = 1.0
 
-        # rand_noise = torch.rand_like(self.s) * torch.diag(self.s).min() * 0.1
-        # rand_noise.fill_diagonal_(0)
-        # self.s.add(rand_noise)
-
-        # csmean = 1.0
-        # change_k = False
         self.uvh_stable = True
         self.weight.requires_grad = False
         self.u.requires_grad = False
@@ -618,12 +520,21 @@ class SVDLinear(nn.Module):
         }
 
     def extra_repr(self) -> str:
-        return "in_features={}, out_features={}, bias={}, interier k={}".format(
-            self.in_features,
-            self.out_features,
-            self.bias is not None,
-            self.inner_dim.item(),
-        )
+        s = "{in_channels}, {out_channels}, kernel_size={kernel_size}" ", stride={stride}"
+        if self.padding != (0,) * len(self.padding):
+            s += ", padding={padding}"
+        if self.dilation != (1,) * len(self.dilation):
+            s += ", dilation={dilation}"
+        if self.output_padding != (0,) * len(self.output_padding):
+            s += ", output_padding={output_padding}"
+        if self.groups != 1:
+            s += ", groups={groups}"
+        if self.bias is None:
+            s += ", bias=False"
+        if self.padding_mode != "zeros":
+            s += ", padding_mode={padding_mode}"
+        s += f", inner_dim={self.inner_dim.item()}"
+        return s.format(**self.__dict__)
 
     # @torch.compile()
     def get_perc_params(self):

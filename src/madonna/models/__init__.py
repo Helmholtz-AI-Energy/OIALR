@@ -3,7 +3,7 @@ import torchvision.models as models
 from . import components, utils
 from .ortho import QROrthoFixingModel
 from .qr_fixing import QRFixingModel
-from .svd import SVDFixingModel
+from .svd import *
 from .xox import XOXModel
 
 
