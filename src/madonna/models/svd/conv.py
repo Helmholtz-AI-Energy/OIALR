@@ -1,5 +1,8 @@
+import collections
 import logging
 import math
+from copy import copy
+from itertools import repeat
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -8,12 +11,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.common_types import _size_1_t, _size_2_t, _size_3_t
-from torch.nn.utils import _pair, _reverse_repeat_tuple, _single, _triple
 
-# from ..utils import utils
-# from ..optimizers.utils import change_adam_shapes
 
-# from .. import optimizers
+def _ntuple(n, name="parse"):
+    def parse(x):
+        if isinstance(x, collections.abc.Iterable):
+            return tuple(x)
+        return tuple(repeat(x, n))
+
+    parse.__name__ = name
+    return parse
+
+
+# _single = _ntuple(1, "_single")
+_pair = _ntuple(2, "_pair")
+# _triple = _ntuple(3, "_triple")
+# _quadruple = _ntuple(4, "_quadruple")
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +95,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         self.reinit_shapes = reinit_shapes
 
         weight_shape = self.weight.shape
+        self.base_weigh_shape = tuple(weight_shape)
         m = weight_shape[0]
         n = weight_shape[1] * weight_shape[2] * weight_shape[3]
         k = min(m, n)
@@ -90,9 +104,11 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             self.trans = False
         else:  # need to flip m and n
             self.trans = True
-            hold = m
-            n = m
-            m = hold
+            n = weight_shape[0]
+            m = weight_shape[1] * weight_shape[2] * weight_shape[3]
+
+        if dist.get_rank() == 0:
+            print(m, k, n, self.trans)
         self.u = torch.zeros((m, k), **factory_kwargs)
         self.vh = torch.zeros(k if not full_rank_sigma else (k, k), **factory_kwargs)
         self.s = torch.zeros((k, n), **factory_kwargs)
@@ -146,7 +162,21 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             self.groups,
         )
 
-    def get_weight(self):
+    @torch.no_grad()
+    def get_weight_for_svd(self):
+        if not self.uvh_stable:
+            # in this case, still using weights and need to reshape them
+            ret = self.weight.view(self.weight.shape[0], -1)
+            if self.trans:
+                ret = ret.T
+            return ret
+
+        u, vh = self.u, self.vh
+        s = self.s if self.full_rank_sigma else torch.diag(self.s)
+        w = torch.linalg.multi_dot([u, s, vh])
+        return w
+
+    def get_weight(self, for_svd=False):
         if not self.uvh_stable:
             # if both are not stable -> normal training
             # if dist.get_rank() == 0:
@@ -173,17 +203,9 @@ class SVDConv2d(nn.modules.conv._ConvNd):
 
         w = torch.linalg.multi_dot([u, s, vh])
         if self.trans:
-            ret = w.reshape(
-                self.in_channels,
-                self.out_channels // self.groups,
-                *self.kernel_size,
-            )
-        else:
-            ret = w.reshape(
-                self.out_channels,
-                self.in_channels // self.groups,
-                *self.kernel_size,
-            )
+            w = w.T
+
+        ret = w.reshape(self.base_weigh_shape)
         # eps = torch.finfo(ret.dtype).eps * 10
         # ret[torch.abs(ret) < eps] *= 0
         with torch.no_grad():
@@ -246,7 +268,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
     @torch.no_grad()
     def _first_stability(self):
         log.debug("linear: first stability call")
-        w = self.weight.T if self.trans else self.weight
+        w = self.get_weight_for_svd()
         # w = self.get_weight()
         # w = w.T if self.trans else w
         dtp = w.dtype
@@ -258,6 +280,9 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         s = s.to(dtp)
         vh = vh.to(dtp)
         uvh = u @ vh
+
+        print(f"usvh - w {u.shape} {s.shape} {vh.shape} - {w.shape}")
+        print(f"usvh - tra {self.u.shape} {self.s.shape} {self.vh.shape} {self.trans}")
 
         self.prev_uvh = uvh
         self.u.zero_()
@@ -271,7 +296,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
 
     @torch.no_grad()
     def _full_rank_weight_stability(self):
-        w = self.weight.T if self.trans else self.weight
+        w = self.get_weight_for_svd()
         # w = self.get_weight()
         # w = w.T if self.trans else w
         dtp = w.dtype

@@ -93,15 +93,18 @@ def main(config):  # noqa: C901
         model.cuda(gpu)
     # print('before model wrapping')
 
+    # TODO: fix model repr
     if not config.baseline:
         model_hold = hydra.utils.instantiate(config.training.fixing_method)
         model = model_hold(model).to(device)
+        if dist.get_rank() == 0:
+            print(model.ddp_model)
     elif dist.is_initialized():
         model = DDP(model)  # , device_ids=[config.rank])
-        # if dist.get_rank() == 0:
-        # print(model)
-    # else:
-    #     print(model)
+        if dist.get_rank() == 0:
+            print(model)
+    else:
+        print(model)
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.lr)
@@ -113,6 +116,7 @@ def main(config):  # noqa: C901
         # params = model.parameters()
         ddp_model = model
 
+    # set optimizer for references for SVD model to reset shapes of state params
     if not config.baseline:
         model.set_optimizer(optimizer)
 
@@ -253,6 +257,7 @@ def main(config):  # noqa: C901
             lr_scheduler=scheduler,
             # sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
+            mixup=dset_dict["mixup"],
         )
         if (
             not config.baseline
@@ -380,6 +385,7 @@ def train(
     log=log,
     sigma_lrs=None,
     refactory_warmup=None,
+    mixup=None,
 ):
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
@@ -414,6 +420,8 @@ def train(
         else:
             images = data[0]
             target = data[1]
+        if mixup is not None:
+            images, target = mixup(images, target)
         # measure data loading time
         data_time.update(time.time() - end)
 

@@ -10,7 +10,7 @@ import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
 
-from ..utils import change_adam_shapes
+from ..utils import change_adam_shapes, change_sgd_shapes
 from .attention import SVDMultiheadAttention
 from .conv import SVDConv2d
 from .linear import SVDLinear
@@ -60,11 +60,9 @@ class SVDFixingModel(nn.Module):
             if dist.get_rank() == 0:
                 log.info("Initializing DDP")
             self.ddp_model = DDP(self.local_model, find_unused_parameters=False)
-        try:
-            if dist.get_rank() == 0:
-                print(self.ddp_model)
-        except RuntimeError:  # dist is not initialized
+        else:
             self.ddp_model = self.local_model
+
             # print(self.local_model)
 
         # self.compiled_model = torch.compile(self.ddp_model)
@@ -139,9 +137,15 @@ class SVDFixingModel(nn.Module):
         self.named_children = self.ddp_model.named_children
         self.children = self.ddp_model.children
         self.cuda = self.ddp_model.cuda
+        # TODO: add something here??
+        self.__repr__ = self.ddp_model.__repr__
 
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer  # optimizers.MixedSVDOpt
+        if isinstance(optimizer, (optim.Adam, optim.AdamW)):
+            self.reshape_opt_state_fn = change_adam_shapes
+        elif isinstance(optimizer, optim.SGD):
+            self.reshape_opt_state_fn = change_sgd_shapes
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
@@ -204,6 +208,7 @@ class SVDFixingModel(nn.Module):
                     in_channels=module.in_channels,
                     out_channels=module.out_channels,
                     kernel_size=module.kernel_size,
+                    stride=module.stride,
                     padding=module.padding,
                     dilation=module.dilation,
                     groups=module.groups,
@@ -217,7 +222,6 @@ class SVDFixingModel(nn.Module):
                     full_rank_sigma=self.full_rank_sigma,
                     start_bias=module.bias,
                     start_weight=module.weight,
-                    start_padding=module.padding,
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
                 )
@@ -430,7 +434,7 @@ class SVDFixingModel(nn.Module):
             # self.reset_all_states(self.optimizer)
             self.all_stable = all_layers_stable
         if reset_optimizer:
-            change_adam_shapes(self.optimizer)
+            self.reshape_opt_state_fn(self.optimizer)
             # self.reset_all_states(self.optimizer)
             # self.insert_noise(noise_level=1e-2)
             # self.optimizer.reset_shapes_of_sigma(self)

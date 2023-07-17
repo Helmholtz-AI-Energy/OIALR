@@ -80,6 +80,30 @@ def change_adam_shapes(optimizer):
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
 
+def change_sgd_shapes(optimizer):
+    """
+    reset the shapes of the SGD optimizer buffers to be the same shape as the model parameters
+
+    if `reset_buffers_zero`: reset the buffer to zero after reshaping it
+    """
+    resettime = time.perf_counter()
+    rank = 0 if not dist.is_initialized() else dist.get_rank()
+    # instead of resetting optimizer, slice off bits of the saved states
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            state = optimizer.state[p]
+            if len(list(state.keys())) > 0:
+                # only need to change "momentum_buffer"
+                if state["momentum_buffer"].shape != p.shape:
+                    sl = []
+                    for d in range(p.ndim):
+                        sl.append(slice(0, p.shape[d]))
+                    # print(type(state[k]))
+                    state["momentum_buffer"] = state["momentum_buffer"][tuple(sl)]
+    if rank == 0:
+        log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
+
+
 def change_optimizer_group_for_svd(optimizer: optim.Optimizer, model, config):
     # make 3 optimizer groups within an optimizer
     #   non-2d, weights, svd

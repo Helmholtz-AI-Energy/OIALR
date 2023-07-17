@@ -14,6 +14,7 @@ import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from omegaconf import DictConfig
 from PIL import ImageFile
+from timm.data.mixup import Mixup
 from timm.data.transforms_factory import create_transform
 
 log = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ def get_dataset(
         "mnist": get_mnist_datasets,
     }
     if config.data.dataset not in options:
-        raise ValueError("dataset not in options! add to utils.datasets")
+        raise ValueError("dataset not in options! add to madonna.utils.datasets")
 
     dset_dict = options[config.data.dataset](
         config,
@@ -75,6 +76,19 @@ def get_dataset(
         group_rank=group_rank,
         num_groups=num_groups,
     )
+    dset_dict["mixup"] = None
+    if config.training.mixup:
+        # mixup_alpha: 1.
+        # cutmix_alpha: 0.
+        # cutmix_minmax: null
+        # prob: 1.0
+        # switch_prob: 0.
+        # mode: batch
+        # TODO: update the number of classes here...
+        # config.training.mixup_args.num_classes =
+        config.training.mixup_args.label_smoothing = config.training.criterion.label_smoothing
+        mixup_fn = Mixup(config.training.mixup_args)
+        dset_dict["mixup"] = mixup_fn
 
     return dset_dict
 
@@ -430,7 +444,6 @@ def imagenet_get_val_dataset_n_loader(
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225),
             crop_pct=0.9,
-            use_prefetcher=False,
             interpolation="bicubic",
         )
     else:
@@ -517,7 +530,6 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
             interpolation="random",
             re_prob=0.25,
             re_mode="pixel",
-            use_prefetcher=True,
         )
     else:
         trans_list = [
@@ -583,7 +595,6 @@ def cifar10_val_dataset_n_loader(config, group_size=None, group_rank=None, num_g
             mean=[0.4914, 0.4822, 0.4465],
             std=[0.2023, 0.1994, 0.2010],
             crop_pct=1.0,
-            use_prefetcher=True,
             interpolation="bicubic",
         )
     else:

@@ -9,7 +9,7 @@ model: # vit_b_16
   num_heads: 12 # default: 12
   hidden_dim: 768 # default: 768
   mlp_dim: 3072 # default: 3072
-  # dropout: 0.1
+  dropout: 0.1
   # attention_dropout: 0.05
 #  num_classes: 1000,
 name: vit_b_16

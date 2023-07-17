@@ -16,16 +16,16 @@ criterion:
   label_smoothing: 0.1
 
 sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  lr: 1.0e-3
+  lr: 0.1
 
-lr: 1.0e-3
+lr: 0.1
 lr_reset_period: 3
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   sched: cosine  # cosine LR scheduler from timm
   # epochs: 100  # number of epochs for the cycle to run for
-  warmup_epochs: 40
+  warmup_epochs: 20
   cooldown_epochs: 10
   # patience_epochs: 10  # only useful for Plateau LR scheduler
   # decay_rate: 0.5
@@ -39,26 +39,36 @@ lr_schedule:
   sched_on_updates: True
 
 optimizer:
-  # _target_: torch.optim.SGD
-  # _partial_: True
-  # momentum: 0.1
-  # weight_decay: 1.0e-5
-  # nesterov: True
-  _target_: torch.optim.Adam
+  _target_: torch.optim.SGD
   _partial_: True
+  weight_decay: 1e-5
+  momentum: 0.9
+  # _target_: torch.optim.Adam
+  # _partial_: True
   # weight_decay: 0.05
   # fused: True
-max_grad_norm: 1.0
+max_grad_norm: -1.0
 
 init_opt_with_model: False
 print_freq: 50
+
+mixup: False
+mixup_args:
+  mixup_alpha: 0.8
+  cutmix_alpha: 1.0
+  cutmix_minmax: null
+  prob: 1.0
+  switch_prob: 0.
+  mode: batch
+  label_smoothing: null
+  num_classes: 1000  # based on dataset...
 
 svd_epoch_delay: 20
 svd_epoch_freq: 10
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 100
+  stability_frequency: 1000
   delay: 200
   uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.1
