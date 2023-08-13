@@ -37,6 +37,7 @@ class SVDFixingModel(nn.Module):
         keep_last_layer: bool = True,
         update_from_simga: bool = True,
         reinit_shapes: bool = True,
+        ema: bool = False,
     ):
         super().__init__()
         self.uvhthreshold = uvhthreshold
@@ -48,8 +49,8 @@ class SVDFixingModel(nn.Module):
         self.keep_last_layer = keep_last_layer
         self.last_layer = None
         self.reinit_shapes = reinit_shapes
-
         self.local_model = self._replace_layers(existing_model)
+
         if keep_last_layer:
             self._reset_last_layer(self.local_model)
         self.rank = 0
@@ -59,13 +60,16 @@ class SVDFixingModel(nn.Module):
 
             if dist.get_rank() == 0:
                 log.info("Initializing DDP")
-            self.ddp_model = DDP(self.local_model, find_unused_parameters=False)
+            self.model = DDP(self.local_model, find_unused_parameters=False)
+            self.module = self.model.module
+            self.ddp_model = self.model
         else:
-            self.ddp_model = self.local_model
+            self.model = self.local_model
+            self.ddp_model = self.model
 
             # print(self.local_model)
 
-        # self.compiled_model = torch.compile(self.ddp_model)
+        # self.compiled_model = torch.compile(self.model)
         # raise ValueError("")
         self.stability_frequency = stability_frequency
         self.call_count = 0
@@ -78,7 +82,7 @@ class SVDFixingModel(nn.Module):
         self.stable_list = []
 
         num = 0
-        for n, p in self.ddp_model.named_parameters():
+        for n, p in self.model.named_parameters():
             if p.requires_grad:
                 if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
                     # print(f"{n}: {p.numel()}")
@@ -88,7 +92,7 @@ class SVDFixingModel(nn.Module):
         self.svd_modules = []
         calls = 0
         sz = 1 if not dist.is_initialized() else dist.get_world_size()
-        for name, mod in self.ddp_model.named_modules():
+        for name, mod in self.model.named_modules():
             if hasattr(mod, "test_stability_distributed"):
                 working_rank = calls % sz
                 self.svd_modules.append((name, mod, working_rank))
@@ -111,8 +115,6 @@ class SVDFixingModel(nn.Module):
         #     print(fib_epochs)
         # # fib_epochs.pop()
         # # fib_epochs.append(200 - 1)
-        # print(f"fib_epochs {fib_epochs}")
-        # print(self.svd_modules)
         self.optimizer = None  # optimizers.MixedSVDOpt
         self.local_generator = torch.Generator()
         self.local_generator.manual_seed(self.rank)
@@ -130,15 +132,16 @@ class SVDFixingModel(nn.Module):
         #     if reset_optimizer:
         #         optimizer.reset_shapes_of_sigma(model)
         self.all_stable = False
-        self.state_dict = self.ddp_model.state_dict
-        self.parameters = self.ddp_model.parameters
-        self.named_parameters = self.ddp_model.named_parameters
-        self.named_buffers = self.ddp_model.named_buffers
-        self.named_children = self.ddp_model.named_children
-        self.children = self.ddp_model.children
-        self.cuda = self.ddp_model.cuda
-        # TODO: add something here??
-        self.__repr__ = self.ddp_model.__repr__
+        self.state_dict = self.model.state_dict
+        self.parameters = self.model.parameters
+        self.named_parameters = self.model.named_parameters
+        self.named_modules = self.model.named_modules
+        self.named_buffers = self.model.named_buffers
+        self.named_children = self.model.named_children
+        self.children = self.model.children
+        self.cuda = self.model.cuda
+        # TODO: add other methods here??
+        self.__repr__ = self.model.__repr__
 
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer  # optimizers.MixedSVDOpt
@@ -225,12 +228,15 @@ class SVDFixingModel(nn.Module):
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
                 )
+                self.last_layer = [module, name]
+            else:
+                self.first_layer = False
         for n, child in module.named_children():
             module_output.add_module(
                 f"{n}",
                 self._replace_layers(
                     child,
-                    name=f"{n}",
+                    name=f"{name}.{n}" if name is not None else f"{n}",
                     process_group=process_group,
                 ),
             )
@@ -253,8 +259,8 @@ class SVDFixingModel(nn.Module):
                     device = module.q_proj_weight.device
                     dtype = module.q_proj_weight.dtype
             module_output = self.last_layer[0].to(device=device, dtype=dtype)
-        for name, child in module.named_children():
-            module_output.add_module(name, self._reset_last_layer(child, name))
+        for n, child in module.named_children():
+            module_output.add_module(n, self._reset_last_layer(child, f"{name}.{n}" if name is not None else f"{n}"))
         # del module
         return module_output
 
@@ -271,7 +277,7 @@ class SVDFixingModel(nn.Module):
         total = 0
         reset_optimizer = False
         calls = 0
-        for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
+        for c, (name, mod) in enumerate(self.model.named_modules()):
             # try:
             if hasattr(mod, "test_stability"):
                 dist.barrier()
@@ -304,7 +310,7 @@ class SVDFixingModel(nn.Module):
                 if changing_k:
                     reset_optimizer = True
 
-        for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
+        for c, (name, mod) in enumerate(self.model.named_modules()):
             # try:
             if hasattr(mod, "wait_on_kusvh"):
                 mod.wait_on_kusvh()
@@ -314,8 +320,8 @@ class SVDFixingModel(nn.Module):
             # need to re-init DDP to have the correct buckets
             # TODO: this might be a preformance hit
             ddp_time = perf_counter()
-            del self.ddp_model
-            self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+            del self.model
+            self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
             if dist.get_rank() == 0:
                 log.info(f"Reinit DDP. Time takesn: {perf_counter() - ddp_time}")
         if all_stable:
@@ -364,7 +370,7 @@ class SVDFixingModel(nn.Module):
             # need to re-init DDP to have the correct buckets
             # TODO: this might be a preformance hit
             ddp_time = perf_counter()
-            self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+            self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
             if dist.get_rank() == 0:
                 log.info(f"Reinit DDP. Time taken: {perf_counter() - ddp_time}")
         # if all_stable:
@@ -372,7 +378,7 @@ class SVDFixingModel(nn.Module):
         return reset_optimizer, all_stable
 
     @torch.no_grad()
-    def get_perc_params_all_layers(self, module):
+    def get_perc_params_all_layers(self):
         # self.sync_models()
         # if self.skip_stability:
         #     return
@@ -383,7 +389,7 @@ class SVDFixingModel(nn.Module):
         # percs, actives, normals = [], [], []
         full_active = 0
         # print("in perc params")
-        for n, p in self.ddp_model.named_parameters():
+        for n, p in self.model.named_parameters():
             # print(f"{n} {p.requires_grad}")
             if p.requires_grad:
                 # if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
@@ -398,7 +404,7 @@ class SVDFixingModel(nn.Module):
 
     def check_stability_on_count(self, force=False):
         ret = False
-        if self.ddp_model.training:
+        if self.model.training:
             self.call_count += 1
             if force:
                 return self.test_basis_stability_all_layers()
@@ -440,7 +446,7 @@ class SVDFixingModel(nn.Module):
             # self.optimizer.reset_shapes_of_sigma(self)
         self.optimizer.zero_grad(set_to_none=True)
 
-        # self.ddp_model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+        # self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
         # dist.barrier()
 
         # self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
@@ -458,7 +464,7 @@ class SVDFixingModel(nn.Module):
 
     @torch.no_grad()
     def insert_noise(self, noise_level=1e-1):
-        for n, p in self.ddp_model.named_parameters():
+        for n, p in self.model.named_parameters():
             if n.endswith(".s") or n.endswith("_s") and p.requires_grad:
                 # # TODO: remove later if not working
                 # sdiag = torch.diag(self.s).clone()
@@ -493,14 +499,14 @@ class SVDFixingModel(nn.Module):
                 p += (1 / sdiag[0]) * rand / (self.call_count_stability)
 
     def forward(self, inputs):
-        return self.ddp_model(inputs)
+        return self.model(inputs)
 
     @torch.no_grad()
     def track_interior_slices_mlflow(self, config, epoch):
         rank = dist.get_rank() if dist.is_initialized() else 0
         if not config.enable_tracking or rank != 0:
             return
-        # for c, (name, mod) in enumerate(self.ddp_model.named_modules()):
+        # for c, (name, mod) in enumerate(self.model.named_modules()):
         #     # try:
         #     if hasattr(mod, "test_stability"):
         #         slices = mod.get_interior_inner_dim()

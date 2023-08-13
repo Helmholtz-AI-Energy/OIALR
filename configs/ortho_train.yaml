@@ -2,10 +2,10 @@
 
 defaults:
   - _self_
-  - data: imagenet.yaml # mnist.yaml # cifar10.yaml
-  - model: general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml # vit.yaml #
+  - data: imagenet.yaml # cifar10.yaml # mnist.yaml #
+  - model: resnet-rs.yaml  # vit.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
   - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
-  - training: cnn-imagenet.yaml  # svd_trainer.yaml # gsam_trainer.yaml # qr_fix_trainer.yaml #
+  - training: svd_trainer.yaml # cnn-imagenet.yaml  # gsam_trainer.yaml # qr_fix_trainer.yaml #
   - log_dir: default.yaml
   # experiment configs allow for version control of specific configurations
   # e.g. hyperparameters for each combination of model and data
@@ -39,34 +39,3 @@ comm_method: "nccl"
 cpu_training: False
 enable_tracking: True
 tracker: wandb
-
-
-
-# Saving stuff ============================================
-# save_weights: False
-# save_frequency: 1
-# save_layers: null
-# save_parent_folder: /pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/saved_weights
-
-# saving for cicarean:
-# - local_model.model.0.weight
-# - local_model.model.3.weight
-# - local_model.model.6.weight
-# - local_model.model.9.weight
-# - local_model.model.12.weight
-# - local_model.model.15.weight
-
-# saving for ViT
-# - encoder.layers.encoder_layer_0.self_attention.in_proj_weight
-# - encoder.layers.encoder_layer_0.self_attention.out_proj.weight
-# - encoder.layers.encoder_layer_0.mlp.0.weight
-# - encoder.layers.encoder_layer_0.mlp.3.weight
-# - encoder.layers.encoder_layer_2.self_attention.in_proj_weight
-# - encoder.layers.encoder_layer_2.self_attention.out_proj.weight
-# - encoder.layers.encoder_layer_2.mlp.0.weight
-# - encoder.layers.encoder_layer_2.mlp.3.weight
-# - encoder.layers.encoder_layer_5.self_attention.in_proj_weight
-# - encoder.layers.encoder_layer_5.self_attention.out_proj.weight
-# - encoder.layers.encoder_layer_5.mlp.0.weight
-# - encoder.layers.encoder_layer_5.mlp.3.weight
-# - heads.head.weight

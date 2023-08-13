@@ -373,7 +373,7 @@ def imagenet_train_dataset_plus_loader(
         transform = create_transform(
             train_crop_size,
             is_training=True,
-            auto_augment="rand-m9-mstd0.5-inc1",
+            auto_augment="rand-m15-mstd0.5-inc1",
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225),
             crop_pct=0.9,

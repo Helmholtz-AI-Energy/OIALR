@@ -8,7 +8,7 @@ init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: null  # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
 resume_run: False
 
 criterion:
@@ -16,9 +16,9 @@ criterion:
   label_smoothing: 0.1
 
 sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  lr: 1.0e-3
+  lr: 0.4e-3
 
-lr: 1.0e-3
+lr: 0.4e-3
 lr_reset_period: 3
 lr_schedule:
   _target_: null
@@ -37,6 +37,10 @@ lr_schedule:
   lr_cycle_decay: 0.1  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
   lr_k_decay: 1.  # default
   sched_on_updates: True
+
+sync_batchnorm: True
+
+mixup: False
 
 optimizer:
   # _target_: torch.optim.SGD

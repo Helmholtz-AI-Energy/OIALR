@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 300
+epochs: 350
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -8,7 +8,7 @@ init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: null  # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+checkpoint_out_root: # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
 resume_run: False
 
 criterion:
@@ -16,16 +16,16 @@ criterion:
   label_smoothing: 0.1
 
 sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  lr: 0.1
+  lr: 3.0e-3
 
-lr: 0.1
+lr: 3.0e-3
 lr_reset_period: 3
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   sched: cosine  # cosine LR scheduler from timm
-  # epochs: 100  # number of epochs for the cycle to run for
-  warmup_epochs: 20
+  # epochs: 5  # number of epochs for the cycle to run for
+  warmup_epochs: 40
   cooldown_epochs: 10
   # patience_epochs: 10  # only useful for Plateau LR scheduler
   # decay_rate: 0.5
@@ -34,20 +34,21 @@ lr_schedule:
   warmup_prefix: True  # default
   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
   lr_cycle_limit: 1000
-  lr_cycle_decay: 0.1  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+  lr_cycle_decay: 0.75  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
   lr_k_decay: 1.  # default
   sched_on_updates: True
 
 optimizer:
-  _target_: torch.optim.SGD
-  _partial_: True
-  weight_decay: 1e-5
-  momentum: 0.9
-  # _target_: torch.optim.Adam
+  # _target_: torch.optim.SGD
   # _partial_: True
+  # weight_decay: 1e-5
+  # momentum: 0.9
+  _target_: torch.optim.Adam
+  _partial_: True
   # weight_decay: 0.05
   # fused: True
-max_grad_norm: -1.0
+max_grad_norm: 1.0
+sync_batchnorm: True
 
 init_opt_with_model: False
 print_freq: 50
@@ -68,8 +69,8 @@ svd_epoch_freq: 10
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 1000
-  delay: 200
+  stability_frequency: 500
+  delay: 2000
   uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.1
   sync_usv: False

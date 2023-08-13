@@ -107,8 +107,8 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             n = weight_shape[0]
             m = weight_shape[1] * weight_shape[2] * weight_shape[3]
 
-        if dist.get_rank() == 0:
-            print(m, k, n, self.trans)
+        # if dist.get_rank() == 0:
+        #     print(m, k, n, self.trans)
         self.u = torch.zeros((m, k), **factory_kwargs)
         self.vh = torch.zeros(k if not full_rank_sigma else (k, k), **factory_kwargs)
         self.s = torch.zeros((k, n), **factory_kwargs)
@@ -440,7 +440,8 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             # change of plans: start USVh communcation in the wait function just like the other cases
             # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
             log.info(
-                f"{name[-30:]}: 1st stability, csmean: None, params: 100%, [{self.weight.shape[0]}, {self.weight.shape[1]}]",
+                f"{name[-30:]}: 1st stability, csmean: None, params: 100%, "
+                f"[{self.weight.shape[0]}, {self.weight.shape[1] * self.weight.shape[2] * self.weight.shape[3]}]",
             )
             # return
         elif self.full_rank_sigma and self.uvh_stable and self.update_from_simga:

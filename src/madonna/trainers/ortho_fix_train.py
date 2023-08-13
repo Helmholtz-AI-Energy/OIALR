@@ -16,6 +16,7 @@ import mlflow.pytorch
 # from pstats import SortKey
 # pr = cProfile.Profile()
 import omegaconf
+import timm
 import torch
 import torch.backends.cudnn as cudnn
 import torch.distributed as dist
@@ -92,29 +93,34 @@ def main(config):  # noqa: C901
     if not config.cpu_training:
         model.cuda(gpu)
     # print('before model wrapping')
+    if config.training.sync_batchnorm:
+        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).to(device)
 
     # TODO: fix model repr
     if not config.baseline:
         model_hold = hydra.utils.instantiate(config.training.fixing_method)
         model = model_hold(model).to(device)
-        if dist.get_rank() == 0:
-            print(model.ddp_model)
+        log.info("using SVD model")
+        # if dist.get_rank() == 0:
+        #     print(model.model)
     elif dist.is_initialized():
         model = DDP(model)  # , device_ids=[config.rank])
-        if dist.get_rank() == 0:
-            print(model)
+        log.info("using DDP baseline model")
+        # if dist.get_rank() == 0:
+        #     print(model)
     else:
-        print(model)
+        log.info("using baseline 1 process model")
+        # print(model)
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.lr)
-    if not config.baseline:
-        madonna.models.utils.change_optimizer_group_for_svd(optimizer, model=model.ddp_model, config=config)
-        # params = model.ddp_model.parameters()
-        ddp_model = model.ddp_model
-    else:
-        # params = model.parameters()
-        ddp_model = model
+    # if not config.baseline:
+    #     madonna.models.utils.change_optimizer_group_for_svd(optimizer, model=model.model, config=config)
+    #     # params = model.model.parameters()
+    #     ddp_model = model.model
+    # else:
+    #     # params = model.parameters()
+    #     ddp_model = model
 
     # set optimizer for references for SVD model to reset shapes of state params
     if not config.baseline:
@@ -143,7 +149,7 @@ def main(config):  # noqa: C901
                 checkpoint = torch.load(config.training.checkpoint, map_location=loc)
             start_epoch = checkpoint["epoch"]
 
-            ddp_model.load_state_dict(checkpoint["state_dict"])
+            model.load_state_dict(checkpoint["state_dict"])
             optimizer.load_state_dict(checkpoint["optimizer"])
             scheduler.load_state_dict(checkpoint["scheduler"])
             print(
@@ -188,8 +194,9 @@ def main(config):  # noqa: C901
         model_name = config.model.name
         dataset_name = config.data.dataset
         out_base /= "baseline" if config.baseline else "svd"
-        out_base = out_base / f"{model_name}-{dataset_name}" / "1gpu"
+        out_base = out_base / f"{model_name}-{dataset_name}" / f"bs-{config.data.local_batch_size * config.world_size}"
         out_base.mkdir(parents=True, exist_ok=True)
+        log.info(f"Saving model to: {out_base}")
 
     # # if config['evaluate']:
     # #     validate(val_loader, dlrt_trainer, config)
@@ -329,7 +336,7 @@ def main(config):  # noqa: C901
         # log the percentage of params in use
         if config.rank == 0 and not config.baseline:
             if hasattr(model, "get_perc_params_all_layers"):
-                perc, trainable, normal = model.get_perc_params_all_layers(module=model.ddp_model)
+                perc, trainable, normal = model.get_perc_params_all_layers()
                 if config.enable_tracking:
                     # mlflow.log_metric("perc_parmas", perc, step=epoch)
                     wandb.log({"perc_parmas": perc}, step=(epoch + 1) * len_train)
@@ -358,8 +365,8 @@ def main(config):  # noqa: C901
                 save_dict["call_count"] = model.call_count
             torch.save(save_dict, filename)
             log.info(f"Checkpoint to file {filename}")
-
         # set up next epoch after saving everything
+        wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)
 
 
@@ -461,7 +468,7 @@ def train(
                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
         scaler.scale(loss).backward()
-        md = model if config.baseline else model.ddp_model
+        # md = model if config.baseline else model.model
         # TODO: move this back into the if block with scaling
 
         # grads = [p.grad for p in model.parameters() if p.grad is not None]
@@ -485,7 +492,7 @@ def train(
 
         if config.training.max_grad_norm != -1:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(md.parameters(), config.training.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
 
         scaler.step(optimizer)
         scaler.update()
@@ -726,7 +733,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
         )
         aux_val_loader = torch.utils.data.DataLoader(
             aux_val_dataset,
-            batch_size=config["local_batch_size"],
+            batch_size=config.data["local_batch_size"],
             shuffle=False,
             num_workers=config["workers"],
             pin_memory=True,

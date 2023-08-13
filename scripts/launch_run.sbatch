@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # Slurm job configuration
-#SBATCH --nodes=4
+#SBATCH --nodes=8
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=05:00:00
+#SBATCH --time=08:00:00
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
@@ -36,7 +36,7 @@ export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
 # export TOMOUNT+="/home/kit/scc/qv2382/"
 
 SRUN_PARAMS=(
-  --mpi="pmi2"
+  --mpi="pmix"
 #  --ntasks-per-node=4
   # --gpus-per-task=4
   --cpus-per-task=8
