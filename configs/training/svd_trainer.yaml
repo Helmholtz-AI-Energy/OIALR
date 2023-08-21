@@ -9,7 +9,9 @@ init_ddp: True
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
 checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+save_period: 10
 resume_run: False
+resume: False  # TODO: are both of these needed??
 
 criterion:
   _target_: torch.nn.CrossEntropyLoss
@@ -18,14 +20,14 @@ criterion:
 sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
   lr: 0.4e-3
 
-lr: 0.4e-3
+lr: 1.0e-3
 lr_reset_period: 3
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   sched: cosine  # cosine LR scheduler from timm
-  # epochs: 100  # number of epochs for the cycle to run for
-  warmup_epochs: 40
+  # epochs: 50  # number of epochs for the cycle to run for
+  warmup_epochs: 80
   cooldown_epochs: 10
   # patience_epochs: 10  # only useful for Plateau LR scheduler
   # decay_rate: 0.5
@@ -33,8 +35,8 @@ lr_schedule:
   warmup_lr: 1.0e-5  # starting point of warmup
   warmup_prefix: True  # default
   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
-  lr_cycle_limit: 1000
-  lr_cycle_decay: 0.1  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+  lr_cycle_limit: 500
+  lr_cycle_decay: 0.9  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
   lr_k_decay: 1.  # default
   sched_on_updates: True
 
@@ -48,27 +50,28 @@ optimizer:
   # momentum: 0.1
   # weight_decay: 1.0e-5
   # nesterov: True
-  _target_: torch.optim.Adam
+  _target_: torch.optim.AdamW
   _partial_: True
-  # weight_decay: 0.05
+  # weight_decay: 0.0001
   # fused: True
-max_grad_norm: 1.0
+max_grad_norm: 1.
 
 init_opt_with_model: False
 print_freq: 50
 
-svd_epoch_delay: 20
-svd_epoch_freq: 10
+svd_epoch_delay: 0
+svd_epoch_freq: 1
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
   stability_frequency: 100
   delay: 200
   uvhthreshold: 0.99
-  sigma_cutoff_fraction: 0.1
-  sync_usv: False
+  sigma_cutoff_fraction: 0.25
   full_rank_sigma: True
   keep_first_layer: False
   keep_last_layer: True
   update_from_simga: True
   reinit_shapes: True
+  stable_update_delay: 0
+  create_svd_param_group: one  # null or one

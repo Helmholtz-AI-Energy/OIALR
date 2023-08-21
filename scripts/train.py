@@ -94,15 +94,15 @@ def main(config: DictConfig):
             # hydra.utils.call(config.training.script, config)
             fn(config)
     elif rank == 0 and config.enable_tracking and config.tracker == "wandb":
-        wandb.login()
-        wandb.init(
-            name=str(config.name),
-            project=str(config.tracking.project),
-            config=OmegaConf.to_container(config),
-            group=f"{config.data.dataset}-{config.model.name}",
-        )
+        # wandb.login()
+        # wandb.init(
+        #     name=str(config.name),
+        #     project=str(config.tracking.project),
+        #     config=OmegaConf.to_container(config),
+        #     group=f"{config.data.dataset}-{config.model.name}",
+        # )
         fn(config)
-        wandb.finish()
+        # wandb.finish()
     else:
         # hydra.utils.call(config.training.script, config)
         fn(config)

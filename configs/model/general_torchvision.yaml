@@ -1,6 +1,6 @@
 model:
   _target_: madonna.models.get_tv_model
   pretrained: False
-  name: efficientnet_v2_s
-name: efficientnet_v2_s
+  name: resnet18
+name: resnet18
 autocast: True

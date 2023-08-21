@@ -1,24 +1,30 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import mlflow
+import torch
+import yaml
 from mlflow.entities import Experiment
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 import wandb
+from wandb import finish, init
 
 from .utils import only_on_rank_n
 
+WANDB_ARTIFACT_PREFIX = "wandb-artifact://"
 uc2 = socket.gethostname().startswith("uc2")
 horeka = socket.gethostname().startswith("hkn")
 
-__all__ = ["setup_mlflow"]
+# __all__ = ["setup_mlflow"]
 
 
 @only_on_rank_n(run_on_rank=0)
@@ -158,3 +164,123 @@ def log_config_wandb(config, keys=None):  # noqa: E302
             else:
                 lpkeys = f"{k}"
             wandb.log(lpkeys, config[k])
+
+
+def remove_prefix(from_string, prefix=WANDB_ARTIFACT_PREFIX):
+    return from_string[len(prefix) :]
+
+
+def get_run_info(run_path):
+    run_path = Path(remove_prefix(run_path, WANDB_ARTIFACT_PREFIX))
+    run_id = run_path.stem
+    project = run_path.parent.stem
+    model_artifact_name = "run_" + run_id + "_model"
+    return run_id, project, model_artifact_name
+
+
+def check_wandb_resume(config):
+    if config.training.resume:
+        if config.training.checkpoint.startswith(WANDB_ARTIFACT_PREFIX):
+            if config.global_rank not in [-1, 0]:  # For resuming DDP runs
+                run_id, project, model_artifact_name = get_run_info(config.training.checkpoint)
+                api = wandb.Api()
+                artifact = api.artifact(project + "/" + model_artifact_name + ":latest")
+                modeldir = artifact.download()
+                config.weights = str(Path(modeldir) / "last.pt")
+            return True
+    return None
+
+
+class WandbLogger:
+    def __init__(self, config, job_type="Training"):
+        # Pre-training routine --
+        self.job_type = job_type
+        self.wandb, self.wandb_run = wandb, wandb.run
+        primative = OmegaConf.to_container(config, resolve=True)
+        if isinstance(config.training.checkpoint, str):  # checks resume from artifact
+            if config.training.checkpoint.startswith(WANDB_ARTIFACT_PREFIX):
+                run_id, project, model_artifact_name = get_run_info(config.training.checkpoint)
+                model_artifact_name = WANDB_ARTIFACT_PREFIX + model_artifact_name
+                assert wandb, "install wandb to resume wandb runs"
+                # Resume wandb-artifact:// runs here| workaround for not overwriting wandb.config
+                self.wandb_run = wandb.init(
+                    id=run_id,
+                    project=project,
+                    resume="allow",
+                    group=f"{config.data.dataset}-{config.model.name}",
+                )
+                config = self.wandb_run.config
+                config.training.checkpoint = model_artifact_name
+
+        elif self.wandb:
+            # init for new run
+            # project='YOLOR' if config.tracking.project == 'runs/train' else Path(config.tracking.project_name).stem,
+            self.wandb_run = wandb.init(
+                config=primative,
+                resume="allow",
+                project=config.tracking.project,
+                name=config.name,
+                job_type=job_type,
+                # id=run_id,
+                group=f"{config.data.dataset}-{config.model.name}",
+            )
+        if self.job_type == "Training":
+            self.data_dict = self.setup_training(config)
+        self.config = config
+
+    def setup_training(self, config):
+        self.log_dict, self.current_epoch = {}, 0  # Logging Constants
+
+        if isinstance(config.training.resume, str):
+            modeldir, _ = self.download_model_artifact(config)
+            if modeldir:
+                self.weights = Path(modeldir) / "last.pt"
+                OmegaConf.update(config, self.wandb_run.config, merge=True)
+
+    def download_model_artifact(self, config):
+        if config.training.checkpoint.startswith(WANDB_ARTIFACT_PREFIX):
+            model_artifact = wandb.use_artifact(
+                remove_prefix(config.training.checkpoint, WANDB_ARTIFACT_PREFIX) + ":latest",
+            )
+            assert model_artifact is not None, "Error: W&B model artifact doesn't exist"
+            modeldir = model_artifact.download()
+            epochs_trained = model_artifact.metadata.get("epochs_trained")
+            total_epochs = model_artifact.metadata.get("total_epochs")
+            assert epochs_trained < total_epochs, f"training to {total_epochs} epochs is finished, nothing to resume."
+            return modeldir, model_artifact
+        return None, None
+
+    def log_model(self, path, config, epoch, fitness_score, best_model=False):
+        model_artifact = wandb.Artifact(
+            "run_" + wandb.run.id + "_model",
+            type="model",
+            metadata={
+                "original_url": str(path),
+                "epochs_trained": epoch + 1,
+                "project": config.tracking.project,
+                "total_epochs": config.training.epochs,
+                "fitness_score": fitness_score,
+            },
+        )
+        model_artifact.add_file(str(path / "last.pt"), name="last.pt")
+        wandb.log_artifact(
+            model_artifact,
+            aliases=["latest", "epoch " + str(self.current_epoch), "best" if best_model else ""],
+        )
+        print("Saving model artifact on epoch ", epoch + 1)
+
+    def log(self, log_dict):
+        if self.wandb_run:
+            for key, value in log_dict.items():
+                self.log_dict[key] = value
+
+    def end_epoch(self, best_result=False):
+        if self.wandb_run:
+            wandb.log(self.log_dict)
+            self.log_dict = {}
+
+    def finish_run(self):
+        if self.wandb_run:
+            if self.log_dict:
+                wandb.log(self.log_dict)
+            wandb.run.finish()

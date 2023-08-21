@@ -104,7 +104,7 @@ def change_sgd_shapes(optimizer):
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
 
-def change_optimizer_group_for_svd(optimizer: optim.Optimizer, model, config):
+def create_svd_param_groups(optimizer: optim.Optimizer, model, individual_groups=False):
     # make 3 optimizer groups within an optimizer
     #   non-2d, weights, svd
     params_non2d, params_weights, params_sigma = [], [], []
@@ -118,27 +118,27 @@ def change_optimizer_group_for_svd(optimizer: optim.Optimizer, model, config):
             sigma_param_index.append(c)
         elif n.endswith(("_u", ".u", "_vh", ".vh")):
             continue
-        elif n.endswith("weight") and p.ndim == 2:
+        elif n.endswith("weight") and (p.ndim == 2 or p.ndim == 4):  # 4 for convs
             params_weights.append(p)
         else:
             params_non2d.append(p)
-    if config.training.fixing_method.keep_last_layer:
-        last = params_weights.pop()
-        params_non2d.append(last)
+    # if config.training.fixing_method.keep_last_layer:
+    #     last = params_weights.pop()
+    #     params_non2d.append(last)
 
     # get optimizer kwargs from config
-    opt_kwargs = dict(config.training.optimizer)
-    try:  # remove the target and partial flags - Hydra specific stuff
-        del opt_kwargs["_target_"]
-        del opt_kwargs["_partial_"]
-    except AttributeError:
-        pass
+    opt_kwargs = optimizer.param_groups[0]
+    opt_kwargs.pop("params")
+    # opt_kwargs = dict(config.training.optimizer)
+    # try:  # remove the target and partial flags - Hydra specific stuff
+    #     del opt_kwargs["_target_"]
+    #     del opt_kwargs["_partial_"]
+    # except AttributeError:
+    #     pass
     # delete the current parameter groups
-    opt_kwargs["lr"] = config.training.lr
+    # opt_kwargs["lr"] = config.training.lr
     optimizer.param_groups = []
     # add the groups 0 -> non2d
     optimizer.add_param_group({"params": params_non2d, **opt_kwargs})
     optimizer.add_param_group({"params": params_weights, **opt_kwargs})
-    if config.training.sigma_optimizer.lr is not None:
-        opt_kwargs["lr"] = config.training.sigma_optimizer.lr
     optimizer.add_param_group({"params": params_sigma, **opt_kwargs})

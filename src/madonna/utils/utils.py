@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import glob
 import logging
+import re
 from functools import wraps
+from pathlib import Path
 from typing import Any, Callable, List, Tuple, Union
 
 import torch
@@ -65,6 +68,19 @@ def change_batchnorm_tracking(model: nn.Module, tracking=False):
             # child.training = tracking
             # child.affine = tracking
         change_batchnorm_tracking(child, tracking)
+
+
+def increment_path(path, exist_ok=True, sep=""):
+    # Increment path, i.e. runs/exp --> runs/exp{sep}0, runs/exp{sep}1 etc.
+    path = Path(path)  # os-agnostic
+    if (path.exists() and exist_ok) or (not path.exists()):
+        return str(path)
+    else:
+        dirs = glob.glob(f"{path}{sep}*")  # similar paths
+        matches = [re.search(rf"%s{sep}(\d+)" % path.stem, d) for d in dirs]
+        i = [int(m.groups()[0]) for m in matches if m]  # indices
+        n = max(i) + 1 if i else 2  # increment number
+        return f"{path}{sep}{n}"  # update path
 
 
 def roll_orthogonal_values(

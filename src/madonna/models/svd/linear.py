@@ -66,7 +66,6 @@ class SVDLinear(nn.Module):
         dtype=None,
         uvhthreshold: float = 0.9,
         sigma_cutoff_fraction: float = 0.1,
-        sync_usv: bool = False,
         full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
@@ -117,7 +116,6 @@ class SVDLinear(nn.Module):
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.sync_usv = sync_usv
         # self.u_stable = False
         self.uvh_stable = False
         self.u_prev = None
@@ -425,6 +423,8 @@ class SVDLinear(nn.Module):
         self.vh.zero_()
         self.vh.add_(holdvh)
         self.s.zero_()
+        # self.s.add_(torch.randn_like(self.s) * torch.finfo(self.s.dtype).eps)
+        # self.s.fill_diagonal_(0)
         self.s.add_(torch.diag(sig))
         # to be safe: set weight to be the same here too
         # w = torch.linalg.multi_dot([self.u, self.s, self.vh])
@@ -610,7 +610,7 @@ class SVDLinear(nn.Module):
             self.wait_s = None
         if self.wait_vh is not None:
             self.wait_vh.wait()
-            self.wait_u = None
+            self.wait_vh = None
 
     def get_interior_inner_dim(self):
         return {

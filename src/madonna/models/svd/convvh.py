@@ -31,7 +31,7 @@ _pair = _ntuple(2, "_pair")
 log = logging.getLogger(__name__)
 
 
-class SVDConv2d(nn.modules.conv._ConvNd):
+class SVDConv2dVh(nn.modules.conv._ConvNd):
     __doc__ = r"""
     TODO: link to torch conv2D docs
     add other docs about this function itself
@@ -52,6 +52,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         dtype=None,
         uvhthreshold: float = 0.9,
         sigma_cutoff_fraction: float = 0.1,
+        sync_usv: bool = False,
         full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
@@ -109,25 +110,23 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         # if dist.get_rank() == 0:
         #     print(m, k, n, self.trans)
         self.u = torch.zeros((m, k), **factory_kwargs)
-        self.vh = torch.zeros(k if not full_rank_sigma else (k, k), **factory_kwargs)
-        self.s = torch.zeros((k, n), **factory_kwargs)
+        self.s = torch.zeros(k if not full_rank_sigma else (k, k), **factory_kwargs)
+        self.vh = torch.zeros((k, n), **factory_kwargs)
+        self.svh = torch.zeros((k, n), **factory_kwargs)
 
         self.u = nn.Parameter(self.u, requires_grad=False)
         self.s = nn.Parameter(self.s, requires_grad=False)
         self.vh = nn.Parameter(self.vh, requires_grad=False)
+        self.svh = nn.Parameter(self.svh, requires_grad=False)
 
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        # self.u_stable = False
+        self.sync_usv = sync_usv
         self.uvh_stable = False
-        self.u_prev = None
-        # self.vh_stable = False
-        self.vh_prev = None
-        self.s_prev = None
         self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
-        self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
+        self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh, self.wait_svh = None, None, None, None, None
 
         if dist.is_initialized():
             self.rank = dist.get_rank()
@@ -169,10 +168,8 @@ class SVDConv2d(nn.modules.conv._ConvNd):
                 ret = ret.T
             return ret
 
-        u, vh = self.u, self.vh
-        s = self.s if self.full_rank_sigma else torch.diag(self.s)
-        w = torch.linalg.multi_dot([u, s, vh])
-        return w
+        u, svh = self.u, self.svh
+        return u @ svh
 
     def get_weight(self, for_svd=False):
         if not self.uvh_stable:
@@ -186,20 +183,16 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             return self.weight
         # detach sets 'requires grad' to False
         if self.training:
-            self.s.requires_grad = True
+            self.svh.requires_grad = True
             if self.uvh_stable:
                 self.u.requires_grad = False
+                self.s.requires_grad = False
                 self.vh.requires_grad = False
                 self.weight.requires_grad = False
 
                 # self.bias.requires_grad = False
-        u, vh = self.u, self.vh
-        # u = self.u.detach() if self.u_stable else self.u
-        # vh = self.vh.detach() if self.vh_stable else self.vh
-
-        s = self.s if self.full_rank_sigma else torch.diag(self.s)
-
-        w = torch.linalg.multi_dot([u, s, vh])
+        u, svh = self.u, self.svh
+        w = u @ svh
         if self.trans:
             w = w.T
 
@@ -253,8 +246,10 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
             if self.full_rank_sigma:
                 self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+                self.svh.set_((self.s @ self.vh).contiguous())
             else:
                 self.s.set_(self.s[: self.inner_dim])
+                self.svh.set_((torch.diag(self.s) @ self.vh).contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
@@ -262,6 +257,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
                 self.s[self.inner_dim :, self.inner_dim :].mul_(0)
             else:
                 self.s[self.inner_dim :].mul_(0)
+            self.svh.set_(self.s @ self.vh)
 
     @torch.no_grad()
     def _first_stability(self):
@@ -279,9 +275,6 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         vh = vh.to(dtp)
         uvh = u @ vh
 
-        print(f"usvh - w {u.shape} {s.shape} {vh.shape} - {w.shape}")
-        print(f"usvh - tra {self.u.shape} {self.s.shape} {self.vh.shape} {self.trans}")
-
         self.prev_uvh = uvh
         self.u.zero_()
         self.u.add_(u)
@@ -289,6 +282,8 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         self.s.add_(torch.diag(s) if self.full_rank_sigma else s)
         self.vh.zero_()
         self.vh.add_(vh)
+        self.svh.zero_()
+        self.svh.add_(torch.diag(s) @ vh)
 
         self.inner_dim = self.inner_dim.to(device=s.device)
 
@@ -321,17 +316,20 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             self.u.add_(u)
             self.vh.zero_()
             self.vh.add_(vh)
+            self.svh.zero_()
             if self.full_rank_sigma:
                 self.s.zero_()
                 self.s[: self.inner_dim, : self.inner_dim].add_(torch.diag(s[: self.inner_dim]))
             else:
                 self.s.zero_()
                 self.s[: self.inner_dim].add_(s[: self.inner_dim])
+            self.svh.add_(torch.diag(s) @ vh)
 
             self.weight.requires_grad = False
             self.u.requires_grad = False
             self.vh.requires_grad = False
-            self.s.requires_grad = True
+            self.s.requires_grad = False
+            self.svh.requires_grad = True
             change_k = self._update_inner_dim_and_shapes()
         return {"csmean": csmean, "change_k": change_k}
 
@@ -343,27 +341,22 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         # if self.rank == working_rank:
         # log.info("in full rank sigma update of usvh")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
-        s = self.s.to(torch.float32)
-        usig, sig, vhsig = torch.linalg.svd(s)  # square mat, full mat arg doesnt matter
-        usig = usig.to(self.s.dtype)
-        sig = sig.to(self.s.dtype)
-        vhsig = vhsig.to(self.s.dtype)
-
+        svh = self.svh.to(torch.float32)
+        usig, sig, vhsig = torch.linalg.svd(svh, full_matrices=False)
+        usig = usig.to(self.svh.dtype)
+        sig = sig.to(self.svh.dtype)
+        vhsig = vhsig.to(self.svh.dtype)
+        # print(f"{self.u.shape}, {self.s.shape}, {self.vh.shape}, {self.svh.shape}")
+        # print(f"{svh.shape}, {usig.shape}, {sig.shape}, {vhsig.shape}")
         holdu = self.u @ usig
         self.u.zero_()
         self.u.add_(holdu)
-        holdvh = vhsig @ self.vh
-        self.vh.zero_()
-        self.vh.add_(holdvh)
         self.s.zero_()
-        # self.s.add_(torch.randn_like(self.s) * torch.finfo(self.s.dtype).eps)
-        # self.s.fill_diagonal_(0)
         self.s.add_(torch.diag(sig))
-        # to be safe: set weight to be the same here too
-        # w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        # ret = w.T if self.trans else w
-        # self.weight *= 0
-        # self.weight += ret
+        self.vh.zero_()
+        self.svh.zero_()
+        self.vh.add_(vhsig)
+        self.svh.add_(self.s @ vhsig)
 
         # normal update from cosine similarity stuff
         # uvh = self.u @ self.vh
@@ -373,11 +366,13 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         # self.prev_uvh.add_(uvh)
         csmean = 1.0
 
+        # change_k = False
         self.uvh_stable = True
         self.weight.requires_grad = False
         self.u.requires_grad = False
         self.vh.requires_grad = False
-        self.s.requires_grad = True
+        self.s.requires_grad = False
+        self.svh.requires_grad = True
         change_k = False
         if csmean >= self.uvhthreshold:
             change_k = self._update_inner_dim_and_shapes()
@@ -512,7 +507,8 @@ class SVDConv2d(nn.modules.conv._ConvNd):
                 self.weight.grad = None
                 self.u.requires_grad = False
                 self.vh.requires_grad = False
-                self.s.requires_grad = True
+                self.s.requires_grad = False
+                self.svh.requires_grad = True
         reset_optimizer = bool(self.inner_dim_buffer[2].item())
         stable = self.inner_dim_buffer[1] >= self.uvhthreshold
         self.inner_dim_buffer *= 0
@@ -527,6 +523,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         self.wait_u = dist.broadcast(self.u, src=src, async_op=nonblocking)
         self.wait_s = dist.broadcast(self.s, src=src, async_op=nonblocking)
         self.wait_vh = dist.broadcast(self.vh, src=src, async_op=nonblocking)
+        self.wait_svh = dist.broadcast(self.svh, src=src, async_op=nonblocking)
 
     @torch.no_grad()
     def wait_on_usvh(self):
@@ -538,7 +535,10 @@ class SVDConv2d(nn.modules.conv._ConvNd):
             self.wait_s = None
         if self.wait_vh is not None:
             self.wait_vh.wait()
-            self.wait_u = None
+            self.wait_vh = None
+        if self.wait_svh is not None:
+            self.wait_svh.wait()
+            self.wait_svh = None
 
     def get_interior_inner_dim(self):
         return {
@@ -567,9 +567,7 @@ class SVDConv2d(nn.modules.conv._ConvNd):
         normal_params = self.weight.numel()
         bias_params = 0 if self.bias is None else self.bias.numel()
         if self.uvh_stable:
-            trainable_params = self.inner_dim
-            if self.full_rank_sigma:
-                trainable_params = trainable_params**2
+            trainable_params = self.svh.numel()
         else:
             trainable_params = normal_params
         trainable_params += bias_params

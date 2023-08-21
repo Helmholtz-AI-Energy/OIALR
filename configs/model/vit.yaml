@@ -11,7 +11,7 @@ model: # vit_b_16
   mlp_dim: 3072 # default: 3072
   # dropout: 0.1
   # attention_dropout: 0.05
-#  num_classes: 1000,
+  num_classes: null  # get this from datasets -> classes
 name: vit_b_16
 autocast: True
 #model:  # vit_b_32

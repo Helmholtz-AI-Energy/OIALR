@@ -28,6 +28,8 @@ from rich.console import Console
 from torch.autograd.grad_mode import no_grad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
+from torchmetrics import MetricCollection, Precision, Recall
+from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import madonna
 import wandb
@@ -64,6 +66,30 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
+    if config.tracker == "wandb":
+        wandb_run = madonna.utils.tracking.check_wandb_resume(config)
+    if config.training.resume and not wandb_run:  # resume an interrupted run
+        ckpt = config.training.checkpoint
+        assert os.path.isfile(ckpt), "ERROR: --resume checkpoint does not exist"
+    with omegaconf.open_dict(config):
+        config.save_dir = madonna.utils.utils.increment_path(
+            Path(config.training.checkpoint_out_root) / config.name,
+        )  # increment run
+    if config.rank == 0:
+        log.info(f"save_dir: {config.save_dir}")
+
+    save_dir = Path(config.save_dir)
+
+    # Directories
+    wdir = save_dir / "weights"
+    wdir.mkdir(parents=True, exist_ok=True)  # make dir
+    log.info(f"out_dir (wdir): {wdir}")
+    last = wdir / "last.pt"
+    best = wdir / "best.pt"
+    # results_file = save_dir / 'results.txt'
+    # f = open(results_file, 'w')
+    wandb_logger = madonna.utils.tracking.WandbLogger(config) if config.rank == 0 and config.enable_tracking else None
+
     if config.seed is not None:
         cudnn.benchmark = True
         cudnn.deterministic = True
@@ -140,7 +166,7 @@ def main(config):  # noqa: C901
     # optionally resume from a checkpoint
     # Reminder: when resuming from a single checkpoint, make sure to call init_model with
     start_epoch = config.training.start_epoch
-    if config.training.checkpoint is not None:
+    if config.training.checkpoint is not None:  # TODO: FIXME!!
         if os.path.isfile(config.training.checkpoint):
             print(f"=> loading checkpoint: {config.training.checkpoint}")
             if torch.cuda.is_available():
@@ -188,37 +214,48 @@ def main(config):  # noqa: C901
     #         warmup_scheduler.sigma_add * start_epoch
     #     )
 
-    out_base = None
-    if "checkpoint_out_root" in config.training and config.training.checkpoint_out_root is not None:
-        out_base = Path(config.training.checkpoint_out_root)
-        model_name = config.model.name
-        dataset_name = config.data.dataset
-        out_base /= "baseline" if config.baseline else "svd"
-        out_base = out_base / f"{model_name}-{dataset_name}" / f"bs-{config.data.local_batch_size * config.world_size}"
-        out_base.mkdir(parents=True, exist_ok=True)
-        log.info(f"Saving model to: {out_base}")
+    # out_base = None
+    # if "checkpoint_out_root" in config.training and config.training.checkpoint_out_root is not None:
+    #     out_base = Path(config.training.checkpoint_out_root)
+    #     model_name = config.model.name
+    #     dataset_name = config.data.dataset
+    #     out_base /= "baseline" if config.baseline else "svd"
+    #     out_base = out_base / f"{model_name}-{dataset_name}" / f"bs-{config.data.local_batch_size * config.world_size}"
+    #     out_base.mkdir(parents=True, exist_ok=True)
+    #     log.info(f"Saving model to: {out_base}")
 
     # # if config['evaluate']:
     # #     validate(val_loader, dlrt_trainer, config)
     # #     return
-    #
+
+    train_metrics = MetricCollection(
+        [
+            MulticlassF1Score(task="multiclass", num_classes=config.data.classes),
+            MulticlassPrecision(task="multiclass", num_classes=config.data.classes),
+            MulticlassRecall(task="multiclass", num_classes=config.data.classes),
+        ],
+    ).to(device)
+    val_metrics = MetricCollection(
+        [
+            MulticlassF1Score(task="multiclass", num_classes=config.data.classes),
+            MulticlassPrecision(task="multiclass", num_classes=config.data.classes),
+            MulticlassRecall(task="multiclass", num_classes=config.data.classes),
+        ],
+    ).to(device)
 
     scaler = torch.cuda.amp.GradScaler(enabled=config.model.autocast)
     rank = dist.get_rank() if dist.is_initialized() else 0
-    # try:
-    #     warmup_steps = config.training.lr_warmup.warmup_period
-    # except omegaconf.errors.ConfigAttributeError:
-    #     log.info("No number of warmup steps specified")
 
     refactory_warmup = None
     len_train = len(train_loader)
+    best_fitness = 0.0
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
             # console.rule(f"Begin epoch {epoch} LR: {optimizer.param_groups[0]['lr']}")
             lr_list, prnt_str = get_lrs(optimizer)
             log.info(f"Begin epoch {epoch} LRs: {prnt_str}")
-            metrics = {"lr": lr_list[0]}
+            lrs = {"lr": lr_list[0]}
             # if not config.baseline:
             #     metrics["sigma_lr"] = lr_dict["sigma"]
             # mlflow.log_metrics(
@@ -226,7 +263,8 @@ def main(config):  # noqa: C901
             #     step=epoch,
             # )
             if config.enable_tracking:
-                wandb.log(metrics, step=epoch * len_train)
+                # wandb_logger.log(metrics, step=epoch * len_train)
+                wandb_logger.log(lrs)
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -265,6 +303,8 @@ def main(config):  # noqa: C901
             # sigma_lrs={"sched": sigma_sched, "warmup": sigma_warmup},
             refactory_warmup=refactory_warmup,
             mixup=dset_dict["mixup"],
+            wandb_logger=wandb_logger,
+            metrics=train_metrics,
         )
         if (
             not config.baseline
@@ -316,7 +356,7 @@ def main(config):  # noqa: C901
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        _, val_loss = validate(
+        t1, val_loss = validate(
             val_loader=val_loader,
             model=model,
             criterion=criterion,
@@ -326,6 +366,8 @@ def main(config):  # noqa: C901
             print_on_rank=config.rank == 0,
             pg=None,
             len_train=len_train,
+            wandb_logger=wandb_logger,
+            metrics=val_metrics,
         )
 
         if config.rank == 0:
@@ -339,35 +381,79 @@ def main(config):  # noqa: C901
                 perc, trainable, normal = model.get_perc_params_all_layers()
                 if config.enable_tracking:
                     # mlflow.log_metric("perc_parmas", perc, step=epoch)
-                    wandb.log({"perc_parmas": perc}, step=(epoch + 1) * len_train)
+                    wandb_logger.log({"perc_parmas": perc})  # , step=(epoch + 1) * len_train)
                 log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
                 # model.track_interior_slices_mlflow(config, epoch)
 
-        # save max memory used (just take rank 0)
-        # if rank == 0 and config.enable_tracking:
-        #     max_memory = torch.cuda.max_memory_allocated()
-        #     # mlflow.log_metric("max_memory", max_memory, step=epoch)
-        #     wandb.log({"max_memory": max_memory})
+        # log metrics
+        train_metrics_epoch = train_metrics.compute()
+        val_metrics_epoch = val_metrics.compute()
 
-        if rank == 0 and out_base is not None:
-            # save checkpoints
-            filename = out_base / f"epoch{epoch}.pth.tar"
-            save_dict = {
-                "epoch": epoch + 1,
-                "state_dict": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "scheduler": scheduler.state_dict(),
-                "slurm_id": config.slurm_id,
-                # "mlflow_run_name": mlflow.active_run().info.run_id,
+        # Save model
+        if rank == 0 and config.enable_tracking:
+            if t1 > best_fitness:
+                best_fitness = t1
+
+            # print(train_metrics_epoch)
+
+            log_dict = {
+                "train/f1": train_metrics_epoch["MulticlassF1Score"],
+                "train/precision": train_metrics_epoch["MulticlassPrecision"],
+                "train/recall": train_metrics_epoch["MulticlassRecall"],
+                # "train/loss": train_loss,
+                "val/f1": val_metrics_epoch["MulticlassF1Score"],
+                "val/precision": val_metrics_epoch["MulticlassPrecision"],
+                "val/recall": val_metrics_epoch["MulticlassRecall"],
+                # "val/loss": val_loss,
             }
-            if not config.baseline:
-                save_dict["next_stability_iteration"] = model.next_stability_iteration
-                save_dict["call_count"] = model.call_count
-            torch.save(save_dict, filename)
-            log.info(f"Checkpoint to file {filename}")
+            log.info(
+                f"Epoch end metrics: \n\t"
+                f"train f1/prec/rec: {log_dict['train/f1']:.4f} / "
+                f"{log_dict['train/precision']:.4f} / {log_dict['train/recall']:.4f}"
+                f"\n\tval f1/prec/rec: {log_dict['val/f1']:.4f} / "
+                f"{log_dict['val/precision']:.4f} / {log_dict['val/recall']:.4f}",
+            )
+            wandb_logger.log(log_dict)
+
+            wandb_logger.end_epoch(best_result=best_fitness == t1)
+            ckpt = {
+                "epoch": epoch,
+                "best_fitness": best_fitness,
+                # 'training_results': results_file.read_text(),
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "wandb_id": wandb_logger.wandb_run.id if wandb_logger.wandb else None,
+            }
+
+            # Save last, best and delete
+            torch.save(ckpt, last)
+            if best_fitness == t1:
+                torch.save(ckpt, best)
+            if (best_fitness == t1) and (epoch >= 200):
+                torch.save(ckpt, wdir / "best_{:03d}.pt".format(epoch))
+            if epoch == 0:
+                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+            elif ((epoch + 1) % 10) == 0:
+                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+            elif epoch >= (config.training.epochs - 5):
+                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+            if wandb_logger.wandb and config.enable_tracking:
+                if (
+                    (epoch + 1) % config.training.save_period == 0 and not epoch == config.training.epochs - 1
+                ) and config.training.save_period != -1:
+                    wandb_logger.log_model(
+                        last.parent,
+                        config,
+                        epoch,
+                        t1,
+                        best_model=best_fitness == t1,
+                    )
+            del ckpt
         # set up next epoch after saving everything
-        wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
+        # wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)
+        train_metrics.reset()
+        val_metrics.reset()
 
 
 def get_lrs(opt):
@@ -387,6 +473,8 @@ def train(
     epoch,
     device,
     config,
+    wandb_logger,
+    metrics,
     lr_scheduler=None,
     scaler=None,
     log=log,
@@ -416,7 +504,6 @@ def train(
     steps_remaining = 0
     step_factors = None
     print_norms = []
-    len_train = len(train_loader)
     updates_per_epoch = len(train_loader)
     num_updates = epoch * updates_per_epoch
     for i, data in enumerate(train_loader):
@@ -509,6 +596,9 @@ def train(
         losses.update(loss.item(), images.size(0))
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
+        # print(output)
+        # print(output.shape)
+        metrics.update(output, target)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -585,14 +675,14 @@ def train(
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
-        wandb.log(
+        wandb_logger.log(
             {
-                "train loss": ls,
-                "train top1": t1,
-                "train top5": t5,
-                "train_time": model_time,
+                "train/loss": ls,
+                "train/top1": t1,
+                "train/top5": t5,
+                "train/time": model_time,
             },
-            step=(epoch + 1) * len_train,
+            # step=(epoch + 1) * len_train,
         )
         # mlflow.log_metrics(
         #     metrics={
@@ -634,7 +724,7 @@ def save_selected_weights(network, epoch, config):
 
 
 @torch.no_grad()
-def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg, len_train):
+def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg, len_train, wandb_logger, metrics):
     def run_validate(loader, base_progress=0):
         # rank = 0 if not dist.is_initialized() else dist.get_rank()
         with torch.no_grad():
@@ -668,6 +758,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 losses.update(loss.item(), images.size(0))
                 top1.update(acc1[0], images.size(0))
                 top5.update(acc5[0], images.size(0))
+                metrics.update(output, target)
 
                 # measure elapsed time
                 batch_time.update(time.time() - end)
@@ -751,13 +842,13 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
-        wandb.log(
+        wandb_logger.log(
             {
-                "val loss": ls,
-                "val top1": t1,
-                "val top5": t5,
+                "val/loss": ls,
+                "val/top1": t1,
+                "val/top5": t5,
             },
-            step=(epoch + 1) * len_train,
+            # step=(epoch + 1) * len_train,
         )
         # mlflow.log_metrics(
         #     metrics={

@@ -15,6 +15,7 @@ def get_model(config):
         raise ValueError("model must be specified")
     if config.model.name.startswith("vit"):
         config.model.model.image_size = config.data.train_crop_size
+    config.model.model.num_classes = config.data.classes
     # if config.model.name.startswith("resnetrs"):
     #     config.model.model.image_size = config.data.train_crop_size
     model: nn.Module = hydra.utils.instantiate(config.model.model)

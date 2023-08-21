@@ -2,8 +2,8 @@
 
 defaults:
   - _self_
-  - data: imagenet.yaml # cifar10.yaml # mnist.yaml #
-  - model: resnet-rs.yaml  # vit.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
+  - data: cifar10.yaml # imagenet.yaml # mnist.yaml #
+  - model: vit.yaml # resnet-rs.yaml  # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
   - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: svd_trainer.yaml # cnn-imagenet.yaml  # gsam_trainer.yaml # qr_fix_trainer.yaml #
   - log_dir: default.yaml
@@ -29,7 +29,7 @@ print_config: True
 train: True
 validate: True
 test: False
-seed: 42
+seed: 123454321 # 62485435  # 123454321 # 420 # 42 # 69
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
 name: "svd"
