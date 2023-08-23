@@ -22,6 +22,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+from omegaconf import open_dict
 from rich import print as rprint
 from rich.columns import Columns
 from rich.console import Console
@@ -66,31 +67,50 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
+    log.info(config)
+    hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
+    print(hydra_cfg["runtime"]["output_dir"])
+    # log.info("here is some log testing")
+    # log.info("more stuff")
+    # log.info("do i need more things?")
+    for handler in log.parent.handlers:
+        if isinstance(handler, logging.FileHandler):
+            log_file = handler.baseFilename
+    with open_dict(config):
+        config["log_file_out"] = log_file
+
+    # return {"train loss": 0.75, "train top1": 52, "val loss": 0.54, "val top1": 85}
     if config.tracker == "wandb":
         wandb_run = madonna.utils.tracking.check_wandb_resume(config)
     if config.training.resume and not wandb_run:  # resume an interrupted run
         ckpt = config.training.checkpoint
         assert os.path.isfile(ckpt), "ERROR: --resume checkpoint does not exist"
-    with omegaconf.open_dict(config):
-        config.save_dir = madonna.utils.utils.increment_path(
-            Path(config.training.checkpoint_out_root) / config.name,
-        )  # increment run
-    if config.rank == 0:
-        log.info(f"save_dir: {config.save_dir}")
+    if config.training.checkpoint_out_root is not None:
+        with omegaconf.open_dict(config):
+            config.save_dir = madonna.utils.utils.increment_path(
+                Path(config.training.checkpoint_out_root) / config.name,
+            )  # increment run
+        if config.rank == 0:
+            log.info(f"save_dir: {config.save_dir}")
 
-    save_dir = Path(config.save_dir)
+        save_dir = Path(config.save_dir)
 
-    # Directories
-    wdir = save_dir / "weights"
-    wdir.mkdir(parents=True, exist_ok=True)  # make dir
-    log.info(f"out_dir (wdir): {wdir}")
-    last = wdir / "last.pt"
-    best = wdir / "best.pt"
+        # Directories
+        wdir = save_dir / "weights"
+        wdir.mkdir(parents=True, exist_ok=True)  # make dir
+        log.info(f"out_dir (wdir): {wdir}")
+        last = wdir / "last.pt"
+        best = wdir / "best.pt"
+    else:
+        wdir = None
     # results_file = save_dir / 'results.txt'
     # f = open(results_file, 'w')
     wandb_logger = madonna.utils.tracking.WandbLogger(config) if config.rank == 0 and config.enable_tracking else None
+    seed = config.seed
+    if config.iteration is not None:  # TODO: remove me after these things are no longer there
+        seed = config.iteration * 10000 * (1 + int(config.handle))
 
-    if config.seed is not None:
+    if seed is not None:
         cudnn.benchmark = True
         cudnn.deterministic = True
         # torch.manual_seed(args.local_rank)
@@ -290,7 +310,7 @@ def main(config):  # noqa: C901
         #                 p[mask] *= 0
         #                 p[mask] += 1e-1 * torch.rand_like(p[mask]) * sdiag.min()
 
-        train_loss, last_loss, refactory_warmup = train(
+        train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
             optimizer=optimizer,
             model=model,
@@ -426,34 +446,37 @@ def main(config):  # noqa: C901
             }
 
             # Save last, best and delete
-            torch.save(ckpt, last)
-            if best_fitness == t1:
-                torch.save(ckpt, best)
-            if (best_fitness == t1) and (epoch >= 200):
-                torch.save(ckpt, wdir / "best_{:03d}.pt".format(epoch))
-            if epoch == 0:
-                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-            elif ((epoch + 1) % 10) == 0:
-                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-            elif epoch >= (config.training.epochs - 5):
-                torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-            if wandb_logger.wandb and config.enable_tracking:
-                if (
-                    (epoch + 1) % config.training.save_period == 0 and not epoch == config.training.epochs - 1
-                ) and config.training.save_period != -1:
-                    wandb_logger.log_model(
-                        last.parent,
-                        config,
-                        epoch,
-                        t1,
-                        best_model=best_fitness == t1,
-                    )
-            del ckpt
+            if wdir is not None:
+                torch.save(ckpt, last)
+                if best_fitness == t1:
+                    torch.save(ckpt, best)
+                if (best_fitness == t1) and (epoch >= 200):
+                    torch.save(ckpt, wdir / "best_{:03d}.pt".format(epoch))
+                if epoch == 0:
+                    torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+                elif ((epoch + 1) % 10) == 0:
+                    torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+                elif epoch >= (config.training.epochs - 5):
+                    torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+                if wandb_logger.wandb and config.enable_tracking:
+                    if (
+                        (epoch + 1) % config.training.save_period == 0 and not epoch == config.training.epochs - 1
+                    ) and config.training.save_period != -1:
+                        wandb_logger.log_model(
+                            last.parent,
+                            config,
+                            epoch,
+                            t1,
+                            best_model=best_fitness == t1,
+                        )
+                del ckpt
         # set up next epoch after saving everything
         # wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)
         train_metrics.reset()
         val_metrics.reset()
+    wandb_logger.finish_run()
+    return {"train loss": train_loss, "train top1": train_t1, "val loss": val_loss, "val t1": t1}
 
 
 def get_lrs(opt):
@@ -503,7 +526,7 @@ def train(
     # last_lr = 0
     steps_remaining = 0
     step_factors = None
-    print_norms = []
+    # print_norms = []
     updates_per_epoch = len(train_loader)
     num_updates = epoch * updates_per_epoch
     for i, data in enumerate(train_loader):
@@ -643,10 +666,10 @@ def train(
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
 
-    if config.rank == 0:
-        columns = Columns(print_norms, equal=True, width=20)
-        console = Console(width=100)
-        console.print(columns)
+    # if config.rank == 0:
+    #     columns = Columns(print_norms, equal=True, width=20)
+    #     console = Console(width=100)
+    #     console.print(columns)
     #     table = Table(title="Param grads")
 
     #     table.add_column("Name")
@@ -671,6 +694,7 @@ def train(
         top1.all_reduce()
         top5.all_reduce()
 
+    t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
     if config["rank"] == 0 and config.enable_tracking:
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
@@ -682,18 +706,8 @@ def train(
                 "train/top5": t5,
                 "train/time": model_time,
             },
-            # step=(epoch + 1) * len_train,
         )
-        # mlflow.log_metrics(
-        #     metrics={
-        #         "train loss": ls,
-        #         "train top1": t1,
-        #         "train top5": t5,
-        #         "train_time": model_time,
-        #     },
-        #     step=epoch,
-        # )
-    return losses.avg, loss, refactory_warmup
+    return losses.avg, loss, refactory_warmup, t1
 
 
 @torch.no_grad()

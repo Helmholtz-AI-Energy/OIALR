@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 300
+epochs: 250 # 300
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -8,7 +8,7 @@ init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+checkpoint_out_root: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
 save_period: 10
 resume_run: False
 resume: False  # TODO: are both of these needed??
@@ -16,9 +16,6 @@ resume: False  # TODO: are both of these needed??
 criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
-
-sigma_optimizer:  # -> optimizer specific for sigma - will not touch the other params
-  lr: 0.4e-3
 
 lr: 1.0e-3
 lr_reset_period: 3
@@ -52,7 +49,7 @@ optimizer:
   # nesterov: True
   _target_: torch.optim.AdamW
   _partial_: True
-  # weight_decay: 0.0001
+  weight_decay: 0.01  # default 0.01
   # fused: True
 max_grad_norm: 1.
 
@@ -68,10 +65,8 @@ fixing_method:
   delay: 200
   uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.25
-  full_rank_sigma: True
   keep_first_layer: False
   keep_last_layer: True
-  update_from_simga: True
   reinit_shapes: True
   stable_update_delay: 0
   create_svd_param_group: one  # null or one

@@ -7,7 +7,6 @@ import time
 
 import torch
 import torch.distributed as dist
-from mpi4py import MPI
 from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT
 from torch.distributed.distributed_c10d import (
     _new_process_group_helper,
@@ -271,6 +270,8 @@ def init_split(
 def init(method, ranks_per_gpu=1, batchnorm_group_size=1, batchnorm_group_stride=1):
     # get master address and port
     # os.environ["NCCL_ASYNC_ERROR_HANDLING"] = "0"
+    from mpi4py import MPI
+
     global _DATA_PARALLEL_GROUP
     global _DATA_PARALLEL_ROOT
 
@@ -399,6 +400,8 @@ def create_sub_groups(group_size: int) -> dist.ProcessGroup:
     -------
     torch.distributed.ProcessGroup
     """
+    from mpi4py import MPI
+
     global_size = dist.get_world_size()
     global_rank = dist.get_rank()
 

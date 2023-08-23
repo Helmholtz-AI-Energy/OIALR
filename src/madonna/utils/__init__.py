@@ -39,6 +39,21 @@ def get_criterion(config):
 def get_optimizer(config, network, lr=None):
     if config.training.optimizer is None:
         raise ValueError("Optimizer must be specified")
+    # for adam-style otpimzers, need to collect the betas into a tuple
+    betas = []
+    if "beta1" in config.training.optimizer:
+        beta1 = config.training.optimizer.beta1
+        betas.append(beta1)
+        del config.training.optimizer.beta1
+    if "beta2" in config.training.optimizer:
+        beta2 = config.training.optimizer.beta2
+        betas.append(beta2)
+        del config.training.optimizer.beta2
+    if len(betas) > 0:
+        betas = tuple(betas)
+        with open_dict(config):
+            config.training.optimizer.betas = betas
+
     optimizer = hydra.utils.instantiate(config.training.optimizer)
     kwargs = {}
     if config.training.init_opt_with_model:

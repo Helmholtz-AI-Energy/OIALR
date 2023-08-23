@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 
 # Slurm job configuration
-#SBATCH --nodes=8
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=08:00:00
-#SBATCH --job-name=madonna-test
+#SBATCH --time=24:00:00
+#SBATCH --job-name=madonna-propulate
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
 #SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
@@ -36,7 +36,7 @@ export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
 # export TOMOUNT+="/home/kit/scc/qv2382/"
 
 SRUN_PARAMS=(
-  --mpi="pmix"
+  --mpi="pmi2"
 #  --ntasks-per-node=4
   # --gpus-per-task=4
   --cpus-per-task=8
@@ -62,6 +62,7 @@ export NCCL_COLLNET_ENABLE=0
 
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 # export CUDA_VISIBLE_DEVICES="0,1,2,3"
-export CONFIG_NAME="ortho_train.yaml"
+# export CONFIG_NAME="ortho_train.yaml"
 
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='baseline' baseline=True"
+# srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='baseline' baseline=True"
+srun "${SRUN_PARAMS[@]}" bash -c "cd ${BASE_DIR}madonna/; python -u ${BASE_DIR}madonna/scripts/propulate_train.py"

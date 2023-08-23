@@ -52,7 +52,7 @@ then
   TOMOUNT+="/scratch,/tmp,"
   TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 
-  salloc --partition=accelerated \
+  salloc --partition=dev_accelerated \
     -N "${SLURM_NNODES}" \
     --time "${TIMELIMIT}" \
     --gres gpu:"${GPUS_PER_NODE}" \

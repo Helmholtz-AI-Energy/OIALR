@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import socket
@@ -9,11 +10,12 @@ import sys
 import time
 from pathlib import Path
 
+import hydra
 import mlflow
 import torch
 import yaml
 from mlflow.entities import Experiment
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, listconfig
 
 import wandb
 from wandb import finish, init
@@ -25,6 +27,7 @@ uc2 = socket.gethostname().startswith("uc2")
 horeka = socket.gethostname().startswith("hkn")
 
 # __all__ = ["setup_mlflow"]
+log = logging.getLogger(__name__)
 
 
 @only_on_rank_n(run_on_rank=0)
@@ -196,7 +199,18 @@ class WandbLogger:
         # Pre-training routine --
         self.job_type = job_type
         self.wandb, self.wandb_run = wandb, wandb.run
+        self.config = config
+
         primative = OmegaConf.to_container(config, resolve=True)
+        tags = []
+        if "tags" in config.tracking:
+            tag = config.tracking.tags
+            if isinstance(tag, (list, listconfig.ListConfig)):
+                tags.extend(tag)
+            else:
+                tags.append(tag)
+        if config.baseline:
+            tags.append("baseline")
         if isinstance(config.training.checkpoint, str):  # checks resume from artifact
             if config.training.checkpoint.startswith(WANDB_ARTIFACT_PREFIX):
                 run_id, project, model_artifact_name = get_run_info(config.training.checkpoint)
@@ -208,25 +222,25 @@ class WandbLogger:
                     project=project,
                     resume="allow",
                     group=f"{config.data.dataset}-{config.model.name}",
+                    tags=tags,
                 )
                 config = self.wandb_run.config
                 config.training.checkpoint = model_artifact_name
 
         elif self.wandb:
             # init for new run
-            # project='YOLOR' if config.tracking.project == 'runs/train' else Path(config.tracking.project_name).stem,
             self.wandb_run = wandb.init(
                 config=primative,
                 resume="allow",
                 project=config.tracking.project,
                 name=config.name,
                 job_type=job_type,
-                # id=run_id,
+                tags=tags,
                 group=f"{config.data.dataset}-{config.model.name}",
             )
-        if self.job_type == "Training":
-            self.data_dict = self.setup_training(config)
-        self.config = config
+        log_file = config["log_file_out"]
+        self.wandb_run.save(log_file)
+        self.log_dict = {}
 
     def setup_training(self, config):
         self.log_dict, self.current_epoch = {}, 0  # Logging Constants
@@ -283,4 +297,5 @@ class WandbLogger:
         if self.wandb_run:
             if self.log_dict:
                 wandb.log(self.log_dict)
-            wandb.run.finish()
+            # upload the output log from hydra (hopefully that doesnt fuck up...)
+            self.wandb.run.finish()

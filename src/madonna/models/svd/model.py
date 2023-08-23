@@ -44,12 +44,10 @@ class SVDFixingModel(nn.Module):
         existing_model: nn.Module,
         stability_frequency: int = 10,
         delay: int = 100,
-        uvhthreshold: float = 0.999,
+        uvhthreshold: float = 0.999,  # TODO: remove me!
         sigma_cutoff_fraction: float = 0.1,
-        full_rank_sigma: bool = False,
         keep_first_layer: bool = False,
         keep_last_layer: bool = True,
-        update_from_simga: bool = True,
         reinit_shapes: bool = True,
         stable_update_delay: int = 0,
         create_svd_param_group: str = None,  # options: 'one', 'many'
@@ -67,8 +65,8 @@ class SVDFixingModel(nn.Module):
 
         self.uvhthreshold = uvhthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.full_rank_sigma = full_rank_sigma
-        self.update_from_simga = update_from_simga
+        self.full_rank_sigma = True  # full_rank_sigma TODO: remove me!
+        self.update_from_simga = True  # update_from_simga TODO: remove me!
         self.first_layer = keep_first_layer
         self.keep_last_layer = keep_last_layer
         self.last_layer = None

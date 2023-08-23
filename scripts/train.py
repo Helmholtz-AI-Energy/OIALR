@@ -18,7 +18,7 @@ except KeyError:
     config_name = "train.yaml"
 
 # A logger for this file
-log = logging.getLogger(__name__)  # testing! possibly remove later
+log = logging.getLogger(__name__)
 
 
 @hydra.main(config_path="../configs/", config_name=config_name, version_base=hydra.__version__)

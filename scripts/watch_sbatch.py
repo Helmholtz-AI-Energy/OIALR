@@ -15,7 +15,7 @@ def submit_and_catch():
     while not log.is_file():
         time.sleep(1)
     # once its a file, sleep for 2 seconds, then grab the first lines of the file
-    time.sleep(2)
+    time.sleep(5)
     try:
         with open(log) as f:
             lines = [next(f) for _ in range(5)]

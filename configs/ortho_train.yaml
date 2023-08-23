@@ -17,14 +17,28 @@ defaults:
   # optional local config for machine/user specific settings
   # it's optional since it doesn't need to exist and is excluded from version control
   - optional local: default.yaml
-  - override hydra/hydra_logging: colorlog
   - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+
+# putting this in here because i see the fix in colorlog...
+hydra:
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
+  #     console:
+  #       class: logging.NullHandler
+  # hydra_logging:
+  #   handlers:
+  #     console:
+  #       class: logging.NullHandler
+
 # path to original working directory
 # hydra hijacks working directory by changing it to the new log directory
 # https://hydra.cc/docs/next/tutorials/basic/running_your_app/working_directory
 original_work_dir: ${hydra:runtime.cwd}
 # pretty print config at the start of the run using Rich library
-print_config: True
+print_config: False
 # set False to skip model training
 train: True
 validate: True
@@ -32,10 +46,12 @@ test: False
 seed: 123454321 # 62485435  # 123454321 # 420 # 42 # 69
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
-name: "svd"
+name: "propulate-svd"
 baseline: False
 
 comm_method: "nccl"
 cpu_training: False
 enable_tracking: True
 tracker: wandb
+iteration: 0
+handle: 0
