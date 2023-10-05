@@ -2,10 +2,10 @@
 
 defaults:
   - _self_
-  - data: cifar10.yaml # imagenet.yaml # mnist.yaml #
+  - data: cifar10.yaml # imagenet.yaml #
   - model: vit.yaml # resnet-rs.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
   - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
-  - training: svd_trainer.yaml # cnn-imagenet.yaml  # gsam_trainer.yaml # qr_fix_trainer.yaml #
+  - training: oialr_trainer.yaml
   - log_dir: default.yaml
   # experiment configs allow for version control of specific configurations
   # e.g. hyperparameters for each combination of model and data
@@ -37,15 +37,14 @@ print_config: False
 train: True
 validate: True
 test: False
-seed: null  # 69 # 62485435  # 123454321 # 420 # 42 # 69
-# default name for the experiment in mlflow, determines the default logging folder path
-# (you can overwrite this name in experiment configs)
-name: "propulate-svd"
+seed: null
+# default name for the experiment for logging
+name: "oialr"
 baseline: False
 
 comm_method: "nccl"
 cpu_training: False
 enable_tracking: True
 tracker: wandb
-iteration: 0
-handle: 0
+iteration: 0  # only used for propulate searching
+handle: 0  # only used for propulate searching
