@@ -54,7 +54,6 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         dtype=None,
         uvhthreshold: float = 0.9,
         sigma_cutoff_fraction: float = 0.1,
-        full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
         update_from_simga=True,
@@ -93,8 +92,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
                 self.bias.zero_()
                 self.bias.add_(start_bias)
 
-        self.full_rank_sigma = full_rank_sigma
-        self.update_from_simga = full_rank_sigma and update_from_simga
+        self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
 
         weight_shape = self.weight.shape
@@ -225,17 +223,11 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         if self.reinit_shapes:
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            if self.full_rank_sigma:
-                self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            else:
-                self.s.set_(self.s[: self.inner_dim])
+            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
-            if self.full_rank_sigma:
-                self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            else:
-                self.s[self.inner_dim :].mul_(0)
+            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -405,7 +397,6 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         dtype=None,
         uvhthreshold: float = 0.9,
         sigma_cutoff_fraction: float = 0.1,
-        full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
         update_from_simga=True,
@@ -444,8 +435,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
                 self.bias.zero_()
                 self.bias.add_(start_bias)
 
-        self.full_rank_sigma = full_rank_sigma
-        self.update_from_simga = full_rank_sigma and update_from_simga
+        self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
 
         weight_shape = self.weight.shape
@@ -570,17 +560,11 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         if self.reinit_shapes:
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            if self.full_rank_sigma:
-                self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            else:
-                self.s.set_(self.s[: self.inner_dim])
+            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
-            if self.full_rank_sigma:
-                self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            else:
-                self.s[self.inner_dim :].mul_(0)
+            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):

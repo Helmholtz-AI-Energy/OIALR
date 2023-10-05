@@ -40,7 +40,7 @@ training:
   svd_epoch_delay: 50
   svd_epoch_freq: 10
   fixing_method:
-    _target_: madonna.models.SVDFixingModel
+    _target_: madonna.models.OIALRModel
     _partial_: True
     stability_frequency: 500  # 49 iterations / epoch - 10 is epoch frequency -> 490
     delay: 2500  # 49 iterations/epoch - 50 epochs -> 2490

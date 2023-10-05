@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Optional, Tuple, Union
 
 import torch
@@ -18,6 +17,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
     Almost all of this class is based on the torch standard MultiheadAttention class
     I have changed things to work with the SVD abstractions, but that is it.
 
+    Daniel Coquelin - coquelin77
 
     Allows the model to jointly attend to information
     from different representation subspaces as described in the paper:
@@ -100,7 +100,6 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         dtype=None,
         uvh_threshold=0.9,
         sigma_cutoff_fraction=0.1,
-        full_rank_sigma=True,
         start_q=None,
         start_k=None,
         start_v=None,
@@ -113,7 +112,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
-        self.update_from_simga = full_rank_sigma and update_from_simga
+        self.update_from_simga = update_from_simga
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
@@ -123,7 +122,6 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         self.dropout = dropout
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
-        self.full_rank_sigma = full_rank_sigma
         self.reinit_shapes = reinit_shapes
         assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
@@ -376,7 +374,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.q_s.requires_grad = True
             self.q_vh.requires_grad = False
         u, vh = self.q_u, self.q_vh
-        s = self.q_s if self.full_rank_sigma else torch.diag(self.q_s)
+        s = self.q_s
         ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
@@ -387,7 +385,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.k_s.requires_grad = True
             self.k_vh.requires_grad = False
         u, vh = self.k_u, self.k_vh
-        s = self.k_s if self.full_rank_sigma else torch.diag(self.k_s)
+        s = self.k_s
         w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.k_trans else w
         return ret
@@ -399,7 +397,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.v_s.requires_grad = True
             self.v_vh.requires_grad = False
         u, vh = self.v_u, self.v_vh
-        s = self.v_s if self.full_rank_sigma else torch.diag(self.v_s)
+        s = self.v_s
         w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.v_trans else w
         return ret
@@ -415,7 +413,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         self.in_proj_s.requires_grad = True
         u = self.in_proj_u  # .detach()
         vh = self.in_proj_vh  # .detach()
-        s = self.in_proj_s if self.full_rank_sigma else torch.diag(self.in_proj_s)
+        s = self.in_proj_s
         ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
@@ -807,9 +805,6 @@ class SVDMultiheadAttentionUSVh(nn.Module):
 
     @torch.no_grad()
     def _full_rank_sigma_update_usv_abs(self, qkvin, working_rank=0):
-        if not self.full_rank_sigma:
-            raise ValueError("this function is only for full-rank sigma with usvh is stable")
-
         if self.rank == working_rank:
             log.debug("in full rank sigma update of usvh")
         # NOTE: no slicing because need the shapes to line up. self.s[self.k:, self.k:] should be 0?
@@ -927,7 +922,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         u, s, vh, sl = self._get_usvh_from_qkvin(qkvin)
         # adjust K to slice of less important singular values
         # only want to compare the diagonal entries of sigma
-        sdiag = torch.diag(s) if self.full_rank_sigma else s
+        sdiag = s
         prevsl = sl.clone()
         # if getattr(self, f"uvh_stable_{qkvin}"):
         min_dim = int(vh.shape[-1] * 0.01)  # always TS
@@ -959,17 +954,11 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         if self.reinit_shapes:
             u.set_(u[:, :sl].contiguous())
             vh.set_(vh[:sl].contiguous())
-            if self.full_rank_sigma:
-                s.set_(s[:sl, :sl].contiguous())
-            else:
-                s.set_(s[:sl])
+            s.set_(s[:sl, :sl].contiguous())
         else:
             u[:, sl:] *= 0
             vh[sl:] *= 0
-            if self.full_rank_sigma:
-                s[sl:, sl:].mul_(0)
-            else:
-                s[sl:].mul_(0)
+            s[sl:, sl:].mul_(0)
 
     @torch.no_grad()
     def _get_usvh_from_qkvin(self, qkvin):

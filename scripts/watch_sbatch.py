@@ -1,3 +1,13 @@
+"""
+Running scripts with enroot can sometimes fail when they try to all init the ldconfig at the same time
+This script will wait for the log file and check to make sure that it didn't fail on init.
+if the job failed, it will keep launching jobs until one succeeds.
+
+To use this script, update the log and expected job slurm log name.
+
+Author: Daniel Coquelin
+5 Oct 2023
+"""
 import re
 import subprocess
 import time

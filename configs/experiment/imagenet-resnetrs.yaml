@@ -42,7 +42,7 @@ training:
   svd_epoch_delay: 50
   svd_epoch_freq: 10
   fixing_method:
-    _target_: madonna.models.SVDFixingModel
+    _target_: madonna.models.OIALRModel
     _partial_: True
     stability_frequency: 100
     delay: 200

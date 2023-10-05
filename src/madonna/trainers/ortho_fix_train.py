@@ -26,6 +26,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+import wandb
 from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
@@ -38,36 +39,6 @@ from torchmetrics import MetricCollection, Precision, Recall
 from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import madonna
-import wandb
-
-# import mlflow.pytorch
-
-
-@no_grad()
-def _group_tensors_by_device_and_dtype(tensorlistlist, with_indices=False):
-    assert all(
-        [not x or len(x) == len(tensorlistlist[0]) for x in tensorlistlist],
-    ), "all specified tensorlists must match in length"
-    per_device_and_dtype_tensors = defaultdict(
-        lambda: [[] for _ in range(len(tensorlistlist) + (1 if with_indices else 0))],
-    )
-    for i, t in enumerate(tensorlistlist[0]):
-        key = (t.device, t.dtype)
-        for j in range(len(tensorlistlist)):
-            # a tensorlist may be empty/None
-            if tensorlistlist[j]:
-                per_device_and_dtype_tensors[key][j].append(tensorlistlist[j][i])
-        if with_indices:
-            # tack on previous index
-            per_device_and_dtype_tensors[key][j + 1].append(i)
-    return per_device_and_dtype_tensors
-
-
-def _has_foreach_support(tensors, device: torch.device) -> bool:
-    if device.type not in ["cpu", "cuda"] or torch.jit.is_scripting():
-        return False
-    return all([t is None or type(t) == torch.Tensor for t in tensors])
-
 
 best_acc1 = 0
 log = logging.getLogger(__name__)

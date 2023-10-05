@@ -4,7 +4,6 @@ from omegaconf import DictConfig, OmegaConf, errors, open_dict
 
 
 def obj_train():
-    # print("obj fn")
     import os
 
     rank = os.environ["RANK"]
@@ -22,7 +21,6 @@ def obj_train():
             "${hydra.runtime.output_dir}/${hydra.job.name}-rank${handle}-${iteration}.log"
         )
     # return
-    # print(base_config)
     OmegaConf.save(base_config, base_config_path / f"propulate-{rank}.yaml")
 
     import json

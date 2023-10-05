@@ -66,7 +66,6 @@ class SVDLinearUSVh(nn.Module):
         dtype=None,
         uvhthreshold: float = 0.9,
         sigma_cutoff_fraction: float = 0.1,
-        full_rank_sigma: bool = False,
         start_weight=None,
         start_bias=None,
         update_from_simga=True,
@@ -76,8 +75,7 @@ class SVDLinearUSVh(nn.Module):
         super(SVDLinearUSVh, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.full_rank_sigma = True
-        self.update_from_simga = full_rank_sigma and update_from_simga
+        self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
 
         if start_weight is not None:
@@ -202,17 +200,11 @@ class SVDLinearUSVh(nn.Module):
         if self.reinit_shapes:
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            if self.full_rank_sigma:
-                self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            else:
-                self.s.set_(self.s[: self.inner_dim])
+            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
-            if self.full_rank_sigma:
-                self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            else:
-                self.s[self.inner_dim :].mul_(0)
+            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):

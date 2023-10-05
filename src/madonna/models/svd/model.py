@@ -8,7 +8,6 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import parametrizations, parametrize
 
 from ..utils import (
     change_adam_shapes,
@@ -16,20 +15,9 @@ from ..utils import (
     create_svd_param_groups,
     replace_opt_state_with_svd_adam,
 )
-from .attention import SVDMultiheadAttention
 from .attentionusvh import SVDMultiheadAttentionUSVh
-from .attentionvh import SVDMultiheadAttentionVh
-from .conv import SVDConv2d
 from .convusvh import SVDConv1dUSVh, SVDConv2dUSVh
-from .convvh import SVDConv2dVh
-from .linear import SVDLinear
 from .linearusvh import SVDLinearUSVh
-from .linearvh import SVDLinearVh
-
-# from ..utils import utils
-# from ..optimizers.utils import change_adam_shapes
-
-# from .. import optimizers
 
 log = logging.getLogger(__name__)
 
@@ -43,22 +31,72 @@ def copy_attr(a, b, include=(), exclude=()):
             setattr(a, k, v)
 
 
-class SVDFixingModel(nn.Module):
+class OIALRModel(nn.Module):
     def __init__(
         self,
         full_rank_model: nn.Module,
-        stability_frequency: int = 10,
-        delay: int = 100,
-        uvhthreshold: float = 0.999,  # TODO: remove me!
+        stability_frequency: int = 100,
+        delay: int = 1000,
+        uvhthreshold: float = 0.999,  # TODO: remove me?
         sigma_cutoff_fraction: float = 0.1,
         keep_first_layer: bool = False,
         keep_last_layer: bool = True,
         reinit_shapes: bool = True,
         stable_update_delay: int = 0,
-        create_svd_param_group: str = None,  # options: 'one', 'many'
-        step_on_forward: bool = False,
+        step_on_forward: bool = True,
         full_rank_warmup: bool = True,
+        network_layer_perc_step: float = 0.1,
     ):
+        """
+        Othogonality-Informed Adaptive Low-Rank Model.
+        This class wraps any given architecture with a low-rank model which is updated over time.
+        Read over the Args to understand what is happening better
+
+        Args:
+            full_rank_model (nn.Module):
+                the full-rank model (a normal torch model) which will be wrapped
+            stability_frequency (int, optional):
+                this is the frequency with which the inner dims of the OIALR layers are updated
+                Defaults to 100.
+            delay (int, optional):
+                The number of steps before the the inner dims of any layers are adjusted.
+                In the case that `full_rank_warmup == True` this is the number of full-rank
+                training steps before the network is converted to low-rank.
+                Defaults to 1000.
+            uvhthreshold (float, optional):
+                Depricated. Used only in logging messages.
+                Defaults to 0.999.
+            keep_first_layer (bool, optional):
+                Flag for if the first layer of the network should be kept as full-rank.
+                Defaults to False. (first layer is also low-rank)
+            keep_last_layer (bool, optional):
+                Flag for if the last layer of the network should be kept as full-rank.
+                Defaults to True. (last layer of the network will be full-rank)
+            reinit_shapes (bool, optional):
+                Flat for if the shapes of U, Sigma, and Vh should be updated. If False, the
+                shapes will be maintained and the values outside of the inner dim will be zero.
+                Defaults to True.
+            stable_update_delay (int, optional):
+                Once a layer's inner dim is updated, it will skip the next `stable_update_delay`
+                updates. I.e. if this is 1, a given layer would update with a frequency of
+                `stability_frequency *2`.
+                Defaults to 0.
+            step_on_forward (bool, optional):
+                If True, automatically update the inner-rank of the network layers at a
+                frequency of `stability frequency` with any other modifiers.
+                if False, one must call the update functions manually.
+                Defaults to True.
+            full_rank_warmup (bool, optional):
+                If True, train the full-rank model for a number of steps equal to the given
+                `delay` then convert to low-rank
+                If False, convert the network to low-rank on init.
+                Defaults to True.
+            network_layer_perc_step (float, optional):
+                the percentage of layers which are updated each time.
+                I.e. the first time the layers are tested the last 10% of the layers are updated,
+                the second time the last 20% of the layers are updated, the 3rd time its 30%, etc.
+                Defaults to 0.1.
+        """
         super().__init__()
 
         num = 0
@@ -75,8 +113,7 @@ class SVDFixingModel(nn.Module):
 
         self.uvhthreshold = uvhthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.full_rank_sigma = True  # full_rank_sigma TODO: remove me!
-        self.update_from_simga = True  # update_from_simga TODO: remove me!
+        self.update_from_simga = True  # update_from_simga TODO: remove me?
         self.first_layer = keep_first_layer
         self.keep_last_layer = keep_last_layer
         self.last_layer = None
@@ -85,6 +122,7 @@ class SVDFixingModel(nn.Module):
         self.rank = 0 if not dist.is_initialized() else dist.get_rank()
         self.local_full_rank_model = full_rank_model
         self.low_rank_replacement_list = {}
+        self.network_layer_perc_step = network_layer_perc_step
 
         if full_rank_warmup and delay > 0:
             if self.rank == 0:
@@ -97,8 +135,6 @@ class SVDFixingModel(nn.Module):
         else:
             self.setup_low_rank_training(skip_optimizer_init=True)
 
-        # self.compiled_model = torch.compile(self.model)
-        # raise ValueError("")
         self.step_on_forward = step_on_forward
         self.stability_frequency = stability_frequency
         self.call_count = 0
@@ -129,7 +165,6 @@ class SVDFixingModel(nn.Module):
         self.cuda = self.model.cuda
         # TODO: add other methods here??
         self.__repr__ = self.model.__repr__
-        self.create_svd_param_group = create_svd_param_group
         self.train = self.model.train
 
     def set_optimizer(self, optimizer):
@@ -139,18 +174,23 @@ class SVDFixingModel(nn.Module):
         elif isinstance(optimizer, optim.SGD):
             self.reshape_opt_state_fn = change_sgd_shapes
 
-        # if self.create_svd_param_group is not None:
-        #     create_svd_param_groups(optimizer, model=self.model, individual_groups=False)
-        #     # after this groups are: [non2d, full rank weights, sigma weights]
-        #     if "weight_decay" in optimizer.param_groups[2]:
-        #         optimizer.param_groups[2]["weight_decay"] *= 0.
-
     @torch.no_grad()
     def setup_low_rank_training(self, skip_optimizer_init=False):
+        """
+        Sets up the low rank training.
+
+        If the optimizer state is populated (full-rank training done before this is called),
+        then skip_optimizer_init should be True. This will call another helper to change the
+        optimizer states to align with the OIALR weight shapes.
+
+        Args:
+                skip_optimizer_init: If True don't initialize SVD
+        """
         if self.rank == 0:
             log.info("Starting with training in low rank")
         self.local_low_rank_model = self._replace_layers(self.local_full_rank_model)
 
+        # Reset the last layer to the last layer.
         if self.keep_last_layer:
             self._reset_last_layer(self.local_low_rank_model)
 
@@ -177,14 +217,11 @@ class SVDFixingModel(nn.Module):
                         calls += 3
                 except AttributeError:
                     calls += 1
-        if not skip_optimizer_init:  # only need to do this if we start in full rank...i think
-            # if self.create_svd_param_group is not None:
-            #     create_svd_param_groups(self.optimizer, model=self.model, individual_groups=False)
+        if not skip_optimizer_init:  # only need to do this if we start in full rank
             replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
-        # print(f'wrapping {name} {module}')
         if isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
             if not self.first_layer:
                 module_output = SVDLinearUSVh(
@@ -193,15 +230,11 @@ class SVDFixingModel(nn.Module):
                     bias=module.bias is not None,
                     uvhthreshold=self.uvhthreshold,
                     sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    full_rank_sigma=self.full_rank_sigma,
                     start_weight=module.weight,
                     start_bias=module.bias,
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
-                # module_output = parametrizations.orthogonal(module_output, name="u")
-                # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
-                # module_output = torch.compile(module_output)
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[module.weight] = [module_output.s, "lin"]
             else:
@@ -218,11 +251,8 @@ class SVDFixingModel(nn.Module):
                     kdim=module.kdim,
                     vdim=module.vdim,
                     batch_first=module.batch_first,
-                    # device=module., get from module.out_proj.weight!
-                    # dtype=None,
                     uvh_threshold=self.uvhthreshold,
                     sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    full_rank_sigma=self.full_rank_sigma,
                     start_q=module.q_proj_weight,
                     start_k=module.k_proj_weight,
                     start_v=module.v_proj_weight,
@@ -263,7 +293,6 @@ class SVDFixingModel(nn.Module):
                     dtype=module.weight.dtype,
                     uvhthreshold=self.uvhthreshold,
                     sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    full_rank_sigma=self.full_rank_sigma,
                     start_bias=module.bias,
                     start_weight=module.weight,
                     update_from_simga=self.update_from_simga,
@@ -296,7 +325,6 @@ class SVDFixingModel(nn.Module):
                     dtype=module.weight.dtype,
                     uvhthreshold=self.uvhthreshold,
                     sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    full_rank_sigma=self.full_rank_sigma,
                     start_bias=module.bias,
                     start_weight=module.weight,
                     update_from_simga=self.update_from_simga,
@@ -321,8 +349,6 @@ class SVDFixingModel(nn.Module):
         return module_output
 
     def _reset_last_layer(self, module, name=None):
-        # if dist.get_rank() == 0:
-        #     print("replace", name)
         module_output = module
         if name == self.last_layer[1]:
             if self.last_layer[2] is None:
@@ -343,70 +369,6 @@ class SVDFixingModel(nn.Module):
         return module_output
 
     @torch.no_grad()
-    def test_basis_stability_all_layers_old(self):
-        # self.sync_models()
-        # if self.skip_stability:
-        #     return
-        rank = dist.get_rank() if dist.is_initialized() else 0
-        sz = dist.get_world_size() if dist.is_initialized() else 1
-        if rank == 0:
-            log.info("Testing Stability")
-        all_stable = True
-        total = 0
-        reset_optimizer = False
-        calls = 0
-        for c, (name, mod) in enumerate(self.model.named_modules()):
-            # try:
-            if hasattr(mod, "test_stability"):
-                dist.barrier()
-                working_rank = calls % sz
-                print(name, working_rank)
-                uchanging, k, perc, stable, changing_k = mod.test_stability(working_rank)
-                print(f"done with test_stability for {name}")
-                mod.wait_on_kusvh()
-                print(f"done with waiting for {name}")
-                try:
-                    if mod._qkv_same_embed_dim:
-                        calls += 1
-                    else:
-                        calls += 3
-                except AttributeError:
-                    calls += 1
-                total += 1
-                if rank == 0:
-                    try:
-                        uchange = f"{uchanging:.4f}"
-                        percs = f"{perc * 100:.4f}"
-                    except TypeError:  # in list return (qkv from attention...)
-                        uchange = ""
-                        percs = ""
-                        for u in uchanging:
-                            uchange += f"{u:.4f}, "
-                        for p in perc:
-                            percs += f"{p * 100:.1f}, "
-                    # log.info(f"{name[-30:]}: UVh: {uchange} - k: {k} - % active params: {percs}")
-                if changing_k:
-                    reset_optimizer = True
-
-        for c, (name, mod) in enumerate(self.model.named_modules()):
-            # try:
-            if hasattr(mod, "wait_on_kusvh"):
-                mod.wait_on_kusvh()
-
-        if dist.is_initialized():  # and reset_optimizer:
-            # this indicates that the shapes of the parameters changed
-            # need to re-init DDP to have the correct buckets
-            # TODO: this might be a preformance hit
-            ddp_time = perf_counter()
-            # del self.model
-            self.model = DDP(self.local_low_rank_model, find_unused_parameters=False, static_graph=False)
-            if dist.get_rank() == 0:
-                log.info(f"Reinit DDP. Time takesn: {perf_counter() - ddp_time}")
-        if all_stable:
-            self.skip_stability = True
-        return reset_optimizer
-
-    @torch.no_grad()
     def test_basis_stability_all_layers(self):
         # if self.skip_stability:
         #     return
@@ -418,7 +380,7 @@ class SVDFixingModel(nn.Module):
         # want to select a number of layers to run the stability on
         # increate the number based on the num_stability_checks
         inds = torch.arange(len(self.svd_modules))
-        self.num_stability_layvers_to_check += int(inds[-1].item() * 0.1)
+        self.num_stability_layvers_to_check += int(inds[-1].item() * self.network_layer_perc_step)
         # work in factors of 5% of the network
         cutoff = self.num_stability_layvers_to_check
         working_layers = self.layer_names[-cutoff:]
@@ -448,7 +410,6 @@ class SVDFixingModel(nn.Module):
                     reset_optimizer = True
                 if not stable:
                     all_stable = False
-        # dist.barrier()
         for layer in working_layers:
             if self.svd_modules[layer]["stable_delay"] == 0:
                 mod, working_rank = self.svd_modules[layer]["mod"], self.svd_modules[layer]["working_rank"]
@@ -460,9 +421,6 @@ class SVDFixingModel(nn.Module):
 
     @torch.no_grad()
     def get_perc_params_all_layers(self):
-        # self.sync_models()
-        # if self.skip_stability:
-        #     return
         if dist.is_initialized():
             rank = dist.get_rank()
         else:
@@ -470,7 +428,6 @@ class SVDFixingModel(nn.Module):
         # percs, actives, normals = [], [], []
         trainable = 0
         untrainable = 0
-        # print("in perc params")
         for n, p in self.model.named_parameters():
             # print(f"{n} {p.requires_grad}")
             if p.requires_grad:

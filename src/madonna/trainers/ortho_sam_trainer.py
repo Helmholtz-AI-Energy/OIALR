@@ -229,7 +229,7 @@ def main(config):  # noqa: C901
 
 def train(
     train_loader,
-    model: madonna.models.svd.SVDFixingModel,
+    model: madonna.models.svd.OIALRModel,
     criterion,
     epoch,
     device,

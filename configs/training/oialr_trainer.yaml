@@ -83,7 +83,7 @@ print_freq: 50
 svd_epoch_delay: 10
 svd_epoch_freq: 4
 fixing_method:
-  _target_: madonna.models.SVDFixingModel
+  _target_: madonna.models.OIALRModel
   _partial_: True
   stability_frequency: 1000
   delay: 4000
@@ -94,6 +94,5 @@ fixing_method:
   keep_last_layer: True
   reinit_shapes: True
   stable_update_delay: 1
-  create_svd_param_group: one  # null or one
   step_on_forward: True
   full_rank_warmup: True
