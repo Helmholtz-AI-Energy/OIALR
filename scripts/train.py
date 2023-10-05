@@ -4,12 +4,12 @@ import os
 import hydra
 import mlflow
 import torch
+import wandb
 from mpi4py import MPI
 from omegaconf import DictConfig, OmegaConf, open_dict
 from rich.pretty import pprint
 
 import madonna
-import wandb
 from madonna import utils
 
 try:
