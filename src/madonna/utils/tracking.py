@@ -11,10 +11,8 @@ import time
 from pathlib import Path
 
 import hydra
-import mlflow
 import torch
 import yaml
-from mlflow.entities import Experiment
 from omegaconf import DictConfig, OmegaConf, listconfig
 
 import wandb
@@ -31,7 +29,7 @@ log = logging.getLogger(__name__)
 
 
 @only_on_rank_n(run_on_rank=0)
-def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None:  # noqa: E302
+def setup_mlflow(config: DictConfig, verbose: bool = False):  # noqa: E302
     """Setup MLFlow server, connect to it, and set the experiment
 
     Parameters
@@ -41,6 +39,8 @@ def setup_mlflow(config: DictConfig, verbose: bool = False) -> Experiment | None
     verbose: bool
         if this should print the mlflow server on rank0
     """
+    import mlflow
+
     # if rank is not None:
     #     if dist.is_initialized() and dist.get_rank() != 0:
     #         return
@@ -83,6 +83,8 @@ def restart_mlflow_server(config: DictConfig):  # noqa: E302
     """
 
     # kill mlflow and start the server
+    import mlflow
+
     processname = "gunicorn"
     tmp = os.popen("ps -Af").read()
     proccount = tmp.count(processname)
@@ -120,20 +122,20 @@ def restart_mlflow_server(config: DictConfig):  # noqa: E302
 
 
 @only_on_rank_n(0)
-def log_config(config, keys=None):  # noqa: E302
+def log_config(config, wandb_logger, keys=None):  # noqa: E302
     # mlflow.log_params(config)
     for k in config:
         if isinstance(config[k], DictConfig):
             for k2 in config[k]:
                 if isinstance(config[k][k2], DictConfig):
-                    log_config(config[k][k2], keys=f"{k}-{k2}")
+                    log_config(config[k][k2], wandb_logger, keys=f"{k}-{k2}")
                 else:
                     # mlflow.log_param(f"{cat}-{k}-{k2}", config[cat][k][k2])
                     if keys is not None:
                         lpkeys = f"{keys}-{k}-{k2}"
                     else:
                         lpkeys = f"{k}-{k2}"
-                    mlflow.log_param(lpkeys, config[k][k2])
+                    wandb_logger.log({lpkeys: config[k][k2]})
         elif k == "_partial_":
             continue
         else:
@@ -141,7 +143,7 @@ def log_config(config, keys=None):  # noqa: E302
                 lpkeys = f"{keys}-{k}"
             else:
                 lpkeys = f"{k}"
-            mlflow.log_param(lpkeys, config[k])
+            wandb_logger.log({lpkeys: config[k][k2]})
 
 
 @only_on_rank_n(0)
@@ -226,7 +228,8 @@ class WandbLogger:
                 )
                 config = self.wandb_run.config
                 config.training.checkpoint = model_artifact_name
-
+        elif self.wandb and config.tracking.sweep is not None:
+            self.wandb_run = wandb.init()
         elif self.wandb:
             # init for new run
             self.wandb_run = wandb.init(
@@ -240,7 +243,7 @@ class WandbLogger:
             )
         log_file = config["log_file_out"]
         self.wandb_run.save(log_file)
-        self.log_dict = {}
+        self.setup_training(config)
 
     def setup_training(self, config):
         self.log_dict, self.current_epoch = {}, 0  # Logging Constants
@@ -292,6 +295,7 @@ class WandbLogger:
         if self.wandb_run:
             wandb.log(self.log_dict)
             self.log_dict = {}
+            self.current_epoch += 1
 
     def finish_run(self):
         if self.wandb_run:

@@ -6,11 +6,15 @@ import random
 import shutil
 import time
 from collections import defaultdict
+from copy import deepcopy
+from datetime import timedelta
 from enum import Enum
 from pathlib import Path
 
 import hydra
-import mlflow.pytorch
+
+# from mpi4py import MPI
+import numpy as np
 
 # import cProfile, pstats, io
 # from pstats import SortKey
@@ -22,10 +26,11 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
-from omegaconf import open_dict
+from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
 from rich.console import Console
+from rich.pretty import pprint
 from torch.autograd.grad_mode import no_grad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
@@ -34,6 +39,8 @@ from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, 
 
 import madonna
 import wandb
+
+# import mlflow.pytorch
 
 
 @no_grad()
@@ -100,17 +107,50 @@ def main(config):  # noqa: C901
         wdir.mkdir(parents=True, exist_ok=True)  # make dir
         log.info(f"out_dir (wdir): {wdir}")
         last = wdir / "last.pt"
-        best = wdir / "best.pt"
     else:
         wdir = None
     # results_file = save_dir / 'results.txt'
     # f = open(results_file, 'w')
     wandb_logger = madonna.utils.tracking.WandbLogger(config) if config.rank == 0 and config.enable_tracking else None
-    seed = config.seed
-    if config.iteration is not None:  # TODO: remove me after these things are no longer there
-        seed = config.iteration * 10000 * (1 + int(config.handle))
 
-    if seed is not None:
+    # ----------------- Sweep stuffs --------------------------
+    if config.tracking.sweep is not None:
+        from mpi4py import MPI
+
+        if config.rank == 0:
+            sweep_config = wandb.config._as_dict()
+            for key in sweep_config:
+                if key == "_wandb":
+                    continue
+                # print(key, key in config)
+                # if key in config:
+                OmegaConf.update(config, key, sweep_config[key])
+            # dict_config.update(sweep_config)
+            print(sweep_config)
+            # need to send and update all the dicts
+        dict_config = OmegaConf.to_container(config, resolve=False)
+
+        comm = MPI.COMM_WORLD
+        new_dict = comm.bcast(dict_config, root=0)
+
+        dict_config["rank"] = dist.get_rank()
+        config = OmegaConf.create(new_dict)
+        with open_dict(config):
+            config.rank = dist.get_rank() if dist.is_initialized() else 0
+
+        if config.rank == 0:
+            pprint(dict(config))
+            # madonna.utils.tracking.log_config(config, wandb_logger)
+            if wandb_logger is not None:
+                wandb_logger.log(dict_config)
+            # wandb_logger.wandb_run.config.update(dict_config)
+    # -------- Random Seed init --------------------------
+    if config.seed is None:
+        seed = torch.seed()
+        random.seed(torch.seed())
+    else:
+        seed = int(seed)
+
         cudnn.benchmark = True
         cudnn.deterministic = True
         # torch.manual_seed(args.local_rank)
@@ -119,8 +159,12 @@ def main(config):  # noqa: C901
         #     scale = dist.get_rank() % 4
         # else:
         #     scale = 0
-        random.seed(int(config["seed"]))
-        torch.manual_seed(int(config["seed"]))
+        random.seed(seed)
+        torch.manual_seed(seed)
+
+    if config.rank == 0:
+        log.info(f"Seed: {seed}")
+    # -------- End Random Seed init --------------------------
 
     if config.cpu_training:
         gpu = None
@@ -131,7 +175,9 @@ def main(config):  # noqa: C901
             gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
             log.debug(f"Using GPU: {gpu}")
         else:
+            log.info(f"available GPUS: {torch.cuda.device_count()}")
             gpu = 0
+            # log.info(f"available GPUS: {torch.cuda.device_count()}")
         torch.cuda.set_device(gpu)
         device = torch.device(f"cuda:{gpu}")
     # print('before get model')
@@ -222,18 +268,6 @@ def main(config):  # noqa: C901
         else:
             print(f"=> no checkpoint found at: {config.training.checkpoint}")
 
-    # if start_epoch == 0:
-    # set the learning rate to be based on the min_lr
-    # groups = optimizer.param_groups
-    # if not config.baseline:
-    #     groups = groups[:-1]
-    # for group in groups:
-    #     group["lr"] = config.training.min_lr + (warmup_scheduler.add_value * start_epoch)
-    # if not config.baseline:
-    #     optimizer.param_groups[-1]["lr"] = config.training.sigma_optimizer.min_lr + (
-    #         warmup_scheduler.sigma_add * start_epoch
-    #     )
-
     # out_base = None
     # if "checkpoint_out_root" in config.training and config.training.checkpoint_out_root is not None:
     #     out_base = Path(config.training.checkpoint_out_root)
@@ -269,6 +303,7 @@ def main(config):  # noqa: C901
     refactory_warmup = None
     len_train = len(train_loader)
     best_fitness = 0.0
+    last_val_top1s = []
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
@@ -276,39 +311,11 @@ def main(config):  # noqa: C901
             lr_list, prnt_str = get_lrs(optimizer)
             log.info(f"Begin epoch {epoch} LRs: {prnt_str}")
             lrs = {"lr": lr_list[0]}
-            # if not config.baseline:
-            #     metrics["sigma_lr"] = lr_dict["sigma"]
-            # mlflow.log_metrics(
-            #     metrics=metrics,
-            #     step=epoch,
-            # )
             if config.enable_tracking:
                 # wandb_logger.log(metrics, step=epoch * len_train)
                 wandb_logger.log(lrs)
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
-
-        # with torch.no_grad():
-        #     if not config.baseline and model.all_stable:
-        #         for n, p in model.named_parameters():
-        #             if n.endswith(".s") or n.endswith("_s"):
-        #                 # # TODO: remove later if not working
-        #                 # sdiag = torch.diag(self.s).clone()
-        #                 sdiag = torch.diag(p)
-        #                 # sdiag_diff1 = torch.diff(sdiag, n=1) * 0.001
-        #                 # sdiag_diff2 = torch.diff(sdiag, n=2) * 0.0001
-        #                 # # sdiag_diff3 = torch.diff(sdiag, n=3) * 0.001
-        #                 # for i in range(p.shape[0] - 1):
-        #                 #     p[i, i + 1] = sdiag_diff1[i]
-        #                 #     if i < p.shape[0] - 2:
-        #                 #         p[i, i + 2] = sdiag_diff2[i]
-
-        #                 mask = torch.abs(p) <= 1e-7
-        #                 # umask = torch.abs(p) > 1e-7
-
-        #                 # print(f"{n} -> {torch.count_nonzero(mask)}")
-        #                 p[mask] *= 0
-        #                 p[mask] += 1e-1 * torch.rand_like(p[mask]) * sdiag.min()
 
         train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
@@ -326,57 +333,17 @@ def main(config):  # noqa: C901
             wandb_logger=wandb_logger,
             metrics=train_metrics,
         )
-        if (
-            not config.baseline
-            and epoch >= config.training.svd_epoch_delay
-            and epoch % config.training.svd_epoch_freq == 0
-        ):
-            _ = model.model_stability_tracking(force=True)
-
-        # if epoch * len(train_loader) >= warmup_steps or epoch == config.training.epochs - 1:  # epoch % 2 == 1
-        # # one block ---------------------------------------------------------------------------------------------
-        # if not config.baseline and epoch in fib_epochs:
-        #     # try:
-        #     # dist.barrier()
-        #     # if rank == 0:
-        #     #     for n, p in model.named_parameters():
-        #     #         if n.endswith(("_s", ".s")) and p.grad is not None:
-        #     #             print(p.grad.mean(), p.grad.min(), p.grad.max(), p.mean())
-        #     # try:
-        #     #     scaler.step(optimizer=optimizer.sigma_opt)
-        #     #     scaler.update()
-        #     # except AssertionError:
-        #     #     # if this fails its most likely because the sigma values dont have any grads yet
-        #     #     pass
-        #     # optimizer.step(step_sigma=True, step_opt1=False)
-        #     optimizer.zero_grad(set_to_none=True, reset_sigma=True)
-        #     stabtime = time.perf_counter()
-        #     reset_optimizer, all_layers_stable = model.test_basis_stability_all_layers()
-        #     if all_layers_stable and not all_stable:
-        #         # NOTE: this will only do something when it isnt baseline
-        #         if rank == 0:
-        #             log.info("Deleting the full rank weights from the base optimizer")
-        #         optimizer.remove_full_rank_weights()
-        #         all_stable = all_layers_stable
-        #     if reset_optimizer:
-        #         optimizer.reset_shapes_of_sigma(model)
-        #     if rank == 0:
-        #         log.info(f"Stability time: {time.perf_counter() - stabtime}")
-        # # -------------------------------------------------------------------------------------------------------
-
-        # if model.skip_stability:
-        # for n, p in model.named_parameters():
-        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-        # model.sync_models()
-        # if epoch % 10 == 9 or epoch == config.training.epochs - 1:
-        #     if dist.get_rank() == 0:
-        #         for n, p in model.named_parameters():
-        #             print(f"{n} {p.requires_grad} sparcity: {torch.count_nonzero(torch.abs(p) < 1e-5) / p.numel()}")
+        # if (
+        #     not config.baseline
+        #     and epoch >= config.training.svd_epoch_delay
+        #     and epoch % config.training.svd_epoch_freq == 0
+        # ):
+        #     _ = model.model_stability_tracking(force=True)
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
         # evaluate on validation set
-        t1, val_loss = validate(
+        val_top1, val_loss = validate(
             val_loader=val_loader,
             model=model,
             criterion=criterion,
@@ -398,44 +365,53 @@ def main(config):  # noqa: C901
         # log the percentage of params in use
         if config.rank == 0 and not config.baseline:
             if hasattr(model, "get_perc_params_all_layers"):
-                perc, trainable, normal = model.get_perc_params_all_layers()
+                perc, trainable, normal, compression_perc = model.get_perc_params_all_layers()
                 if config.enable_tracking:
                     # mlflow.log_metric("perc_parmas", perc, step=epoch)
                     wandb_logger.log({"perc_parmas": perc})  # , step=(epoch + 1) * len_train)
-                log.info(f"% params: {perc:.3f}% trainable: {trainable} full: {normal}")
+                log.info(
+                    f"% params: {perc:.3f}% trainable: {trainable} full: {normal} compression: {compression_perc:.3f}%",
+                )
                 # model.track_interior_slices_mlflow(config, epoch)
 
         # log metrics
-        train_metrics_epoch = train_metrics.compute()
+        # train_metrics_epoch = train_metrics.compute()
         val_metrics_epoch = val_metrics.compute()
+        log_dict = {
+            # "train/f1": train_metrics_epoch["MulticlassF1Score"],
+            # "train/precision": train_metrics_epoch["MulticlassPrecision"],
+            # "train/recall": train_metrics_epoch["MulticlassRecall"],
+            # "train/loss": train_loss,
+            "val/f1": val_metrics_epoch["MulticlassF1Score"],
+            "val/precision": val_metrics_epoch["MulticlassPrecision"],
+            "val/recall": val_metrics_epoch["MulticlassRecall"],
+            # "val/loss": val_loss,
+        }
 
         # Save model
+        if dist.is_initialized():
+            wait = dist.barrier(async_op=True)
         if rank == 0 and config.enable_tracking:
-            if t1 > best_fitness:
-                best_fitness = t1
+            last_val_top1s.append(val_top1.item() if isinstance(val_top1, torch.Tensor) else val_top1)
+            if len(last_val_top1s) > 10:
+                slope, _ = np.polyfit(x=np.arange(10), y=np.array(last_val_top1s[-10:]), deg=1)
+                log.info(f"Slope of Top1 for last 10 epochs: {slope:.5f}")
+
+            if val_top1 > best_fitness:
+                best_fitness = val_top1
 
             # print(train_metrics_epoch)
-
-            log_dict = {
-                "train/f1": train_metrics_epoch["MulticlassF1Score"],
-                "train/precision": train_metrics_epoch["MulticlassPrecision"],
-                "train/recall": train_metrics_epoch["MulticlassRecall"],
-                # "train/loss": train_loss,
-                "val/f1": val_metrics_epoch["MulticlassF1Score"],
-                "val/precision": val_metrics_epoch["MulticlassPrecision"],
-                "val/recall": val_metrics_epoch["MulticlassRecall"],
-                # "val/loss": val_loss,
-            }
             log.info(
                 f"Epoch end metrics: \n\t"
-                f"train f1/prec/rec: {log_dict['train/f1']:.4f} / "
-                f"{log_dict['train/precision']:.4f} / {log_dict['train/recall']:.4f}"
-                f"\n\tval f1/prec/rec: {log_dict['val/f1']:.4f} / "
+                # f"train f1/prec/rec: {log_dict['train/f1']:.4f} / "
+                # f"{log_dict['train/precision']:.4f} / {log_dict['train/recall']:.4f}"
+                f"val f1/prec/rec: {log_dict['val/f1']:.4f} / "
                 f"{log_dict['val/precision']:.4f} / {log_dict['val/recall']:.4f}",
             )
             wandb_logger.log(log_dict)
 
-            wandb_logger.end_epoch(best_result=best_fitness == t1)
+            wandb_logger.end_epoch(best_result=best_fitness == val_top1)
+
             ckpt = {
                 "epoch": epoch,
                 "best_fitness": best_fitness,
@@ -444,39 +420,74 @@ def main(config):  # noqa: C901
                 "optimizer": optimizer.state_dict(),
                 "wandb_id": wandb_logger.wandb_run.id if wandb_logger.wandb else None,
             }
-
+            print("After ckpt")
             # Save last, best and delete
             if wdir is not None:
                 torch.save(ckpt, last)
-                if best_fitness == t1:
-                    torch.save(ckpt, best)
-                if (best_fitness == t1) and (epoch >= 200):
+                # if best_fitness == val_top1:
+                #     torch.save(ckpt, best)
+                #     print("After 1st save")
+                if best_fitness == val_top1:
                     torch.save(ckpt, wdir / "best_{:03d}.pt".format(epoch))
-                if epoch == 0:
+                    print("After best save")
+
+                if epoch == 0:  # first
                     torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-                elif ((epoch + 1) % 10) == 0:
+                    print("After 1st save")
+                elif (
+                    config.training.save_period != -1 and ((epoch + 1) % config.training.save_period) == 0
+                ):  # on command
                     torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-                elif epoch >= (config.training.epochs - 5):
-                    torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
-                if wandb_logger.wandb and config.enable_tracking:
-                    if (
-                        (epoch + 1) % config.training.save_period == 0 and not epoch == config.training.epochs - 1
-                    ) and config.training.save_period != -1:
-                        wandb_logger.log_model(
-                            last.parent,
-                            config,
-                            epoch,
-                            t1,
-                            best_model=best_fitness == t1,
-                        )
+                    print("After periodic save")
+                # elif epoch >= (config.training.epochs - 5):
+                #     torch.save(ckpt, wdir / "epoch_{:03d}.pt".format(epoch))
+
+                # if wandb_logger.wandb and config.enable_tracking:
+                #     if (
+                #         (epoch + 1) % config.training.save_period == 0 and not epoch == config.training.epochs - 1
+                #     ) and config.training.save_period != -1:
+                #         wandb_logger.log_model(
+                #             last.parent,
+                #             config,
+                #             epoch,
+                #             val_top1,
+                #             best_model=best_fitness == val_top1,
+                #         )
+                #         print("After wandb log model")
                 del ckpt
+        if dist.is_initialized():
+            # wait here for the saving and such...it didnt work to have it afterwards
+            wait.wait(timeout=timedelta(seconds=60))
+        # # early stopping for imagenet...
+        # if (val_top1 < 15. and epoch >= 5) or \
+        #    (val_top1 < 60. and epoch >= 25) or \
+        #    (val_top1 < 70. and epoch >= 50):  # or \
+        #     #    (val_top1 < 75. and epoch >= 70):  # or \
+        #     # (val_top1 < 78. and epoch >= 100):
+        #     if rank == 0:
+        #         log.info("Early stopping")
+        #     break
         # set up next epoch after saving everything
         # wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)
         train_metrics.reset()
         val_metrics.reset()
-    wandb_logger.finish_run()
-    return {"train loss": train_loss, "train top1": train_t1, "val loss": val_loss, "val t1": t1}
+    if rank == 0:
+        log.info("End of run")
+        wandb_logger.finish_run()
+    # import json
+    # val_top1 = val_top1 if not isinstance(val_top1, torch.Tensor) else val_top1.item()
+    # ret_dict = {"train_loss": train_loss, "train_top1": train_t1, "val_loss": val_loss, "val_top1": val_top1}
+    # # propulate minimizes...
+    # ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
+    # ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
+    # print("from train", ret_dict)
+    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+    # with open(out_file / f"{os.environ['RANK']}-output.txt", "w") as convert_file:
+    #     # convert_file.write(json.dumps(ret_dict))
+    #     json.dump(ret_dict, convert_file)
+    # return ret_dict
 
 
 def get_lrs(opt):
@@ -505,6 +516,7 @@ def train(
     refactory_warmup=None,
     mixup=None,
 ):
+    train_time0 = time.perf_counter()
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
@@ -517,16 +529,10 @@ def train(
     )
     # switch to train mode
     model.train()
-    model_time = 0
     if refactory_warmup is None:
         refactory_warmup = {}
 
     end = time.time()
-    lr_reset_steps = config.training.lr_reset_period
-    # last_lr = 0
-    steps_remaining = 0
-    step_factors = None
-    # print_norms = []
     updates_per_epoch = len(train_loader)
     num_updates = epoch * updates_per_epoch
     for i, data in enumerate(train_loader):
@@ -546,25 +552,6 @@ def train(
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
 
-        t0 = time.perf_counter()
-        # reset_lr_warmup = False
-        # if not config.baseline:
-        #     _ = model.model_stability_tracking()
-        # if reset_lr_warmup:
-        #     # reset the LR to a small value to avoid degredation in training
-        #     # last_lr = optimizer.opt1.param_groups[0]["lr"]
-        #     step_factors = (
-        #         optimizer.opt1.param_groups[0]["lr"] / lr_reset_steps,
-        #         optimizer.sigma_opt.param_groups[0]["lr"] / lr_reset_steps,
-        #         optimizer.opt1.param_groups[0]["lr"],
-        #         optimizer.sigma_opt.param_groups[0]["lr"],
-        #     )
-        #     optimizer.opt1.param_groups[0]["lr"] /= lr_reset_steps
-        #     if len(optimizer.opt1.param_groups) > 1:
-        #         optimizer.opt1.param_groups[1]["lr"] /= lr_reset_steps
-        #     optimizer.sigma_opt.param_groups[0]["lr"] /= lr_reset_steps
-        #     steps_remaining = lr_reset_steps - 1
-
         # if config.rank == 0 and i % 4 == 0:
         #     _, lrs = optimizer.get_lrs()
         #     print(f"LRS: {lrs}")
@@ -578,62 +565,34 @@ def train(
                 print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
             raise ValueError("NaN loss")
         scaler.scale(loss).backward()
-        # md = model if config.baseline else model.model
-        # TODO: move this back into the if block with scaling
 
-        # grads = [p.grad for p in model.parameters() if p.grad is not None]
-        # norm_type = 2.0
-        # if len(grads) == 0:
-        #     return torch.tensor(0.)
-        # first_device = grads[0].device
-        # grouped_grads = _group_tensors_by_device_and_dtype([[g.detach() for g in grads]])  # type: ignore[assignment]
-        # foreach = None
-        # norms = []
-        # for ((device, _), [grads]) in grouped_grads.items():
-        #     if (foreach is None or foreach) and _has_foreach_support(grads, device=device):
-        #         norms.extend(torch._foreach_norm(grads, norm_type))
-        #     elif foreach:
-        #         raise RuntimeError(f'foreach=True was passed, but can\'t use the foreach API on {device.type} tensors')
-        #     else:
-        #         norms.extend([torch.norm(g, norm_type) for g in grads])
-
-        # total_norm = torch.norm(torch.stack([norm.to(first_device) for norm in norms]), norm_type)
-        # print_norms.append(f"{total_norm.item():.5f}")
-
-        if config.training.max_grad_norm != -1:
+        if config.training.max_grad_norm > 0.0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
-
         scaler.step(optimizer)
         scaler.update()
-        # if i % 4 == 3 or i == len(train_loader) - 1:
-        # TODO: running sigma?
-        # running_sigma = False
-        model_time += time.perf_counter() - t0
 
-        # for n, p in model.named_parameters():
-        #     print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}, {p.requires_grad}")
-        # optimizer.step()
-        # measure accuracy and record loss
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, target, topk=(1, 5), mixup=mixup is not None)
         losses.update(loss.item(), images.size(0))
-        top1.update(acc1[0], images.size(0))
-        top5.update(acc5[0], images.size(0))
-        # print(output)
-        # print(output.shape)
-        metrics.update(output, target)
+        try:
+            top1.update(acc1[0], images.size(0))
+            top5.update(acc5[0], images.size(0))
+        except IndexError:
+            top1.update(acc1, images.size(0))
+            top5.update(acc5, images.size(0))
+        # metrics.update(output, target)
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
         num_updates += 1
-        if steps_remaining > 0:
-            for c, group in enumerate(optimizer.param_groups):
-                group["lr"] += step_factors[c]
-            steps_remaining = lr_reset_steps - 1
-        else:
-            # TODO: this will only work for timm schedulers
-            lr_scheduler.step_update(num_updates=num_updates, metric=loss)
+        # if steps_remaining > 0:
+        #     for c, group in enumerate(optimizer.param_groups):
+        #         group["lr"] += step_factors[c]
+        #     # steps_remaining = lr_reset_steps - 1
+        # else:
+        #     # TODO: this will only work for timm schedulers
+        lr_scheduler.step_update(num_updates=num_updates, metric=loss)
 
         # if argmax.std() == 0:
         #     log.error(f"ISSUE WITH NETWORK printing debugging info")
@@ -641,11 +600,6 @@ def train(
         #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
         #     raise ValueError
         argmax = torch.argmax(output, dim=1).to(torch.float32)
-        # if argmax.std() == 0 and epoch > 5:
-        #     if dist.get_rank() == 0:
-        #         for n, p in model.named_parameters():
-        #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-        #     raise ValueError("Std == 0")
 
         if (i % config.training.print_freq == 0 or i == len(train_loader) - 1) and config["rank"] == 0:
             argmax = torch.argmax(output, dim=1).to(torch.float32)
@@ -658,36 +612,8 @@ def train(
 
         optimizer.zero_grad()
 
-    # if config.rank == 0:
-    #     for n, p in model.named_parameters():
-    #         if n.endswith("bias"):
-    #             print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-    #     raise ValueError
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
-
-    # if config.rank == 0:
-    #     columns = Columns(print_norms, equal=True, width=20)
-    #     console = Console(width=100)
-    #     console.print(columns)
-    #     table = Table(title="Param grads")
-
-    #     table.add_column("Name")
-    #     table.add_column("param norm")
-
-    #     dictionary={"Lionel Messi":35, "Cristiano Ronaldo":37, "Raheem Sterling":28, "Kylian Mbappé":24, "Mohamed Salah":30}
-
-    #     for name,age in dictionary.items():
-    #         table.add_row(name,str(age))
-
-    #     console = Console()
-    #     console.print(table)
-
-    # if step_factors is not None and steps_remaining > 0:
-    #     optimizer.opt1.param_groups[0]["lr"] = step_factors[2]
-    #     if len(optimizer.opt1.param_groups) > 1:
-    #         optimizer.opt1.param_groups[1]["lr"] = step_factors[2]
-    #     optimizer.sigma_opt.param_groups[0]["lr"] = step_factors[3]
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -704,7 +630,7 @@ def train(
                 "train/loss": ls,
                 "train/top1": t1,
                 "train/top5": t5,
-                "train/time": model_time,
+                "train/time": time.perf_counter() - train_time0,
             },
         )
     return losses.avg, loss, refactory_warmup, t1
@@ -828,7 +754,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
     #     for n, p in model.named_parameters():
     #         print(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
     #     raise ValueError
-
+    vt1 = time.perf_counter()
     run_validate(val_loader)
 
     if len(val_loader.sampler) * config["world_size"] < len(val_loader.dataset):
@@ -844,6 +770,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
             pin_memory=True,
         )
         run_validate(aux_val_loader, len(val_loader))
+    val_time_total = time.perf_counter() - vt1
 
     if dist.is_initialized():
         losses.all_reduce()
@@ -861,6 +788,7 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                 "val/loss": ls,
                 "val/top1": t1,
                 "val/top5": t5,
+                "val/total_time": val_time_total,
             },
             # step=(epoch + 1) * len_train,
         )
@@ -1057,18 +985,33 @@ class ProgressMeter:
         return "[" + fmt + "/" + fmt.format(num_batches) + "]"
 
 
-def accuracy(output, target, topk=(1,)):
+def accuracy(output, target, topk=(1,), mixup=False):
     """Computes the accuracy over the k top predictions for the specified values of k"""
     with torch.no_grad():
         maxk = max(topk)
         batch_size = target.size(0)
 
         _, pred = output.topk(maxk, 1, True, True)
-        pred = pred.t()
-        correct = pred.eq(target.view(1, -1).expand_as(pred))
+        if not mixup:
+            pred = pred.t()
+            correct = pred.eq(target.view(1, -1).expand_as(pred))
+            res = []
+            for k in topk:
+                correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
+                res.append(correct_k.mul_(100.0 / batch_size))
+            return res
+        else:
+            maxk = max(topk)
+            batch_size = target.size(0)
+            if target.ndim == 2:
+                target = target.max(dim=1)[1]
 
-        res = []
-        for k in topk:
-            correct_k = correct[:k].reshape(-1).float().sum(0, keepdim=True)
-            res.append(correct_k.mul_(100.0 / batch_size))
-        return res
+            _, pred = output.topk(maxk, 1, True, True)
+            pred = pred.t()
+            correct = pred.eq(target[None])
+
+            res = []
+            for k in topk:
+                correct_k = correct[:k].flatten().sum(dtype=torch.float32)
+                res.append(correct_k * (100.0 / batch_size))
+            return res

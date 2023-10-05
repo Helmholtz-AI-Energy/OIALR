@@ -1,11 +1,11 @@
 dataset: cifar100
 data_dir_horeka: "/hkfs/home/dataset/datasets/CIFAR100/"
 data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar100"
-num_workers: 1
+num_workers: 6
 pin_memory: True
-local_batch_size: 512 # 512 -> OOM error
-timm_transforms: False
-persistent_workers: False
+local_batch_size: 512
+timm_transforms: True
+persistent_workers: True
 distributed_sample: True
 distributed_sample_val: True
 train_crop_size: 32

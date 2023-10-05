@@ -12,7 +12,7 @@ import torch.utils.data
 import torch.utils.data.distributed as datadist
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf, open_dict
 from PIL import ImageFile
 from timm.data.mixup import Mixup
 from timm.data.transforms_factory import create_transform
@@ -86,8 +86,10 @@ def get_dataset(
         # mode: batch
         # TODO: update the number of classes here...
         # config.training.mixup_args.num_classes =
-        config.training.mixup_args.label_smoothing = config.training.criterion.label_smoothing
-        mixup_fn = Mixup(config.training.mixup_args)
+        with open_dict(config):
+            config.training.mixup_args.label_smoothing = config.training.criterion.label_smoothing
+            config.training.mixup_args.num_classes = config.data.classes
+        mixup_fn = Mixup(**OmegaConf.to_container(config.training.mixup_args))
         dset_dict["mixup"] = mixup_fn
 
     return dset_dict
@@ -392,6 +394,8 @@ def imagenet_train_dataset_plus_loader(
             ],
         )
 
+    if dsconfig.use_mini:
+        train_dir = Path(config.data.mini_dir) / "train"
     train_dataset = datasets.ImageFolder(
         str(train_dir),
         transform,
@@ -437,9 +441,10 @@ def imagenet_get_val_dataset_n_loader(
     elif config.data.dali:
         raise ImportError("Attempt to use DALI but DALI not installed")
 
+    crop_size = config.data.val_crop_size
     if dsconfig["timm_transforms"]:
         transform = create_transform(
-            224,
+            crop_size,
             is_training=False,
             mean=(0.485, 0.456, 0.406),
             std=(0.229, 0.224, 0.225),
@@ -450,7 +455,7 @@ def imagenet_get_val_dataset_n_loader(
         transform = transforms.Compose(
             [
                 transforms.Resize(256),
-                transforms.CenterCrop(224),
+                transforms.CenterCrop(crop_size),  # train_crop_size),
                 transforms.ToTensor(),
                 imagenet_normalize,
             ],
@@ -539,9 +544,6 @@ def cifar10_train_dataset_plus_loader(config, group_size=None, group_rank=None, 
             transforms.ToTensor(),
             cifar10_normalize,
         ]
-        trans_list.extend(
-            [],
-        )
         transform = transforms.Compose(trans_list)
 
     train_dataset = datasets.CIFAR10(
@@ -657,6 +659,11 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
             auto_augment="rand-m9-mstd0.5",
             mean=(0.4914, 0.4822, 0.4465),
             std=(0.2023, 0.1994, 0.2010),
+            crop_pct=1.0,
+            scale=[0.8, 1.0],
+            interpolation="random",
+            re_prob=0.25,
+            re_mode="pixel",
         )
     else:
         trans_list = [
@@ -677,8 +684,15 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
     )
 
     # Data loader
-    if dist.is_initialized() and dsconfig["distributed_sample"]:
-        train_sampler = datadist.DistributedSampler(train_dataset, shuffle=True)
+    if dist.is_initialized() and config.data.distributed_sample:
+        train_sampler = datadist.DistributedSampler(train_dataset)
+    elif dist.is_initialized() and group_size is not None and group_size > 1:
+        train_sampler = datadist.DistributedSampler(
+            train_dataset,
+            rank=group_rank,
+            num_replicas=group_size,
+            seed=dist.get_rank() // group_size,
+        )
     else:
         train_sampler = None
 
@@ -687,7 +701,7 @@ def cifar100_train_dataset_plus_loader(config, group_size=None, group_rank=None,
         batch_size=batch_size,
         shuffle=(train_sampler is None),
         sampler=train_sampler,
-        pin_memory=True,  # dsconfig["num_workers"],
+        pin_memory=False,  # dsconfig["num_workers"],
         num_workers=workers,
         persistent_workers=dsconfig["persistent_workers"],
     )
@@ -706,9 +720,22 @@ def cifar100_val_dataset_n_loader(config, group_size=None, group_rank=None, num_
     # workers = dsconfig["num_workers"]
     val_dir = Path(base_dir) / "val"
 
-    trans = [transforms.ToTensor(), transforms.Resize(config.data.train_crop_size)]
-    trans.append(cifar10_normalize)
-    trans = transforms.Compose(trans)
+    if dsconfig["timm_transforms"]:
+        trans = create_transform(
+            config.data.train_crop_size,
+            is_training=False,
+            mean=[0.4914, 0.4822, 0.4465],
+            std=[0.2023, 0.1994, 0.2010],
+            crop_pct=1.0,
+            interpolation="bicubic",
+        )
+    else:
+        trans = [
+            transforms.ToTensor(),
+            transforms.Resize(config.data.train_crop_size, antialias=True),
+            cifar10_normalize,
+        ]
+        trans = transforms.Compose(trans)
 
     test_dataset = datasets.CIFAR100(
         root=str(val_dir),

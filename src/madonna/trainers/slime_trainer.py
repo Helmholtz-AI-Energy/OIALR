@@ -8,7 +8,6 @@ import time
 from enum import Enum
 from pathlib import Path
 
-import mlflow.pytorch
 import torch
 import torch.distributed as dist
 import torch.optim
@@ -25,6 +24,8 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
+    import mlflow.pytorch
+
     if config.seed is not None:
         random.seed(int(config["seed"]) + config.rank)
         torch.manual_seed(int(config["seed"]) + config.rank)
@@ -139,6 +140,8 @@ def train(
     log=None,
     scaler=None,
 ):
+    import mlflow.pytorch
+
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
@@ -268,6 +271,7 @@ def save_selected_weights(network, epoch):
 
 def validate(val_loader, model, criterion, config, epoch, log):
     # console.rule("validation")
+    import mlflow.pytorch
 
     def run_validate(loader, base_progress=0):
         rank = 0 if not dist.is_initialized() else dist.get_rank()

@@ -4,6 +4,7 @@ from omegaconf import DictConfig, OmegaConf, errors, open_dict
 
 
 def obj_train():
+    # print("obj fn")
     import os
 
     rank = os.environ["RANK"]
@@ -20,18 +21,15 @@ def obj_train():
         base_config.hydra.job_logging.handlers.file.filename = (
             "${hydra.runtime.output_dir}/${hydra.job.name}-rank${handle}-${iteration}.log"
         )
-    # print(base_config)
     # return
+    # print(base_config)
     OmegaConf.save(base_config, base_config_path / f"propulate-{rank}.yaml")
 
     import json
-    import time
 
     import hydra
 
     import madonna
-
-    time.sleep(0.1 * int(rank))
 
     @hydra.main(config_path="../configs", config_name=f"propulate-{rank}.yaml", version_base=hydra.__version__)
     def train(config: DictConfig):
@@ -64,14 +62,18 @@ def obj_train():
             config["global_batch_size"] = config.data.local_batch_size
 
         fn = madonna.trainers.ortho_fix_train.main
+        try:
+            fn(config)
+        except ValueError:
+            ret_dict = {"train_loss": 2.5, "train_top1": 0.0, "val_loss": 2.5, "val_top1": 0.0}
 
-        ret_dict = fn(config)
-        # propulate minimizes...
-        ret_dict["train top1"] = 1 - (ret_dict["train top1"] * 0.01)
-        ret_dict["val top1"] = 1 - (ret_dict["val top1"] * 0.01)
-        print("from train", ret_dict)
-        out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
-        with open(out_file / f"{rank}-output.txt", "w") as convert_file:
-            convert_file.write(json.dumps(ret_dict))
+            # propulate minimizes...
+            ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
+            ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
+            # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+            out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+            with open(out_file / f"{rank}-output.txt", "w") as convert_file:
+                # convert_file.write(json.dumps(ret_dict))
+                json.dump(ret_dict, convert_file)
 
     train()

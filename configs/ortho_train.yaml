@@ -3,7 +3,7 @@
 defaults:
   - _self_
   - data: cifar10.yaml # imagenet.yaml # mnist.yaml #
-  - model: vit.yaml # resnet-rs.yaml  # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
+  - model: vit.yaml # resnet-rs.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
   - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: svd_trainer.yaml # cnn-imagenet.yaml  # gsam_trainer.yaml # qr_fix_trainer.yaml #
   - log_dir: default.yaml
@@ -26,12 +26,6 @@ hydra:
     handlers:
       file:
         filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
-  #     console:
-  #       class: logging.NullHandler
-  # hydra_logging:
-  #   handlers:
-  #     console:
-  #       class: logging.NullHandler
 
 # path to original working directory
 # hydra hijacks working directory by changing it to the new log directory
@@ -43,7 +37,7 @@ print_config: False
 train: True
 validate: True
 test: False
-seed: 123454321 # 62485435  # 123454321 # 420 # 42 # 69
+seed: null  # 69 # 62485435  # 123454321 # 420 # 42 # 69
 # default name for the experiment in mlflow, determines the default logging folder path
 # (you can overwrite this name in experiment configs)
 name: "propulate-svd"

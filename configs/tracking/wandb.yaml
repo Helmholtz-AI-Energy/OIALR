@@ -13,4 +13,8 @@
 #   job_type: "train"
 #   group: ""
 #   tags: []
-project: "madonna2"
+project: "madonna3"
+sweep: null
+tags:
+  - final
+# sweep: hai-energy/madonna2/c8lvtgxy

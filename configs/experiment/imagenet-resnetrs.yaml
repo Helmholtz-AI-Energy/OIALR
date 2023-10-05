@@ -1,0 +1,58 @@
+# Config params for CIFAR10 + ViT
+data:
+  train_crop_size: 160
+model:
+  _target_: timm.models.resnetrs101
+  drop_rate: 0.25
+training:
+  # # SVD =============================================
+  # lr: 0.0003
+  # lr_schedule:
+  #   epochs: 300  # number of epochs for the cycle to run for
+  #   warmup_epochs: 10
+  #   min_lr: 0.0008  # min LR of cosine annealing pattern
+  #   warmup_lr: 0.0001  # starting point of warmup
+  #   lr_cycle_mul: 1.0  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
+  #   lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+  #   lr_k_decay: 0.34  # default
+  # Baseline =============================================
+  lr: 0.001
+  lr_schedule:
+    sched: cosine  # cosine LR scheduler from timm
+    epochs: 290  # number of epochs for the cycle to run for
+    warmup_epochs: 10
+    cooldown_epochs: 10
+    min_lr: 1.0e-5  # min LR of cosine annealing pattern
+    warmup_lr: 1.0e-5  # starting point of warmup
+    warmup_prefix: True  # default
+    lr_cycle_mul: 1.0  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
+    lr_cycle_limit: 500
+    lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+    lr_k_decay: 0.34  # default
+    sched_on_updates: True
+  # =============================================
+  optimizer:
+    _target_: torch.optim.AdamW
+    _partial_: True
+    weight_decay: 0.001  # default 0.01
+    beta1: 0.9
+    beta2: 0.999
+  max_grad_norm: 1.
+
+  svd_epoch_delay: 50
+  svd_epoch_freq: 10
+  fixing_method:
+    _target_: madonna.models.SVDFixingModel
+    _partial_: True
+    stability_frequency: 100
+    delay: 200
+    uvhthreshold: 0.99
+    sigma_cutoff_fraction: 0.15
+    keep_first_layer: False
+    keep_last_layer: True
+    reinit_shapes: True
+    stable_update_delay: 0
+    create_svd_param_group: one  # null or one
+  epochs: 300
+  mixup: True
+  sync_batchnorm: True

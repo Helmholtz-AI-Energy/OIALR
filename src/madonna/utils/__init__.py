@@ -14,8 +14,12 @@ def get_model(config):
     if config.model is None:
         raise ValueError("model must be specified")
     if config.model.name.startswith("vit"):
-        config.model.model.image_size = config.data.train_crop_size
-    config.model.model.num_classes = config.data.classes
+        try:
+            config.model.model.image_size = config.data.train_crop_size
+        except Exception:
+            config.model.model.img_size = config.data.train_crop_size
+    with open_dict(config):
+        config.model.model.num_classes = config.data.classes
     # if config.model.name.startswith("resnetrs"):
     #     config.model.model.image_size = config.data.train_crop_size
     model: nn.Module = hydra.utils.instantiate(config.model.model)
@@ -88,8 +92,13 @@ def get_lr_schedules(config, optim, len_ds=None):
     if config.training.lr_schedule._target_ is None:
         # Using timm lr schedulers if its None..
         with open_dict(config):
-            if "epochs" not in config.training.lr_schedule:
-                epochs = config.training.epochs - config.training.lr_schedule.warmup_epochs
+            # if "epochs" not in config.training.lr_schedule:
+            #     epochs = config.training.epochs - config.training.lr_schedule.warmup_epochs
+            #     config.training.lr_schedule.epochs = epochs
+            # else:
+            total_epochs = config.training.lr_schedule.epochs + config.training.lr_schedule.warmup_epochs
+            if total_epochs > config.training.epochs:
+                epochs = config.training.lr_schedule.epochs - config.training.lr_schedule.warmup_epochs
                 config.training.lr_schedule.epochs = epochs
         scheduler, _ = create_scheduler(args=config.training.lr_schedule, optimizer=optim, updates_per_epoch=len_ds)
         return scheduler, None

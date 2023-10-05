@@ -1,0 +1,8 @@
+model: # vit_b_16
+  _target_: timm.models.resnetrs101
+  drop_rate: 0.25  # Dropout probability before classifier, for training
+  drop_path_rate: 0.  # Stochastic depth drop-path rate
+  drop_block_rate: 0.  # Drop block rate
+
+name: resnetrs101
+autocast: True

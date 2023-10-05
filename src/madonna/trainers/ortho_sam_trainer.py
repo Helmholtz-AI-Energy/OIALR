@@ -9,7 +9,6 @@ from enum import Enum
 from pathlib import Path
 
 import hydra
-import mlflow.pytorch
 
 # import cProfile, pstats, io
 # from pstats import SortKey
@@ -30,6 +29,8 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
+    import mlflow.pytorch
+
     torch.set_printoptions(precision=5)
     if config.seed is not None:
         cudnn.benchmark = True
@@ -238,6 +239,8 @@ def train(
     warmup_scheduler=None,
     refactory_warmup=None,
 ):
+    import mlflow.pytorch
+
     # train_time_start = time.perf_counter()
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
@@ -410,6 +413,8 @@ def save_selected_weights(network, epoch, config):
 
 @torch.no_grad()
 def validate(val_loader, model, criterion, config, epoch, device, print_on_rank, pg):
+    import mlflow.pytorch
+
     def run_validate(loader, base_progress=0):
         # rank = 0 if not dist.is_initialized() else dist.get_rank()
         with torch.no_grad():

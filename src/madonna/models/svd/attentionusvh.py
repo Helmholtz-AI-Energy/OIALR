@@ -321,26 +321,6 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             if self._qkv_same_embed_dim:  # `in` case
                 u, s, vh = torch.linalg.svd(self.in_proj_weight, full_matrices=False)
 
-                # nn.init.xavier_uniform_(self.in_proj_weight)
-                # u2, s2, vh2 = torch.linalg.svd(self.in_proj_weight, full_matrices=False)  # TS matrix so its not a big deal
-                # cutoff = s[0] * 0.4
-                # cutoff_index = torch.nonzero(s < cutoff)
-                # if len(cutoff_index) > 0:
-                #     cutoff_index = cutoff_index[0]
-                #     u = u[:, :cutoff_index].contiguous()
-                #     vh = vh[:cutoff_index].contiguous()
-                #     s = s[:cutoff_index]
-                # cutoff2 = s2[0] * 0.4
-                # cutoff_index2 = torch.nonzero(s2 < cutoff2)
-                # if len(cutoff_index2) > 0:
-                #     cutoff_index2 = cutoff_index2[0]
-                #     u2 = u2[:, :cutoff_index2].contiguous()
-                #     vh2 = vh2[:cutoff_index2].contiguous()
-                #     s2 = s2[:cutoff_index2]
-                # u = torch.cat([u, u2], dim=1)
-                # vh = torch.cat([vh, vh2], dim=0)
-                # s = torch.diag(torch.cat([s, s2]))
-
                 self.in_proj_u = Parameter(u.contiguous(), requires_grad=False)
                 self.in_proj_s = Parameter(torch.diag(s).contiguous(), requires_grad=True)
                 self.in_proj_vh = Parameter(vh.contiguous(), requires_grad=False)
@@ -950,13 +930,19 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         sdiag = torch.diag(s) if self.full_rank_sigma else s
         prevsl = sl.clone()
         # if getattr(self, f"uvh_stable_{qkvin}"):
-        # min_dim = int(vh.shape[-1] * 0.01)  # always TS
+        min_dim = int(vh.shape[-1] * 0.01)  # always TS
         # cutoff = sdiag[min_dim] * self.sigma_cutoff_fraction
         cutoff = s[0] * self.sigma_cutoff_fraction
         nz = torch.nonzero(sdiag < cutoff)
+
         if len(nz) == 0:
             # In this case ALL of the basis vectors are useful
             newsl = s.shape[0]
+        elif nz[0] < prevsl * 0.5 and prevsl * 0.5 > min_dim:
+            # add breaking, dont let it cut off more than 50% of the values
+            newsl = int(prevsl * 0.5)
+        elif nz[0].item() < min_dim:
+            newsl = min_dim
         else:
             newsl = nz[0].item()
 

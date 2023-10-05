@@ -12,8 +12,13 @@ distributed_sample: True
 prefetch_factor: 4
 distributed_sample_val: True
 train_crop_size: 160
+val_crop_size: 224
 dali: False
 classes: 1000
+
+use_mini: False
+# mini_file_list: "/hkfs/work/workspace/scratch/qv2382-madonna/datasets/imagenet-mini/base.json"
+mini_dir: "/hkfs/work/workspace/scratch/qv2382-madonna/datasets/imagenet-mini/links/"
 
 use_real: True
 real_label_location: "/hkfs/work/workspace/scratch/qv2382-madonna/datasets/imagenet-real/reassessed-imagenet/real.json"

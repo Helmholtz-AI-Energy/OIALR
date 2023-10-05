@@ -82,11 +82,11 @@ class SVDLinearUSVh(nn.Module):
 
         if start_weight is not None:
             self.weight = start_weight
-        # else:
-        #     # changed from empty
-        # self.weight = torch.empty((out_features, in_features), **factory_kwargs)
-        # nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        # self.weight = nn.Parameter(self.weight)
+        else:
+            # changed from empty
+            self.weight = torch.empty((out_features, in_features), **factory_kwargs)
+            nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+            self.weight = nn.Parameter(self.weight)
 
         if out_features >= in_features:  # simplest case (no transpose)
             self.trans = False
@@ -170,12 +170,17 @@ class SVDLinearUSVh(nn.Module):
         # new plan for cutoff - instead of using s[0] use 1% of the minimum
         # this will enforce that the array never shrinks below 1%
         cutoff = s[0] * self.sigma_cutoff_fraction
-        # min_dim = int(self.vh.shape[-1] * 0.01)  # always TS
+        min_dim = int(self.vh.shape[-1] * 0.01)  # always TS
         # cutoff = s[min_dim] * self.sigma_cutoff_fraction
         nz = torch.nonzero(s < cutoff)
         if len(nz) == 0:
             # In this case ALL of the basis vectors are useful
             newk = s.shape[0]
+        elif nz[0] < prevk * 0.5 and prevk * 0.5 > min_dim:
+            # add breaking, dont let it cut off more than 50% of the values
+            newk = int(prevk * 0.5)
+        elif nz[0].item() < min_dim:
+            newk = min_dim
         else:
             newk = nz[0].item()
 
@@ -255,6 +260,7 @@ class SVDLinearUSVh(nn.Module):
             f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
             f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
         )
+        # log.info(f"singular values: {torch.diag(self.s)[:50].tolist()}")
 
         self.inner_dim_buffer[0] = self.inner_dim.to(dtype=torch.float)
         self.inner_dim_buffer[1] = status["csmean"]

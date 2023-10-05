@@ -10,12 +10,17 @@ import torch.optim as optim
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import parametrizations, parametrize
 
-from ..utils import change_adam_shapes, change_sgd_shapes, create_svd_param_groups
+from ..utils import (
+    change_adam_shapes,
+    change_sgd_shapes,
+    create_svd_param_groups,
+    replace_opt_state_with_svd_adam,
+)
 from .attention import SVDMultiheadAttention
 from .attentionusvh import SVDMultiheadAttentionUSVh
 from .attentionvh import SVDMultiheadAttentionVh
 from .conv import SVDConv2d
-from .convusvh import SVDConv2dUSVh
+from .convusvh import SVDConv1dUSVh, SVDConv2dUSVh
 from .convvh import SVDConv2dVh
 from .linear import SVDLinear
 from .linearusvh import SVDLinearUSVh
@@ -41,7 +46,7 @@ def copy_attr(a, b, include=(), exclude=()):
 class SVDFixingModel(nn.Module):
     def __init__(
         self,
-        existing_model: nn.Module,
+        full_rank_model: nn.Module,
         stability_frequency: int = 10,
         delay: int = 100,
         uvhthreshold: float = 0.999,  # TODO: remove me!
@@ -51,17 +56,22 @@ class SVDFixingModel(nn.Module):
         reinit_shapes: bool = True,
         stable_update_delay: int = 0,
         create_svd_param_group: str = None,  # options: 'one', 'many'
+        step_on_forward: bool = False,
+        full_rank_warmup: bool = True,
     ):
         super().__init__()
 
         num = 0
-        for n, p in existing_model.named_parameters():
-            if p.requires_grad:
-                if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
+        full_params = 0
+        for n, p in full_rank_model.named_parameters():
+            if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
+                full_params += p.numel()
+                if p.requires_grad:
                     # print(f"{n}: {p.numel()}")
                     num += p.numel()
 
         self.base_trainable_parameters = num
+        self.base_all_parameters = full_params
 
         self.uvhthreshold = uvhthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -71,28 +81,25 @@ class SVDFixingModel(nn.Module):
         self.keep_last_layer = keep_last_layer
         self.last_layer = None
         self.reinit_shapes = reinit_shapes
-        self.local_model = self._replace_layers(existing_model)
+        self.full_rank_warmup = full_rank_warmup
+        self.rank = 0 if not dist.is_initialized() else dist.get_rank()
+        self.local_full_rank_model = full_rank_model
+        self.low_rank_replacement_list = {}
 
-        if keep_last_layer:
-            self._reset_last_layer(self.local_model)
-        self.rank = 0
-
-        if dist.is_initialized():
-            self.rank = dist.get_rank()
-
-            if dist.get_rank() == 0:
-                log.info("Initializing DDP")
-            self.model = DDP(self.local_model, find_unused_parameters=False)
-            self.module = self.model.module
-            self.ddp_model = self.model
+        if full_rank_warmup and delay > 0:
+            if self.rank == 0:
+                log.info("Starting with training in full rank")
+            self.model = self.local_full_rank_model
+            if dist.is_initialized():
+                if self.rank == 0:
+                    log.info("Initializing DDP")
+                self.model = DDP(full_rank_model, find_unused_parameters=False)
         else:
-            self.model = self.local_model
-            self.ddp_model = self.model
-
-            # print(self.local_model)
+            self.setup_low_rank_training(skip_optimizer_init=True)
 
         # self.compiled_model = torch.compile(self.model)
         # raise ValueError("")
+        self.step_on_forward = step_on_forward
         self.stability_frequency = stability_frequency
         self.call_count = 0
         self.num_stability_layvers_to_check = 0
@@ -104,7 +111,55 @@ class SVDFixingModel(nn.Module):
         self.stable_list = []
         self.stable_update_delay = stable_update_delay
 
-        # self.svd_modules = []
+        self.fib1, self.fib2 = 0, 1
+        self.next_stability_iteration = self.delay + self.fib1
+
+        self.optimizer = None  # optimizers.MixedSVDOpt
+        self.local_generator = torch.Generator()
+        self.local_generator.manual_seed(self.rank)
+
+        self.all_stable = False
+        self.state_dict = self.model.state_dict
+        self.parameters = self.model.parameters
+        self.named_parameters = self.model.named_parameters
+        self.named_modules = self.model.named_modules
+        self.named_buffers = self.model.named_buffers
+        self.named_children = self.model.named_children
+        self.children = self.model.children
+        self.cuda = self.model.cuda
+        # TODO: add other methods here??
+        self.__repr__ = self.model.__repr__
+        self.create_svd_param_group = create_svd_param_group
+        self.train = self.model.train
+
+    def set_optimizer(self, optimizer):
+        self.optimizer = optimizer  # optimizers.MixedSVDOpt
+        if isinstance(optimizer, (optim.Adam, optim.AdamW)):
+            self.reshape_opt_state_fn = change_adam_shapes
+        elif isinstance(optimizer, optim.SGD):
+            self.reshape_opt_state_fn = change_sgd_shapes
+
+        # if self.create_svd_param_group is not None:
+        #     create_svd_param_groups(optimizer, model=self.model, individual_groups=False)
+        #     # after this groups are: [non2d, full rank weights, sigma weights]
+        #     if "weight_decay" in optimizer.param_groups[2]:
+        #         optimizer.param_groups[2]["weight_decay"] *= 0.
+
+    @torch.no_grad()
+    def setup_low_rank_training(self, skip_optimizer_init=False):
+        if self.rank == 0:
+            log.info("Starting with training in low rank")
+        self.local_low_rank_model = self._replace_layers(self.local_full_rank_model)
+
+        if self.keep_last_layer:
+            self._reset_last_layer(self.local_low_rank_model)
+
+        if dist.is_initialized():
+            if self.rank == 0:
+                log.info("Initializing DDP")
+            self.model = DDP(self.local_low_rank_model, find_unused_parameters=False)
+        else:
+            self.model = self.local_low_rank_model
         self.svd_modules = {}
         self.layer_names = []
         calls = 0
@@ -122,52 +177,15 @@ class SVDFixingModel(nn.Module):
                         calls += 3
                 except AttributeError:
                     calls += 1
-        self.fib1, self.fib2 = 0, 1
-        self.next_stability_iteration = self.delay + self.fib1
-        # n1, n2 = 0, 1
-        # start = 100 -> delay
-        # offset = 10 -> frequency
-        # fib_epochs = [n1 + start]
-        # while n2 < 200:
-        #     n1, n2 = n2, n1 + n2
-        #     fib_epochs.append(start + (n2 * offset))
-        #     print(fib_epochs)
-        # # fib_epochs.pop()
-        # # fib_epochs.append(200 - 1)
-        self.optimizer = None  # optimizers.MixedSVDOpt
-        self.local_generator = torch.Generator()
-        self.local_generator.manual_seed(self.rank)
-
-        self.all_stable = False
-        self.state_dict = self.model.state_dict
-        self.parameters = self.model.parameters
-        self.named_parameters = self.model.named_parameters
-        self.named_modules = self.model.named_modules
-        self.named_buffers = self.model.named_buffers
-        self.named_children = self.model.named_children
-        self.children = self.model.children
-        self.cuda = self.model.cuda
-        # TODO: add other methods here??
-        self.__repr__ = self.model.__repr__
-        self.create_svd_param_group = create_svd_param_group
-
-    def set_optimizer(self, optimizer):
-        self.optimizer = optimizer  # optimizers.MixedSVDOpt
-        if isinstance(optimizer, (optim.Adam, optim.AdamW)):
-            self.reshape_opt_state_fn = change_adam_shapes
-        elif isinstance(optimizer, optim.SGD):
-            self.reshape_opt_state_fn = change_sgd_shapes
-
-        if self.create_svd_param_group is not None:
-            create_svd_param_groups(optimizer, model=self.ddp_model, individual_groups=False)
-            # after this groups are: [non2d, full rank weights, sigma weights]
-            # if "weight_decay" in optimizer.param_groups[2]:
-            # optimizer.param_groups[2]["lr"] *= 0.1
+        if not skip_optimizer_init:  # only need to do this if we start in full rank...i think
+            # if self.create_svd_param_group is not None:
+            #     create_svd_param_groups(self.optimizer, model=self.model, individual_groups=False)
+            replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
         # print(f'wrapping {name} {module}')
-        if isinstance(module, nn.Linear):
+        if isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
             if not self.first_layer:
                 module_output = SVDLinearUSVh(
                     in_features=module.in_features,
@@ -185,6 +203,7 @@ class SVDFixingModel(nn.Module):
                 # module_output = parametrizations.orthogonal(module_output, name="vh")  # TODO: trans?
                 # module_output = torch.compile(module_output)
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+                self.low_rank_replacement_list[module.weight] = [module_output.s, "lin"]
             else:
                 self.first_layer = False
         elif isinstance(module, nn.MultiheadAttention):
@@ -215,10 +234,21 @@ class SVDFixingModel(nn.Module):
                     reinit_shapes=self.reinit_shapes,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name, None, None]
+                if module.in_proj_weight is not None:
+                    self.low_rank_replacement_list[module.in_proj_weight] = [module_output.in_proj_s, "attn"]
+                else:
+                    self.low_rank_replacement_list[module.q_proj_weight] = [module_output.q_s, "attn"]
+                    self.low_rank_replacement_list[module.k_proj_weight] = [module_output.k_s, "attn"]
+                    self.low_rank_replacement_list[module.v_proj_weight] = [module_output.v_s, "attn"]
             else:
                 self.first_layer = False
         elif isinstance(module, nn.Conv2d):
-            if not self.first_layer:
+            wv = module.weight.view(module.weight.shape[0], -1)
+            if wv.shape[0] < wv.shape[1]:
+                wv.T
+            if wv.shape[1] < wv.shape[0] / 10:
+                pass  # skip this layer if there are not enough params
+            elif not self.first_layer:
                 module_output = SVDConv2dUSVh(
                     in_channels=module.in_channels,
                     out_channels=module.out_channels,
@@ -238,8 +268,44 @@ class SVDFixingModel(nn.Module):
                     start_weight=module.weight,
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
+                    norm=module.norm if hasattr(module, "norm") else None,
+                    activation=module.activation if hasattr(module, "activation") else None,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+                self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
+            else:
+                self.first_layer = False
+        elif isinstance(module, nn.Conv1d):
+            wv = module.weight.view(module.weight.shape[0], -1)
+            if wv.shape[0] < wv.shape[1]:
+                wv.T
+            if wv.shape[1] < wv.shape[0] / 10:
+                pass  # skip this layer if there are not enough params
+            elif not self.first_layer:
+                module_output = SVDConv1dUSVh(
+                    in_channels=module.in_channels,
+                    out_channels=module.out_channels,
+                    kernel_size=module.kernel_size,
+                    stride=module.stride,
+                    padding=module.padding,
+                    dilation=module.dilation,
+                    groups=module.groups,
+                    bias=module.bias is not None,
+                    padding_mode=module.padding_mode,
+                    device=module.weight.device,
+                    dtype=module.weight.dtype,
+                    uvhthreshold=self.uvhthreshold,
+                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    full_rank_sigma=self.full_rank_sigma,
+                    start_bias=module.bias,
+                    start_weight=module.weight,
+                    update_from_simga=self.update_from_simga,
+                    reinit_shapes=self.reinit_shapes,
+                    norm=module.norm if hasattr(module, "norm") else None,
+                    activation=module.activation if hasattr(module, "activation") else None,
+                )
+                self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+                self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
             else:
                 self.first_layer = False
         for n, child in module.named_children():
@@ -270,6 +336,7 @@ class SVDFixingModel(nn.Module):
                 dtype = self.last_layer[2]
                 device = self.last_layer[3]
             module_output = self.last_layer[0].to(device=device, dtype=dtype)
+            del self.low_rank_replacement_list[self.last_layer[0].weight]
         for n, child in module.named_children():
             module_output.add_module(n, self._reset_last_layer(child, f"{name}.{n}" if name is not None else f"{n}"))
         # del module
@@ -331,8 +398,8 @@ class SVDFixingModel(nn.Module):
             # need to re-init DDP to have the correct buckets
             # TODO: this might be a preformance hit
             ddp_time = perf_counter()
-            del self.model
-            self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
+            # del self.model
+            self.model = DDP(self.local_low_rank_model, find_unused_parameters=False, static_graph=False)
             if dist.get_rank() == 0:
                 log.info(f"Reinit DDP. Time takesn: {perf_counter() - ddp_time}")
         if all_stable:
@@ -355,6 +422,7 @@ class SVDFixingModel(nn.Module):
         # work in factors of 5% of the network
         cutoff = self.num_stability_layvers_to_check
         working_layers = self.layer_names[-cutoff:]
+        # working_layers = self.layer_names[:]
 
         # inds = inds[-cutoff:]
         if self.rank == 0:
@@ -388,16 +456,6 @@ class SVDFixingModel(nn.Module):
             else:
                 self.svd_modules[layer]["stable_delay"] -= 1
 
-        if dist.is_initialized():  # and reset_optimizer:
-            # this indicates that the shapes of the parameters changed
-            # need to re-init DDP to have the correct buckets
-            # TODO: this might be a preformance hit
-            ddp_time = perf_counter()
-            self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
-            if dist.get_rank() == 0:
-                log.info(f"Reinit DDP. Time taken: {perf_counter() - ddp_time}")
-        # if all_stable:
-        #     self.skip_stability = True
         return reset_optimizer, all_stable
 
     @torch.no_grad()
@@ -410,35 +468,28 @@ class SVDFixingModel(nn.Module):
         else:
             rank = 0
         # percs, actives, normals = [], [], []
-        full_active = 0
+        trainable = 0
+        untrainable = 0
         # print("in perc params")
         for n, p in self.model.named_parameters():
             # print(f"{n} {p.requires_grad}")
             if p.requires_grad:
                 # if n[-2:] not in [".s", "_s", "_u", ".u", "vh"]:
-                full_active += p.numel()
+                trainable += p.numel()
+            else:
+                untrainable += p.numel()
 
         full_normal = self.base_trainable_parameters
+        full_active = trainable
+        # full_deactivated = untrainable
+        full_model = trainable + untrainable
+        compression_perc = 100 * (full_model / self.base_all_parameters)
         if rank == 0:
             log.info(
-                f"Active Params: {100 * (full_active / full_normal):.4f}%",
+                f"Active Params: {100 * (full_active / full_normal):.4f}% active: {full_active} "
+                f"Full Rank: {full_normal} Low rank total: {full_model} compression: {compression_perc}",
             )
-        return 100 * (full_active / full_normal), full_active, full_normal
-
-    def check_stability_on_count(self, force=False):
-        ret = False
-        if self.model.training:
-            self.call_count += 1
-            if force:
-                return self.test_basis_stability_all_layers()
-
-            if (
-                self.call_count % self.stability_frequency == self.stability_frequency - 1
-                and self.call_count >= self.delay
-            ):
-                ret = self.test_basis_stability_all_layers()
-                # self.train()
-        return ret
+        return 100 * (full_active / full_normal), full_active, full_normal, compression_perc
 
     @staticmethod
     def reset_all_states(optimizer: optim.Optimizer):
@@ -446,10 +497,11 @@ class SVDFixingModel(nn.Module):
         # for group in self.opt1.param_groups:
         optimizer.state = defaultdict(dict)
 
-    @torch.no_grad()  # The function is the main method oc calling stability tracking!!!
+    @torch.no_grad()  # The function is the main method of doing stability tracking
     def model_stability_tracking(self, force=False):
         """
-        NOTE: THIS SHOULD BE CALLED EVERY EPOCH!!!
+        NOTE: should be called either every epoch, or after X steps!!!
+            - dependent on config params
 
         This is the main function for tracking SVD of layers
         """
@@ -457,10 +509,14 @@ class SVDFixingModel(nn.Module):
         # 2. check if stability should be checked - early out
         # 3. check stability of layers (see self.test_basis_stability_all_layers)
         # 4. if the optimizer needs to be reset, do it (reshapes the buffers within it)
-
         self.call_count += 1
+        # print(self.call_count, self.delay)
+        if self.call_count == self.delay and self.full_rank_warmup:  # - self.stability_frequency:
+            self.setup_low_rank_training()
+            # return
+
         if not force and self.call_count != self.next_stability_iteration:
-            return False
+            return
         self.call_count_stability += 1
 
         stabtime = time.perf_counter()
@@ -471,6 +527,14 @@ class SVDFixingModel(nn.Module):
             # self.optimizer.remove_full_rank_weights()
             # self.reset_all_states(self.optimizer)
             self.all_stable = all_layers_stable
+
+        if dist.is_initialized():
+            # this indicates that the shapes of the parameters changed
+            # need to re-init DDP to have the correct buckets
+            ddp_time = perf_counter()
+            self.model = DDP(self.model.module, find_unused_parameters=False, static_graph=False)
+            if dist.get_rank() == 0:
+                log.info(f"Reinit DDP. Time taken: {perf_counter() - ddp_time}")
         if reset_optimizer:
             self.reshape_opt_state_fn(self.optimizer)
             # self.reset_all_states(self.optimizer)
@@ -492,46 +556,14 @@ class SVDFixingModel(nn.Module):
                 f"Current iteration: {self.call_count}\t"
                 f"Next iteration: {self.next_stability_iteration}",
             )
+            self.get_perc_params_all_layers()
         return True
 
-    @torch.no_grad()
-    def insert_noise(self, noise_level=1e-1):
-        for n, p in self.model.named_parameters():
-            if n.endswith(".s") or n.endswith("_s") and p.requires_grad:
-                # # TODO: remove later if not working
-                # sdiag = torch.diag(self.s).clone()
-                sdiag = torch.diag(p)
-                # sdiag_diff1 = torch.diff(sdiag, n=1) * 0.001
-                # sdiag_diff2 = torch.diff(sdiag, n=2) * 0.0001
-                # # sdiag_diff3 = torch.diff(sdiag, n=3) * 0.001
-                # for i in range(p.shape[0] - 1):
-                #     p[i, i + 1] = sdiag_diff1[i]
-                #     if i < p.shape[0] - 2:
-                #         p[i, i + 2] = sdiag_diff2[i]
-
-                # mask = torch.abs(p) <= 1e-5
-                # umask = torch.abs(p) > 1e-7
-
-                # print(f"{n} -> {torch.count_nonzero(mask)}")
-                # p[mask] *= 0
-                # p[mask] += noise_level * torch.rand_like(p[mask]) * sdiag.min()
-                # rand = torch.rand(
-                #     p[mask].shape, generator=self.local_generator, device=p.device, dtype=p.dtype
-                # )
-                # p[mask] += (1 / sdiag[0]) * rand * noise_level
-                if self.local_generator.device != p.device:
-                    self.local_generator = torch.Generator(device=p.device)
-                    self.local_generator.manual_seed(self.rank + 10000)
-                rand = torch.rand(
-                    p.shape,
-                    generator=self.local_generator,
-                    device=p.device,
-                    dtype=p.dtype,
-                )
-                p += (1 / sdiag[0]) * rand / (self.call_count_stability)
-
-    def forward(self, inputs):
-        return self.model(inputs)
+    def forward(self, *args, **kwargs):
+        if self.step_on_forward and self.model.training:
+            # print("in stability tracking block")
+            self.model_stability_tracking(force=False)
+        return self.model(*args, **kwargs)
 
     @torch.no_grad()
     def track_interior_slices_mlflow(self, config, epoch):
@@ -547,21 +579,22 @@ class SVDFixingModel(nn.Module):
         #             # print(f"logging interior slice for {name}.{sl}")
 
     @torch.no_grad()
-    def sync_models(self, verbose=True):
-        if not dist.is_initialized():
-            return
-        rank = dist.get_rank()
-        if rank == 0:
-            log.info("Syncing layers which require grad on all layers")
-        sz = dist.get_world_size()
-        waits = []
-        for n, p in self.local_model.named_parameters():
-            if p.requires_grad:
-                if verbose and n.endswith(".s"):
-                    log.info(f"{n}: {p.mean():.4f}, {p.min():.4f}, {p.max():.4f}, {p.std():.4f}")
-                if not p.is_contiguous():
-                    p.set_(p.contiguous())
-                p /= sz
-                waits.append(dist.all_reduce(p, async_op=True))  # sum
-        for w in waits:
-            w.wait()
+    def load_state_dict(self, best_model_path):
+        # print(state_dict.keys())
+        # return ValueError
+        import os
+
+        lcl_rank = int(os.environ["PMIX_RANK"])
+        state_dict = torch.load(best_model_path, map_location=f"cuda:{lcl_rank}")
+        for n, p in self.local_low_rank_model.named_parameters():
+            # if self.local_low_rank_model[k]
+            loaded_param = state_dict[n]
+            # loaded_param = loaded_param.to(dtype=p.dtype, device=p.device)
+            # print(k, '\t', n)
+
+            if loaded_param.shape != p.shape:
+                # print(f"changing shape of {n}")
+                p.set_(torch.zeros(loaded_param.shape, dtype=p.dtype, device=p.device))
+
+        self.local_low_rank_model.load_state_dict(state_dict)
+        self.get_perc_params_all_layers()

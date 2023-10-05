@@ -58,10 +58,16 @@ def main(config: DictConfig):
     else:
         raise ValueError(f"unknown trainer: {config.trainer.trainer}")
 
-    if rank == 0:
-        pprint(dict(config))
+    if config.tracking.sweep is not None:
+        if rank == 0:
 
-    if rank == 0 and config.enable_tracking and config.tracker == "mlflow":
+            def func():
+                return fn(config)
+
+            wandb.agent(config.tracking.sweep, function=func, count=1)
+        else:
+            fn(config)
+    elif rank == 0 and config.enable_tracking and config.tracking == "mlflow":
         _ = utils.tracking.setup_mlflow(config, verbose=False)
 
         run_id = None

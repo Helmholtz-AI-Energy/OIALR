@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 250 # 300
+epochs: 300
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -8,8 +8,8 @@ init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
-save_period: 10
+checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+save_period: 5
 resume_run: False
 resume: False  # TODO: are both of these needed??
 
@@ -17,29 +17,51 @@ criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 1.0e-3
-lr_reset_period: 3
+# lr: 0.0002
+# lr_schedule:
+#   _target_: null
+#   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
+#   sched: cosine  # cosine LR scheduler from timm
+#   epochs: 300  # number of epochs for the cycle to run for
+#   warmup_epochs: 17
+#   cooldown_epochs: 10
+#   min_lr: 0.0008  # min LR of cosine annealing pattern
+#   warmup_lr: 0.00008  # starting point of warmup
+#   warmup_prefix: True  # default
+#   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
+#   lr_cycle_limit: 30
+#   lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+#   lr_k_decay: 0.4  # default 1.0
+#   sched_on_updates: True
+
+lr: 0.0001
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
   sched: cosine  # cosine LR scheduler from timm
-  # epochs: 50  # number of epochs for the cycle to run for
-  warmup_epochs: 80
+  epochs: 300  # number of epochs for the cycle to run for
+  warmup_epochs: 10
   cooldown_epochs: 10
-  # patience_epochs: 10  # only useful for Plateau LR scheduler
-  # decay_rate: 0.5
-  min_lr: 1.0e-5  # min LR of cosine annealing pattern
-  warmup_lr: 1.0e-5  # starting point of warmup
+  min_lr: 0.00001  # min LR of cosine annealing pattern
+  warmup_lr: 0.00001  # starting point of warmup
   warmup_prefix: True  # default
   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
-  lr_cycle_limit: 500
-  lr_cycle_decay: 0.9  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
-  lr_k_decay: 1.  # default
+  lr_cycle_limit: 30
+  lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
+  lr_k_decay: 1.0  # default 1.0
   sched_on_updates: True
 
 sync_batchnorm: True
 
 mixup: False
+mixup_args:
+  mixup_alpha: 0.8  # 0.8
+  cutmix_alpha: 0.
+  cutmix_minmax: null
+  prob: 1.0  # 1.0
+  switch_prob: 0.5
+  mode: batch
+  num_classes: null
 
 optimizer:
   # _target_: torch.optim.SGD
@@ -50,23 +72,28 @@ optimizer:
   _target_: torch.optim.AdamW
   _partial_: True
   weight_decay: 0.01  # default 0.01
+  beta1: 0.9
+  beta2: 0.999
   # fused: True
-max_grad_norm: 1.
+max_grad_norm: -1.
 
 init_opt_with_model: False
 print_freq: 50
 
-svd_epoch_delay: 0
-svd_epoch_freq: 1
+svd_epoch_delay: 10
+svd_epoch_freq: 4
 fixing_method:
   _target_: madonna.models.SVDFixingModel
   _partial_: True
-  stability_frequency: 100
-  delay: 200
+  stability_frequency: 1000
+  delay: 4000
   uvhthreshold: 0.99
-  sigma_cutoff_fraction: 0.25
+  sigma_cutoff_fraction: 0.2
+  # init_fraction: 1.0
   keep_first_layer: False
   keep_last_layer: True
   reinit_shapes: True
-  stable_update_delay: 0
+  stable_update_delay: 1
   create_svd_param_group: one  # null or one
+  step_on_forward: True
+  full_rank_warmup: True

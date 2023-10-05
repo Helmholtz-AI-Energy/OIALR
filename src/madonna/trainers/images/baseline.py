@@ -7,7 +7,6 @@ import time
 from enum import Enum
 from pathlib import Path
 
-import mlflow.pytorch
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
@@ -24,6 +23,8 @@ best_acc1 = 0
 
 
 def main(config, log):  # noqa: C901
+    import mlflow.pytorch
+
     if "seed" in config:
         random.seed(config["seed"])
         torch.manual_seed(config["seed"])
@@ -155,6 +156,8 @@ def train(
     log,
     scaler,
 ):
+    import mlflow.pytorch
+
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
@@ -356,6 +359,8 @@ def validate(val_loader, model, criterion, config, epoch, log):
         top5.all_reduce()
 
     if config["rank"] == 0:
+        import mlflow.pytorch
+
         ls = losses.avg.item() if isinstance(losses.avg, torch.Tensor) else losses.avg
         t1 = top1.avg.item() if isinstance(top1.avg, torch.Tensor) else top1.avg
         t5 = top5.avg.item() if isinstance(top5.avg, torch.Tensor) else top5.avg
