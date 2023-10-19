@@ -12,9 +12,10 @@ from pathlib import Path
 
 import hydra
 import torch
-import wandb
 import yaml
 from omegaconf import DictConfig, OmegaConf, listconfig
+
+import wandb
 from wandb import finish, init
 
 from .utils import only_on_rank_n

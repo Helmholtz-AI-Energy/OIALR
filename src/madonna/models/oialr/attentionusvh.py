@@ -109,6 +109,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         start_in_proj_bias=None,
         update_from_simga: bool = True,
         reinit_shapes=False,
+        distributed_updates=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
@@ -123,6 +124,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
         assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
         if not self._qkv_same_embed_dim:
@@ -323,7 +325,8 @@ class SVDMultiheadAttentionUSVh(nn.Module):
                 self.in_proj_s = Parameter(torch.diag(s).contiguous(), requires_grad=True)
                 self.in_proj_vh = Parameter(vh.contiguous(), requires_grad=False)
 
-                del self.in_proj_weight
+                self.in_proj_weight = property(lambda self: self._get_in_proj())
+                # del self.in_proj_weight
             else:
                 for qkv in "qkv":
                     target = getattr(self, f"{qkv}_proj_weight")
@@ -335,8 +338,10 @@ class SVDMultiheadAttentionUSVh(nn.Module):
                     setattr(self, f"{qkv}_u", Parameter(u.contiguous(), requires_grad=False))
                     setattr(self, f"{qkv}_s", Parameter(torch.diag(s).contiguous(), requires_grad=True))
                     setattr(self, f"{qkv}_vh", Parameter(vh.contiguous(), requires_grad=False))
-
-                del self.q_proj_weight, self.k_proj_weight, self.v_proj_weight
+                self.q_proj_weight = property(lambda self: self._get_q())
+                self.k_proj_weight = property(lambda self: self._get_k())
+                self.v_proj_weight = property(lambda self: self._get_v())
+                # del self.q_proj_weight, self.k_proj_weight, self.v_proj_weight
 
     def _reset_parameters(self):
         # if self._qkv_same_embed_dim:
@@ -767,11 +772,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             setattr(self, f"prev_uvh_{qkvin}", torch.tensor(1, device=dev))
             self.waits[qkvin]["inner_dim"] = None
             # receive the info from the working process
-            self.waits[qkvin]["inner_dim"] = dist.broadcast(
-                self.inner_dim_buffers[qkvin],
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.waits[qkvin]["inner_dim"] = dist.broadcast(
+                    self.inner_dim_buffers[qkvin],
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             # print('for waits')
             return
 
@@ -797,11 +803,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         for qkv in self.inner_dim_buffers:
             self.inner_dim_buffers[qkv] = self.inner_dim_buffers[qkv].to(dev)
 
-        self.waits[qkvin]["inner_dim"] = dist.broadcast(
-            self.inner_dim_buffers[qkvin],
-            src=working_rank,
-            async_op=nonblocking,
-        )
+        if self.distributed_updates:
+            self.waits[qkvin]["inner_dim"] = dist.broadcast(
+                self.inner_dim_buffers[qkvin],
+                src=working_rank,
+                async_op=nonblocking,
+            )
 
     @torch.no_grad()
     def _full_rank_sigma_update_usv_abs(self, qkvin, working_rank=0):
@@ -832,7 +839,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
     def _wait_inner_dim_reshape_bcast_usvh_abs(self, qkvin, nonblocking=True):
         # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
         reset_optimizer = bool(self.inner_dim_buffers[qkvin][2].item())
-        if self.last_send_ranks[qkvin] is None:
+        if self.last_send_ranks[qkvin] is None or not self.distributed_updates:
             return reset_optimizer, True
         if self.waits[qkvin]["inner_dim"] is not None:
             self.waits[qkvin]["inner_dim"].wait()
@@ -850,7 +857,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         return reset_optimizer, stable
 
     def _bcast_usvh_abs(self, qkvin, src, nonblocking):
-        if not dist.is_initialized():
+        if not dist.is_initialized() or not self.distributed_updates:
             return
         u, s, vh, _ = self._get_usvh_from_qkvin(qkvin)
         if not u.is_contiguous():

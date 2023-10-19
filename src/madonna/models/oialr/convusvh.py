@@ -60,6 +60,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         reinit_shapes=False,
         norm=None,
         activation=None,
+        distributed_updates=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -94,6 +95,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
 
         self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
 
         weight_shape = self.weight.shape
         self.base_weigh_shape = tuple(weight_shape)
@@ -266,11 +268,12 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
             self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
             # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.wait_inner_dim = dist.broadcast(
+                    self.inner_dim_buffer,
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             return
 
         # case 3: update the stable U and Vh from the full rank sigma matrix
@@ -293,7 +296,8 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             return
         self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
 
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
+        if self.distributed_updates:
+            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
 
     @torch.no_grad()
     def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
@@ -318,7 +322,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
 
     @torch.no_grad()
     def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
+        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
             return
         # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
         if not self.u.is_contiguous():
@@ -403,6 +407,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         reinit_shapes=False,
         norm=None,
         activation=None,
+        distributed_updates=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -440,6 +445,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
 
         weight_shape = self.weight.shape
         self.base_weigh_shape = tuple(weight_shape)
+        self.distributed_updates = distributed_updates
         m = weight_shape[0]
         n = int(self.weight.numel() / m)
         k = min(m, n)
@@ -606,11 +612,12 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
             self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
             # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.wait_inner_dim = dist.broadcast(
+                    self.inner_dim_buffer,
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             return
 
         # case 3: update the stable U and Vh from the full rank sigma matrix
@@ -633,7 +640,8 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             return
         self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
 
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
+        if self.distributed_updates:
+            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
 
     @torch.no_grad()
     def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
@@ -658,7 +666,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
 
     @torch.no_grad()
     def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
+        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
             return
         # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
         if not self.u.is_contiguous():

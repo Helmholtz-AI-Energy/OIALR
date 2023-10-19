@@ -26,7 +26,6 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
-import wandb
 from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
@@ -39,6 +38,7 @@ from torchmetrics import MetricCollection, Precision, Recall
 from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import madonna
+import wandb
 
 best_acc1 = 0
 log = logging.getLogger(__name__)
@@ -255,16 +255,16 @@ def main(config):  # noqa: C901
 
     train_metrics = MetricCollection(
         [
-            MulticlassF1Score(task="multiclass", num_classes=config.data.classes),
-            MulticlassPrecision(task="multiclass", num_classes=config.data.classes),
-            MulticlassRecall(task="multiclass", num_classes=config.data.classes),
+            MulticlassF1Score(num_classes=config.data.classes),
+            MulticlassPrecision(num_classes=config.data.classes),
+            MulticlassRecall(num_classes=config.data.classes),
         ],
     ).to(device)
     val_metrics = MetricCollection(
         [
-            MulticlassF1Score(task="multiclass", num_classes=config.data.classes),
-            MulticlassPrecision(task="multiclass", num_classes=config.data.classes),
-            MulticlassRecall(task="multiclass", num_classes=config.data.classes),
+            MulticlassF1Score(num_classes=config.data.classes),
+            MulticlassPrecision(num_classes=config.data.classes),
+            MulticlassRecall(num_classes=config.data.classes),
         ],
     ).to(device)
 
@@ -453,8 +453,8 @@ def main(config):  # noqa: C901
     # ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
     # ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
     # print("from train", ret_dict)
-    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
-    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/configs/tmp/")
+    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/configs/tmp/")
     # with open(out_file / f"{os.environ['RANK']}-output.txt", "w") as convert_file:
     #     # convert_file.write(json.dumps(ret_dict))
     #     json.dump(ret_dict, convert_file)

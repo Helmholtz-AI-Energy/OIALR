@@ -70,6 +70,7 @@ class SVDLinearUSVh(nn.Module):
         start_bias=None,
         update_from_simga=True,
         reinit_shapes=False,
+        distributed_updates=True,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinearUSVh, self).__init__()
@@ -77,6 +78,7 @@ class SVDLinearUSVh(nn.Module):
         self.out_features = out_features
         self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
 
         if start_weight is not None:
             self.weight = start_weight
@@ -237,11 +239,12 @@ class SVDLinearUSVh(nn.Module):
             self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
             self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
             # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.wait_inner_dim = dist.broadcast(
+                    self.inner_dim_buffer,
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             return
 
         # case 3: update the stable U and Vh from the full rank sigma matrix
@@ -260,7 +263,8 @@ class SVDLinearUSVh(nn.Module):
         if not dist.is_initialized():
             return
         self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
+        if self.distributed_updates:
+            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
 
     @torch.no_grad()
     def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
@@ -285,7 +289,7 @@ class SVDLinearUSVh(nn.Module):
 
     @torch.no_grad()
     def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
+        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
             return
         # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
         if not self.u.is_contiguous():

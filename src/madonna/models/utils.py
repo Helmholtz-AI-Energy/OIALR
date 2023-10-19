@@ -1,5 +1,6 @@
 import logging
 import time
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
 
 import torch
@@ -161,11 +162,11 @@ def replace_opt_state_with_svd_adam(optimizer: optim.Optimizer, replacement_dict
     for group in optimizer.param_groups:
         replace_idx = 0
         for p in group["params"]:
-            if p not in replacement_dict:
+            if id(p) not in replacement_dict:
                 replace_idx += 1
                 continue
-            new_p = replacement_dict[p][0]
-            layer_type = replacement_dict[p][1]
+            new_p = replacement_dict[id(p)][0]
+            layer_type = replacement_dict[id(p)][1]
             # change the state info to the svd
             state = optimizer.state[p]
             if len(list(state.keys())) > 0:
@@ -231,3 +232,13 @@ def replace_opt_state_with_svd_adam(optimizer: optim.Optimizer, replacement_dict
             group["params"][replace_idx] = new_p
             # group["params"].append(new_p)
             replace_idx += 1
+
+
+def reset_opt_state(optimizer: optim.Optimizer):
+    # replacement_dict: [full_rank_param] -> low_rank param
+    optimizer.state = defaultdict(dict)
+    # for group in optimizer.param_groups:
+    #     replace_idx = 0
+    #     group.state = defaultdict(dict)
+    #     for p in group["params"]:
+    #         # change the state info to the svd
