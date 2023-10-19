@@ -27,7 +27,7 @@ if [ -z "${TIMELIMIT}" ]; then TIMELIMIT="8:00:00"; fi
 if [ -z "${GPUS_PER_NODE}" ]; then GPUS_PER_NODE="4"; fi
 if [ -z "${SLURM_NNODES}" ]; then SLURM_NNODES="1"; fi
 
-
+ml purge
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 export UCX_MEMTYPE_CACHE=0
@@ -44,26 +44,25 @@ system=${HOSTNAME:0:3}
 
 if [ $system == "hkn" ]
 then
-  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna-ddp/"
   export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
   TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
   TOMOUNT+="${EXT_DATA_PREFIX},"
   TOMOUNT+="${BASE_DIR},"
-  TOMOUNT+="/scratch,/tmp,"
-  TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
-
+  TOMOUNT+="/scratch,/tmp"
+  echo $TOMOUNT
   salloc --partition=accelerated \
     -N "${SLURM_NNODES}" \
     --time "${TIMELIMIT}" \
     --gres gpu:"${GPUS_PER_NODE}" \
-    --container-name=torch \
+    --container-name=torch2.1.2 \
     --container-mounts="${TOMOUNT}" \
     --container-mount-home \
     --container-writable \
     -A hk-project-madonna
 elif [ $system == "uc2" ]
 then
-  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/,/scratch,"
   TOMOUNT+='/etc/slurm/:/etc/slurm/,'
   # TOMOUNT+="${EXT_DATA_PREFIX},"
   # TOMOUNT+="${BASE_DIR},"
@@ -73,7 +72,7 @@ then
     -N "${SLURM_NNODES}" \
     --time "${TIMELIMIT}" \
     --gres gpu:"${GPUS_PER_NODE}" \
-    --container-name=torch \
+    --container-name=torch2.1.2 \
     --container-mounts="${TOMOUNT}" \
     --container-mount-home \
     --container-writable

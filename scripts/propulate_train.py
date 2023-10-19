@@ -50,7 +50,7 @@ def objective(search_params):
     with open_dict(config):
         config.tracking.tags = tags
     # TODO: get rank!!
-    out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+    out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/configs/tmp/")
     out_file_root.mkdir(exist_ok=True)
     out_file = out_file_root / f"newest_config_{rank}.yaml"
     print(f"saving out file {out_file}")
@@ -183,7 +183,7 @@ if __name__ == "__main__":
             counter += 1
         return path
 
-    log_path = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/propulate/cifar10-1/")
+    log_path = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/logs/propulate/cifar10-1/")
     log_path.mkdir(exist_ok=True, parents=True)
     propulate.set_logger_config(
         level=logging.INFO,
@@ -199,7 +199,7 @@ if __name__ == "__main__":
         generations=num_generations,
         num_islands=islands,
         migration_probability=0.9,
-        checkpoint_path=Path("/hkfs/work/workspace/scratch/qv2382-madonna/hpsearch/cifar10-1/"),
+        checkpoint_path=Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/hpsearch/cifar10-1/"),
     )
     # TODO: set this up to change propulate's logging debug level!!!
     islands.evolve(top_n=1, logging_interval=1, debug=1)
