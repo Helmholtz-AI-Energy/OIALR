@@ -13,7 +13,7 @@
 #   job_type: "train"
 #   group: ""
 #   tags: []
-project: "oialr"
+project: "lr-sync"
 sweep: null
 # tags:
 #   - final
