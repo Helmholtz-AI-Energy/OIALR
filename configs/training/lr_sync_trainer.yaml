@@ -81,6 +81,8 @@ fixing_method:
   use_ddp: False
   distributed_updates: False
   network_layer_perc_step: 0.1
+  fixed_inner_dim: True
+  inner_dim_init_ratio: 0.1
 
 prune_epoch: null
 sync:

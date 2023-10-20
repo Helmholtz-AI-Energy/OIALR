@@ -71,6 +71,7 @@ class SVDLinearUSVh(nn.Module):
         update_from_simga=True,
         reinit_shapes=False,
         distributed_updates=True,
+        inner_dim_init_ratio=1.0,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinearUSVh, self).__init__()
@@ -79,6 +80,7 @@ class SVDLinearUSVh(nn.Module):
         self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
         self.distributed_updates = distributed_updates
+        self.inner_dim_init_ratio = inner_dim_init_ratio
 
         if start_weight is not None:
             self.weight = start_weight
@@ -98,11 +100,11 @@ class SVDLinearUSVh(nn.Module):
         # u, s, vh = torch.linalg.svd(w, full_matrices=False)
         # k = min(tuple(w.shape))
         u, s, vh = torch.linalg.svd(w, full_matrices=False)  # TS matrix so its not a big deal
-
-        self.u = nn.Parameter(u, requires_grad=False)
+        self.inner_dim = torch.tensor(int(s.shape[0] * self.inner_dim_init_ratio), dtype=torch.int)
+        self.u = nn.Parameter(u[:, : self.inner_dim], requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim], requires_grad=False)
 
         if bias:
             if start_bias is None:
@@ -115,7 +117,7 @@ class SVDLinearUSVh(nn.Module):
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         # self.inner_dim = torch.tensor(self.s.shape[0], dtype=torch.int)  #
-        self.inner_dim = torch.tensor(min(in_features, out_features), dtype=torch.int)
+
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None

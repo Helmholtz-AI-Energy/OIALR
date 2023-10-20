@@ -48,6 +48,8 @@ class OIALRModel(nn.Module):
         network_layer_perc_step: float = 0.1,
         use_ddp: bool = True,
         distributed_updates: bool = True,
+        fixed_inner_dim: bool = False,
+        inner_dim_init_ratio: float = 1.0,
     ):
         """
         Othogonality-Informed Adaptive Low-Rank Model.
@@ -119,6 +121,8 @@ class OIALRModel(nn.Module):
 
         self.base_trainable_parameters = num
         self.base_all_parameters = full_params
+        self.fixed_inner_dim = fixed_inner_dim
+        self.inner_dim_init_ratio = inner_dim_init_ratio
 
         self.uvhthreshold = uvhthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -250,6 +254,7 @@ class OIALRModel(nn.Module):
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
                     distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "lin"]
@@ -279,6 +284,7 @@ class OIALRModel(nn.Module):
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
                     distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name, None, None]
                 if module.in_proj_weight is not None:
@@ -317,6 +323,7 @@ class OIALRModel(nn.Module):
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
                     distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
@@ -350,6 +357,7 @@ class OIALRModel(nn.Module):
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
                     distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
@@ -491,9 +499,9 @@ class OIALRModel(nn.Module):
             self.setup_low_rank_training()
             # return
 
-        if not force and self.call_count != self.next_stability_iteration:
+        if not force and self.call_count != self.next_stability_iteration and self.fixed_inner_dim:
             return
-        log.info(f"Is model DDP (sanity check hope for False!!): {isinstance(self.model, DDP)}")
+        # log.info(f"Is model DDP (sanity check hope for False!!): {isinstance(self.model, DDP)}")
         self.call_count_stability += 1
 
         stabtime = time.perf_counter()

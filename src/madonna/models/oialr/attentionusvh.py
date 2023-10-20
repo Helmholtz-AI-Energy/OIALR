@@ -110,11 +110,14 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         update_from_simga: bool = True,
         reinit_shapes=False,
         distributed_updates=True,
+        inner_dim_init_ratio=1.0,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.update_from_simga = update_from_simga
         self.embed_dim = embed_dim
+
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
         self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
@@ -129,102 +132,104 @@ class SVDMultiheadAttentionUSVh(nn.Module):
 
         if not self._qkv_same_embed_dim:
             self.q_proj_weight = Parameter(torch.randn((embed_dim, embed_dim), **factory_kwargs))
-            self.q_u = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+            self.q_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
+
+            self.q_u = Parameter(torch.empty((embed_dim, self.q_inner_dim), **factory_kwargs), requires_grad=False)
             self.q_s = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.q_inner_dim, self.q_inner_dim), **factory_kwargs),
                 requires_grad=True,
             )
-            self.q_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+            self.q_vh = Parameter(torch.empty((self.q_inner_dim, embed_dim), **factory_kwargs), requires_grad=False)
             self.q_trans = False
-            self.q_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
 
             self.k_proj_weight = Parameter(torch.randn((embed_dim, self.kdim), **factory_kwargs))
             if self.kdim > embed_dim:
                 # u - kdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x kdim
                 self.k_trans = True
+                self.k_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
+
                 self.k_u = Parameter(
-                    torch.empty((self.kdim, embed_dim), **factory_kwargs),
+                    torch.empty((self.kdim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.k_s = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.k_vh = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, embed_dim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.k_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             else:
                 # u - embed x kdim, s - kdim x kdim, vh - kdim x kdim
                 self.k_trans = False
+                self.k_inner_dim = torch.tensor(self.kdim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.k_u = Parameter(
-                    torch.empty((embed_dim, self.kdim), **factory_kwargs),
+                    torch.empty((embed_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.k_s = Parameter(
-                    torch.empty((self.kdim, self.kdim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.k_vh = Parameter(
-                    torch.empty((self.kdim, self.kdim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.kdim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.k_inner_dim = torch.tensor(self.kdim, dtype=torch.int)
 
             self.v_proj_weight = Parameter(torch.randn((embed_dim, self.vdim), **factory_kwargs))
             if self.vdim > embed_dim:
                 # u - vdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x vdim
                 self.v_trans = True
+                self.v_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.v_u = Parameter(
-                    torch.empty((self.vdim, embed_dim), **factory_kwargs),
+                    torch.empty((self.vdim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.v_s = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.v_vh = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, embed_dim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.v_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             else:
                 # u - embed x vdim, s - vdim x vdim, vh - vdim x vdim
                 self.v_trans = False
+                self.v_inner_dim = torch.tensor(self.vdim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.v_u = Parameter(
-                    torch.empty((embed_dim, self.vdim), **factory_kwargs),
+                    torch.empty((embed_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.v_s = Parameter(
-                    torch.empty((self.vdim, self.vdim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.v_vh = Parameter(
-                    torch.empty((self.vdim, self.vdim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.vdim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.v_inner_dim = torch.tensor(self.vdim, dtype=torch.int)
             self.register_parameter("in_proj_u", None)
             self.register_parameter("in_proj_s", None)
             self.register_parameter("in_proj_vh", None)
         else:
             self.in_proj_weight = Parameter(torch.randn((3 * embed_dim, embed_dim), **factory_kwargs))
+            self.in_proj_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
             # in_proj is always TS
             self.in_proj_u = Parameter(
-                torch.empty((3 * embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((3 * embed_dim, self.in_proj_inner_dim), **factory_kwargs),
                 requires_grad=False,
             )
             self.in_proj_s = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.in_proj_inner_dim, self.in_proj_inner_dim), **factory_kwargs),
                 requires_grad=True,
             )
             self.in_proj_vh = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.in_proj_inner_dim, embed_dim), **factory_kwargs),
                 requires_grad=False,
             )
             self.in_proj_trans = False
-            self.in_proj_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             self.register_parameter("q_u", None)
             self.register_parameter("q_s", None)
             self.register_parameter("q_vh", None)
@@ -321,9 +326,9 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             if self._qkv_same_embed_dim:  # `in` case
                 u, s, vh = torch.linalg.svd(self.in_proj_weight, full_matrices=False)
 
-                self.in_proj_u = Parameter(u.contiguous(), requires_grad=False)
-                self.in_proj_s = Parameter(torch.diag(s).contiguous(), requires_grad=True)
-                self.in_proj_vh = Parameter(vh.contiguous(), requires_grad=False)
+                self.in_proj_u = Parameter(u[:, : self.in_proj_inner_dim].contiguous(), requires_grad=False)
+                self.in_proj_s = Parameter(torch.diag(s[: self.in_proj_inner_dim]).contiguous(), requires_grad=True)
+                self.in_proj_vh = Parameter(vh[: self.in_proj_inner_dim].contiguous(), requires_grad=False)
 
                 self.in_proj_weight = property(lambda self: self._get_in_proj())
                 # del self.in_proj_weight
@@ -335,9 +340,21 @@ class SVDMultiheadAttentionUSVh(nn.Module):
                     u, s, vh = torch.linalg.svd(getattr(self, f"{qkv}_proj_weight"), full_matrices=False)
                     # u, _ = torch.linalg.qr(torch.randn_like(u), mode="reduced")
                     # vh, _ = torch.linalg.qr(torch.randn_like(vh), mode="reduced")
-                    setattr(self, f"{qkv}_u", Parameter(u.contiguous(), requires_grad=False))
-                    setattr(self, f"{qkv}_s", Parameter(torch.diag(s).contiguous(), requires_grad=True))
-                    setattr(self, f"{qkv}_vh", Parameter(vh.contiguous(), requires_grad=False))
+                    setattr(
+                        self,
+                        f"{qkv}_u",
+                        Parameter(u[:, : self.in_proj_inner_dim].contiguous(), requires_grad=False),
+                    )
+                    setattr(
+                        self,
+                        f"{qkv}_s",
+                        Parameter(torch.diag(s[: self.in_proj_inner_dim]).contiguous(), requires_grad=True),
+                    )
+                    setattr(
+                        self,
+                        f"{qkv}_vh",
+                        Parameter(vh[: self.in_proj_inner_dim].contiguous(), requires_grad=False),
+                    )
                 self.q_proj_weight = property(lambda self: self._get_q())
                 self.k_proj_weight = property(lambda self: self._get_k())
                 self.v_proj_weight = property(lambda self: self._get_v())

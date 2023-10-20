@@ -61,6 +61,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         norm=None,
         activation=None,
         distributed_updates=True,
+        inner_dim_init_ratio=1.0,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -81,6 +82,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             padding_mode,
             **factory_kwargs,
         )
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         # detectron2 things...norm/activation is wrapped into one place here
         self.norm = norm
         self.activation = activation
@@ -120,13 +122,14 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             w2 = torch.empty_like(w)
             nn.init.kaiming_normal_(w2, a=math.sqrt(5))
             u, s, vh = torch.linalg.svd(w2, full_matrices=False)
-        self.u = nn.Parameter(u, requires_grad=False)
+        self.inner_dim = torch.tensor(k * self.inner_dim_init_ratio, dtype=torch.int)
+
+        self.u = nn.Parameter(u[:, : self.inner_dim].clone(), requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
 
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
@@ -408,6 +411,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         norm=None,
         activation=None,
         distributed_updates=True,
+        inner_dim_init_ratio=1.0,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -428,6 +432,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             padding_mode,
             **factory_kwargs,
         )
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         # detectron2 things...norm/activation is wrapped into one place here
         self.norm = norm
         self.activation = activation
@@ -459,15 +464,15 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             n = m
             m = hold
             w = w.T
-
         u, s, vh = torch.linalg.svd(w, full_matrices=False)
-        self.u = nn.Parameter(u, requires_grad=False)
+        self.inner_dim = torch.tensor(k * self.inner_dim_init_ratio, dtype=torch.int)
+
+        self.u = nn.Parameter(u[:, : self.inner_dim].clone(), requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
 
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
