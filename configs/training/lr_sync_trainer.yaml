@@ -17,7 +17,7 @@ criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-lr: 0.0001
+lr: 0.001
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
@@ -67,7 +67,7 @@ use_ddp: False
 fixing_method:
   _target_: madonna.models.OIALRModel
   _partial_: True
-  stability_frequency: 1000
+  stability_frequency: 100
   delay: 1000
   uvhthreshold: 0.99
   sigma_cutoff_fraction: 0.2
@@ -82,10 +82,13 @@ fixing_method:
   distributed_updates: False
   network_layer_perc_step: 0.1
   fixed_inner_dim: True
-  inner_dim_init_ratio: 0.1
+  inner_dim_init_ratio: 0.25
 
 prune_epoch: null
 sync:
   first_epoch: 10
   epoch_freq: 10
   cutoff_fraction: 0.9
+  vecs: 10
+  method: all  # topn, random, fib, all
+  sort: True

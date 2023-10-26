@@ -120,7 +120,7 @@ def main(config):  # noqa: C901
         seed = torch.seed()
         random.seed(torch.seed())
     else:
-        seed = int(seed)
+        seed = int(config.seed)
 
         cudnn.benchmark = True
         cudnn.deterministic = True
@@ -134,7 +134,7 @@ def main(config):  # noqa: C901
         torch.manual_seed(seed)
 
     # if config.rank == 0:
-    log.info(f"Seed: {seed}")
+    log.info(f"Seed: {torch.initial_seed()}")
     # -------- End Random Seed init --------------------------
 
     if config.cpu_training:
@@ -274,14 +274,20 @@ def main(config):  # noqa: C901
     last_val_top1s = []
     # TODO: flag for full_rank training
     model_param_dict = None
-    if not config.baseline and model.local_low_rank_model is not None and dist.is_initialized():
-        log.info("partially syncing models from low rank")
-        model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
-        madonna.lrsync.sync.sync_topn_singulars_oialr(model_param_dict, vecs_to_send=100)
-    elif not config.baseline and dist.is_initialized():
-        log.info("partially syncing models in full rank")
-        madonna.lrsync.sync.sync_model_in_low_rank(model, config)
-        # madonna.lrsync.sync.sync_topn_singulars_oialr(model_param_dict, topn=10)
+    # if not config.baseline and model.local_low_rank_model is not None and dist.is_initialized():
+    #     log.info("partially syncing models from low rank")
+    #     model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
+    #     madonna.lrsync.sync.sync_topn_singulars_oialr(
+    #         model_param_dict, vecs_to_send=config.training.sync.vecs, method=config.training.sync.method
+    #     )
+    # elif not config.baseline and dist.is_initialized():
+    #     log.info("partially syncing models in full rank")
+    #     madonna.lrsync.sync.sync_model_in_low_rank(model, config)
+    #     # madonna.lrsync.sync.sync_topn_singulars_oialr(model_param_dict, topn=10)
+    if not config.baseline and model.local_low_rank_model is not None:
+        model.blur_svd_layers()
+
+    just_synced = False
 
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
@@ -295,6 +301,10 @@ def main(config):  # noqa: C901
                 wandb_logger.log(lrs)
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
+
+        if just_synced:
+            model.blur_svd_layers()
+            just_synced = False
 
         train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
@@ -331,13 +341,22 @@ def main(config):  # noqa: C901
             and dist.is_initialized()
         ):
             if model_param_dict is not None:
-                madonna.lrsync.sync.sync_topn_singulars_oialr(model_param_dict, vecs_to_send=100)
+                madonna.lrsync.sync.sync_low_rank_model(
+                    model_param_dict,
+                    vecs_to_send=config.training.sync.vecs,
+                    method=config.training.sync.method,
+                    sort=config.training.sort,
+                )
+                pass
                 # madonna.models.utils.reset_opt_state(optimizer=optimizer)
                 # # self.reset_all_states(self.optimizer)
                 # # self.optimizer.reset_shapes_of_sigma(self)
                 # model.optimizer.zero_grad(set_to_none=True)
             else:
-                madonna.lrsync.sync.sync_model_in_low_rank(model, config)
+                madonna.lrsync.sync.sync_full_rank_model_in_low_rank(model, config)
+                pass
+            just_synced = True
+            # model.blur_svd_layers()
             # madonna.models.utils.reset_opt_state(optimizer=optimizer)
 
         if config.rank == 0:

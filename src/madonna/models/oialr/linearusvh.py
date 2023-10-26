@@ -132,6 +132,14 @@ class SVDLinearUSVh(nn.Module):
         # self.prev_uvh = torch.tensor([1])
         del self.weight
 
+        # internal random generator
+        seed = torch.seed()
+        if dist.is_initialized():
+            seed = seed + dist.get_rank() + 1000
+        # log.info(f"Internal seed for linear layer: {seed}")
+        self.gen = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+        self.gen.manual_seed(seed)
+
     def reset_parameters(self) -> None:
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
         # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
@@ -338,3 +346,32 @@ class SVDLinearUSVh(nn.Module):
         normal_params += bias_params
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
+
+    @torch.no_grad()
+    def blur_sigma(self):
+        # NOTE: this will also update U/Vh as well
+        # blur sigma with a specified method, only RBF available right now
+        usig, sig, vhsig = torch.linalg.svd(self.s)
+        holdu = self.u @ usig
+        self.u.zero_()
+        self.u.add_(holdu)
+        holdvh = vhsig @ self.vh
+        self.vh.zero_()
+        self.vh.add_(holdvh)
+
+        r = torch.rand(
+            sig.shape[0],
+            sig.shape[0],
+            device=sig.device,
+            dtype=sig.dtype,
+            generator=self.gen,
+        )  # sig is 1D vec
+        # r = torch.randn(sig.shape[0], sig.shape[0], device=sig.device, dtype=sig.dtype)  # sig is 1D vec
+        r = (r * torch.arange(sig.shape[0], device=sig.device)).T / sig.shape[0]
+        sigma_dist = 1.0  # hyperparam
+        neighbor_influ = 0.05
+        m = (sigma_dist**2 * torch.exp(-((torch.cdist(r, r, p=2) ** 2) / (2 * neighbor_influ**2)))).triu()
+        # print(f"{m[:5, :5]}")
+        s = sig * m
+        self.s.zero_()
+        self.s.add_(s)
