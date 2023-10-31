@@ -381,17 +381,30 @@ class SVDSyncModel(nn.Module):
         optimizer.state = defaultdict(dict)
 
     @torch.no_grad()  # The function is the main method of doing stability tracking
-    def sync_nonsvd_params(self):
-        waits = []
+    def sync_nonsvd_params(self, nonblocking=True, waits=None):
+        # TODO: make a buffer to hold all of the weights for this to make this faster
+        #   (unsure if it will help)
         if not dist.is_initialized():
             return
+        # for nonblocking case, check if there are waits to wait for
+        # if nonblocking, wait for the sent items then exit
+        if waits is not None:
+            for w in waits:
+                w.wait()
+            if nonblocking:
+                return None
+        waits = []
         for n, p in self.named_parameters():
             if not p.requires_grad or n.endswith(("_u", ".u", "_vh", ".vh", ".s", "_s")):
                 continue
             waits.append(dist.all_reduce(p, op=dist.ReduceOp.AVG, async_op=True))
-
-        for w in waits:
-            w.wait()
+        # if nonblocking, return the waits for later
+        # if blocking, wait for the op to complete right now
+        if nonblocking:
+            return waits
+        else:
+            for w in waits:
+                w.wait()
 
     def forward(self, *args, **kwargs):
         # TODO: if we want to run this every N steps, then we need to track all of that.
