@@ -380,46 +380,18 @@ class SVDSyncModel(nn.Module):
         # for group in self.opt1.param_groups:
         optimizer.state = defaultdict(dict)
 
-    # @torch.no_grad()  # The function is the main method of doing stability tracking
-    # def sync_models(self, force=False):
-    #     # TODO: fix this!!
-    #     """
-    #     NOTE: should be called either every epoch, or after X steps!!!
-    #         - dependent on config params
+    @torch.no_grad()  # The function is the main method of doing stability tracking
+    def sync_nonsvd_params(self):
+        waits = []
+        if not dist.is_initialized():
+            return
+        for n, p in self.named_parameters():
+            if not p.requires_grad or n.endswith(("_u", ".u", "_vh", ".vh", ".s", "_s")):
+                continue
+            waits.append(dist.all_reduce(p, op=dist.ReduceOp.AVG, async_op=True))
 
-    #     This is the main function for tracking SVD of layers
-    #     """
-    #     # OOO:
-    #     # 2. check if stability should be checked - early out
-    #     # 3. check stability of layers (see self.test_basis_stability_all_layers)
-    #     # 4. if the optimizer needs to be reset, do it (reshapes the buffers within it)
-    #     self.call_count += 1
-    #     # if not a stability update and not a
-    #     if self.call_count == self.delay and self.full_rank_warmup:  # - self.stability_frequency:
-    #         # TODO: add the syn calls here!
-    #         pass
-
-    #     # log.info(f"Is model DDP (sanity check hope for False!!): {isinstance(self.model, DDP)}")
-    #     self.call_count_stability += 1
-
-    #     stabtime = time.perf_counter()
-
-    #     # reset_optimizer shapes and states
-    #     self.reshape_opt_state_fn(self.optimizer)
-    #     # self.reset_all_states(self.optimizer)
-    #     self.optimizer.zero_grad(set_to_none=True)
-
-    #     self.next_sync_iteration += self.update_frequency
-    #     self.next_sync_iteration = int(self.next_sync_iteration)
-
-    #     if self.rank == 0:
-    #         log.info(
-    #             f"Sync time: {time.perf_counter() - stabtime}\t"
-    #             f"Current iteration: {self.call_count}\t"
-    #             f"Next iteration: {self.next_sync_iteration}",
-    #         )
-    #         self.get_perc_params_all_layers()
-    #     return True
+        for w in waits:
+            w.wait()
 
     def forward(self, *args, **kwargs):
         # TODO: if we want to run this every N steps, then we need to track all of that.

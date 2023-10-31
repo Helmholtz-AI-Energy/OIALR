@@ -293,7 +293,7 @@ def main(config):  # noqa: C901
     #     madonna.lrsync.sync.sync_model_in_low_rank(model, config)
     #     # madonna.lrsync.sync.sync_topn_singulars_oialr(model_param_dict, topn=10)
     if not config.baseline and model.local_low_rank_model is not None:
-        model.blur_svd_layers()
+        model.mix_svd_layers()
 
     just_synced = False
 
@@ -311,7 +311,7 @@ def main(config):  # noqa: C901
             train_sampler.set_epoch(epoch)
 
         if just_synced:
-            model.blur_svd_layers()
+            model.mix_svd_layers()
             just_synced = False
 
         train_loss, last_loss, refactory_warmup, train_t1 = train(
