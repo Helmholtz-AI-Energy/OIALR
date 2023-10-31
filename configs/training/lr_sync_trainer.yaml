@@ -4,7 +4,6 @@ epochs: 300
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
 trainer: "lr_sync_train"
-init_ddp: True
 
 # ckpt path
 checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
@@ -63,7 +62,9 @@ max_grad_norm: -1.
 init_opt_with_model: False
 print_freq: 50
 
+# Model parameters
 use_ddp: False
+init_method: random  # options: random, unified, random-sigma
 fixing_method:
   _target_: madonna.models.OIALRModel
   _partial_: True

@@ -137,13 +137,11 @@ def sync_low_rank_model(svd_model_dict, vecs_to_send=1, method="random", sort=Fa
 
     rank = dist.get_rank()
     ws = dist.get_world_size()
-    # if ws > 2:  # TODO: full tree reduction after small scale tests
-    #     raise NotImplementedError("do it properly Daniel")
 
     # TODO: async for speed
-    partner = (rank + 1) % 2
-    tag = rank * 10000  # todo: make this with an offset for the size of the network and the world size
-    partner_tag = partner * 10000
+    # partner = (rank + 1) % 2
+    # tag = rank * 10000  # todo: make this with an offset for the size of the network and the world size
+    # partner_tag = partner * 10000
     t0 = time.perf_counter()
     torch.cuda.set_device(rank % 4)
 
@@ -256,3 +254,86 @@ def sync_low_rank_model(svd_model_dict, vecs_to_send=1, method="random", sort=Fa
         # loc_vh.data.set_(cat_vh)
         # loc_vh.grad = None
     log.info(f"Time to sync: {time.perf_counter() - t0}")
+
+
+def sync_param_bcast(param, trade_method, vecs_to_send=100, ordering="cat"):
+    """
+    ordering:
+        options for how to blend the received vectors/values into the local low rank representation
+        options: cat, sorted
+    """
+    rank = dist.get_rankorder_options
+    ws = dist.get_world_size()
+    # if len(param) != 3:
+    #     if not param.requires_grad:
+    #         return param
+    #     dist.all_reduce(param, dist.ReduceOp.AVG, async_op=False)
+    #     return param
+    loc_u, loc_s, loc_vh = param  # split the params
+    # using the OIALR formulation, S might be dense...but it should be (mostly) ordered still
+
+    # TODO: make method for when there are less vecs to send then selected by arg
+    #       i.e. vecs_to_send > inner dim
+    if trade_method == "topn":
+        sel_vecs = torch.arange(vecs_to_send, device=loc_s.device)[:vecs_to_send]
+    if trade_method == "all":
+        sel_vecs = slice(None)
+    elif trade_method == "fib":
+        valid_fibs = torch.tensor(_fib, dtype=torch.int, device=loc_s.device)
+        sel_vecs = valid_fibs[valid_fibs < loc_s.shape[0]][:vecs_to_send]
+    elif trade_method == "random":
+        sel_vecs = torch.randint(0, loc_s.shape[0], (vecs_to_send,), device=loc_s.device)
+    else:
+        raise ValueError(f"trade_method must be one of [topn, fib, all, random]. got: {trade_method}")
+    loc_u1 = loc_u[:, sel_vecs].contiguous()
+    # TODO: should we assume that the loc_s is diagonal?
+    #       below assumes that sigma is dense
+    loc_s1 = loc_s[:, sel_vecs][sel_vecs].contiguous()
+    loc_vh1 = loc_vh[sel_vecs].contiguous()
+    # inner dim may change between ranks, but outer dims are the same
+    #   number of vec/val groups to send should be maximum,
+    #   adding zeros will only result in extra comp, wont hurt algo
+    # shapes : u1 x s, s x s, s x vh2
+    #   we can be lazy, and do an allreduce where each mat (u,s,vh) is [rank, *shape]
+    #       with high-speed networks this is invisible, but with slower networks, it has tons of overhead
+    # if we want efficiency on all networks, we need a series of bcasts
+    #   in this case, we should collapse the matrices into a single matrix of size [u1 x (s + s**2 + s * vh2)]
+    # however, all the send matrices need to be the same size,
+    # TODO: optimizer bcast sending if its a bottleneck in the future
+    for r in range(ws):  # loop over ranks to bcast from each
+        buff_u = torch.zeros_like(loc_u1)
+        buff_s = torch.zeros_like(loc_s1)
+        buff_vh = torch.zeros_like(loc_vh1)
+        if r == rank:
+            buff_u.add_(loc_u1)
+            buff_s.add_(loc_s1)
+            buff_vh.add_(loc_vh1)
+        wait_u = dist.broadcast(buff_u, src=r, async_op=True)
+        wait_s = dist.broadcast(buff_s, src=r, async_op=True)
+        wait_vh = dist.broadcast(buff_vh, src=r, async_op=True)
+
+        if r != rank:
+            wait_u.wait()
+            cat_u = torch.cat([loc_u, buff_u], dim=1)
+
+            wait_s.wait()
+            cat_s = torch.eye(loc_s.shape[0] + buff_s.shape[0], device=loc_s.device, dtype=loc_s.dtype)
+            cat_s[: loc_s.shape[0], : loc_s.shape[1]] = loc_s
+            cat_s[loc_s.shape[0] :, loc_s.shape[1] :] = buff_s
+
+            wait_vh.wait()
+            cat_vh = torch.cat([loc_vh, buff_vh], dim=0)
+        else:
+            wait_u.wait()
+            wait_s.wait()
+            wait_vh.wait()
+
+    if ordering == "sorted":
+        # sort the vecs based on the values of sigma
+        # sorting does not change what the math says, the order of the vectors is chosen be default anyway
+        vals, inds = torch.sort(cat_s.diag(), descending=True)
+        cat_s = torch.diag(vals)
+        cat_u = cat_u[:, inds]
+        cat_vh = cat_vh[inds]
+
+    return {"u": cat_u, "vh": cat_vh, "s": cat_s, "s_local_end": loc_s.shape}

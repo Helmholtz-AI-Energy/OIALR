@@ -115,26 +115,34 @@ def main(config):  # noqa: C901
             if wandb_logger is not None:
                 wandb_logger.log(dict_config)
             # wandb_logger.wandb_run.config.update(dict_config)
-    # -------- Random Seed init --------------------------
+
+    # -------- Random init settings --------------------------
     if config.seed is None:
         seed = torch.seed()
-        random.seed(torch.seed())
+        #
     else:
         seed = int(config.seed)
+    if config.training.init_method == "random":
+        seed += config.rank
+    elif config.training.init_method == "unified":
+        pass
+    elif config.training.init_method == "random-sigma":
+        pass
+    else:
+        raise ValueError(
+            f"config.training.init_method should be one of [random, unified, random-sigma],"
+            f" given: {config.training.init_method}",
+        )
 
-        cudnn.benchmark = True
-        cudnn.deterministic = True
-        # torch.manual_seed(args.local_rank)
-        torch.set_printoptions(precision=5)
-        # if dist.is_initialized():
-        #     scale = dist.get_rank() % 4
-        # else:
-        #     scale = 0
-        random.seed(seed)
-        torch.manual_seed(seed)
+    # TODO: should deterministic be True??
+    cudnn.benchmark = True
+    cudnn.deterministic = False
+    torch.set_printoptions(precision=5)
+    random.seed(seed)
+    torch.manual_seed(seed)
 
     # if config.rank == 0:
-    log.info(f"Seed: {torch.initial_seed()}")
+    log.info(f"Seed: {seed}, init method: {config.training.init_method}")
     # -------- End Random Seed init --------------------------
 
     if config.cpu_training:

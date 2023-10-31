@@ -74,10 +74,8 @@ def change_adam_shapes(optimizer, update_from_svd=False):
                         sl = []
                         for d in range(p.ndim):
                             sl.append(slice(0, p.shape[d]))
-                        # print(type(state[k]))
                         state[k] = state[k][tuple(sl)]
-                        # state[k] *= 0
-                        # state[k] = torch.diag(s)[tuple(sl)].to(state[k].dtype)
+                        # TODO: should there be a way to make the state larger??
 
                 if group["amsgrad"]:
                     if state["max_exp_avg_sq"].shape != p.shape:
