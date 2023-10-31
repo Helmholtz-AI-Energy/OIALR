@@ -43,7 +43,7 @@ class SVDSyncModel(nn.Module):
         inner_dim_init_ratio: float = 1.0,
         random_simga: bool = False,
         # --------- blur params ----------------------
-        mixing_method: str = "rbf",
+        mixing_method: str = "exp",
         mixing_options: dict = None,
         # --------- sync params ----------------------
         sync_frequency: int = 1000,

@@ -10,6 +10,8 @@ from torch import Tensor
 from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 
+from . import mixing
+
 log = logging.getLogger(__name__)
 
 
@@ -324,9 +326,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
                 self.in_proj_bias.data = self.in_proj_bias.data.to(**factory)
                 self.in_proj_bias.add_(start_in_proj_bias)
 
+            self.gen = torch.Generator(device=factory_kwargs["device"])
+            self.gen.manual_seed(random.randint(0, 68719476735))
+            self.sigma_generator = torch.Generator(device=factory_kwargs["device"])
+            self.sigma_generator.manual_seed(random.randint(0, 68719476735))
+            self.first_distribute_workload = True
             if random_sigma:
-                self.gen = torch.Generator(device=factory_kwargs["device"])
-                self.gen.manual_seed(random.randint(0, 68719476735))
                 log.debug(f"layer-local random seed: {self.gen.initial_seed()}")
             # reset the USVh vales for qkv/in
             if self._qkv_same_embed_dim:  # `in` case
@@ -1047,48 +1052,127 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             "in_proj": self.in_proj_inner_dim,
         }
 
+    def _distribute_workload_qkvin(self, s, u, vh, min_size_fraction=0.05):
+        # TODO: what happens when there are not enough vectors in
+        # 1: collect sigmas from all ranks
+        #   are the shapes known??
+        # 2: join all sigmas together
+        # 3: deterine number of vecs to send
+        # 4: shuffle/sort sigma
+        # 5: select new elements to send
+        # 6: send/recv new vecs and update accordingly
+
+        if not dist.is_initialized():
+            return
+        # unify the generator for the random permutation in step 4
+        genstate = self.sigma_generator.get_state().to(device=s.device, dtype=torch.float)
+        dist.broadcast(genstate, src=0)
+        self.sigma_generator.set_state(genstate.to(torch.int8))
+
+        # if we start with the same seed everywhere and the same sigma, then the first time
+        #   through this is different. done need to do steps 1/2
+
+        # assumption: sigma is diagonal and full-rank
+        loc_s = s.diag()
+        loc_u = u
+        loc_vh = vh
+        fact = {"device": s.device, "dtype": s.dtype}
+
+        min_num_vecs = int(self.vh.shape[1] * min_size_fraction)
+        # upper limit on number of vecs to send is the number of vecs across the process space
+        #   in the frist iteration through this, that would be the number of diag elements in sigma
+        total_vecs = loc_s.shape[0]
+        if not self.first_distribute_workload:
+            # 1. collect simgas
+            #   send shapes around
+            shapes = torch.zeros(self.world_size, device=s.device)
+            shapes[self.rank] = s.shape[0]
+            dist.all_reduce(shapes)  # sum everything up
+            total_vecs = shapes.sum()
+
+            # 2. join all sigmas together
+            full_sigma = torch.zeros(total_vecs, **fact)
+            shapes = [0] + shapes.tolist()
+            full_sigma[shapes[self.rank] : shapes[self.rank + 1]] = loc_s
+            wait_sigma = dist.all_reduce(full_sigma, async_op=True)  # sum op is default
+            # 6 (pre work). getting U/Vh
+            full_u = torch.zeros((loc_u.shape[0], total_vecs), **fact)
+            full_vh = torch.zeros((total_vecs, loc_vh.shape[1]), **fact)
+            full_u[:, shapes[self.rank] : shapes[self.rank + 1]] = loc_u
+            full_vh[shapes[self.rank] : shapes[self.rank + 1]] = loc_vh
+            wait_vh = dist.all_reduce(full_vh, async_op=True)  # smaller than U -> send first
+            wait_u = dist.all_reduce(full_u, async_op=True)
+
+        # 3 determine number of vecs to send
+        num_vecs_to_get = total_vecs // self.world_size
+        vecs_to_get_all = torch.zeros(self.world_size, device=loc_s.device, dtype=torch.int)
+        vecs_to_get_all += num_vecs_to_get
+        vecs_to_get_all[: total_vecs % self.world_size] += 1  # deal with remainer on lower ranks
+
+        # 4: shuffle sigma -> no sort
+        #       need to know where everything is. random works too (hopefully)
+        # NOTE: will be effected if the seeds are different!!
+        inds = torch.randperm(total_vecs, device=loc_s.device, dtype=torch.int, generator=self.sigma_generator)
+
+        # 5: select new elements to send
+        rank_inds_list = []
+        rank_inds_list.append(inds[: vecs_to_get_all[0]])
+        for r in range(1, self.world_size):
+            rank_inds_list.append(inds[vecs_to_get_all[r - 1] : vecs_to_get_all[r]])
+        # 6: send/recv new vecs and update accordingly
+        # NOTE: using all-to-all is probably more efficient,
+        #       but we that is more complicated and non-blocking all-reduce is probably just as fast,
+        #       however it is more bytes to send
+        if not self.first_distribute_workload:
+            wait_sigma.wait()
+            new_sigma = full_sigma[rank_inds_list[self.rank]].to(**fact)
+            wait_vh.wait()
+            new_vh = full_vh[rank_inds_list[self.rank]].to(**fact)
+            wait_u.wait()
+            new_u = full_u[:, rank_inds_list[self.rank]].to(**fact)
+        else:
+            new_sigma = loc_s[rank_inds_list[self.rank]].to(**fact)
+            new_vh = loc_vh[rank_inds_list[self.rank]].to(**fact)
+            new_u = loc_u[:, rank_inds_list[self.rank]].to(**fact)
+
+        if new_sigma.shape[0] < min_num_vecs:
+            log.info("Generating extra orthogonal vectors to fill in extra space")
+            # in this case, there are not enough vectors (hyperparam)
+            #   if there are < 10 vectors or <5% of posibilities, then issues can arrise (maybe)
+            # TODO: test me / determine if worth it
+            # need to add orthogonal vectors to u and vh, random values for sigma (use QR)
+            to_gen = min_num_vecs - new_sigma.shape[0]
+            holdu = torch.randn((loc_u.shape[0], to_gen), **fact)
+            new_u_additional, _ = torch.linalg.qr(holdu)  # mode=reduced by default
+            holdvh = torch.randn((to_gen, loc_vh.shape[0]), **fact)
+            new_vh_additional, _ = torch.linalg.qr(holdvh)  # mode=reduced by default
+            sigma_additional = torch.rand(to_gen, **fact)
+            new_vh = torch.cat([new_vh, new_vh_additional], dim=0)
+            new_sigma = torch.cat([new_sigma, sigma_additional], dim=0)
+            new_u = torch.cat([new_u, new_u_additional], dim=1)
+
+        vh.set_(new_vh)
+        u.set_(new_u)
+        s.set_(torch.diag(new_sigma))  # new_sigma is 1D
+
+    def distribute_workload(self, min_size_fraction=0.05):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
+                self._distribute_workload_qkvin(u=u, s=s, vh=vh, min_size_fraction=min_size_fraction)
+        else:
+            u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
+            self._distribute_workload_qkvin(u=u, s=s, vh=vh, min_size_fraction=min_size_fraction)
+        self.first_distribute_workload = False
+
     @torch.no_grad()
-    def blur_sigma(self):
+    def mix_sigma(self, method, *args, **kwargs):
         # NOTE: this will also update U/Vh as well
         # blur sigma with a specified method, only RBF available right now
         if not self._qkv_same_embed_dim:
             for qkv in "qkv":
                 u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
-
-                usig, sig, vhsig = torch.linalg.svd(s)
-                holdu = u @ usig
-                u.zero_()
-                u.add_(holdu)
-                holdvh = vhsig @ vh
-                vh.zero_()
-                vh.add_(holdvh)
-
-                r = torch.randn_like(torch.diag(sig))  # sig is 1D vec
-                # r = torch.rand(sig.shape[0], sig.shape[0], device=sig.device, dtype=sig.dtype, generator=self.gen)
-                r = (r * torch.arange(sig.shape[0], device=sig.device)).T / sig.shape[0]
-                sigma_dist = 1.0  # hyperparam
-                neighbor_influ = 0.05
-                m = (sigma_dist**2 * torch.exp(-((torch.cdist(r, r, p=2) ** 2) / (2 * neighbor_influ) ** 2))).triu()
-                s = sig * m
-                s.zero_()
-                s.add_(s)
+                mixing.mix_sigma(*args, u=u, s=s, vh=vh, method=method, generator=self.gen, **kwargs)
         else:
             u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
-
-            usig, sig, vhsig = torch.linalg.svd(s)
-            holdu = u @ usig
-            u.zero_()
-            u.add_(holdu)
-            holdvh = vhsig @ vh
-            vh.zero_()
-            vh.add_(holdvh)
-
-            r = torch.randn_like(torch.diag(sig))  # sig is 1D vec
-            # r = torch.rand(sig.shape[0], sig.shape[0], device=sig.device, dtype=sig.dtype, generator=self.gen)  # sig is 1D vec
-            r = (r * torch.arange(sig.shape[0], device=sig.device)).T / sig.shape[0]
-            sigma_dist = 1.0  # hyperparam
-            neighbor_influ = 0.05
-            m = (sigma_dist**2 * torch.exp(-((torch.cdist(r, r, p=2) ** 2) / (2 * neighbor_influ) ** 2))).triu()
-            s = sig * m
-            s.zero_()
-            s.add_(s)
+            mixing.mix_sigma(*args, u=u, s=s, vh=vh, method=method, generator=self.gen, **kwargs)

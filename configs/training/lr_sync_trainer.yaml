@@ -84,6 +84,7 @@ fixing_method:
   network_layer_perc_step: 0.1
   fixed_inner_dim: True
   inner_dim_init_ratio: 0.25
+  mixing_method: exp
 
 prune_epoch: null
 sync:
