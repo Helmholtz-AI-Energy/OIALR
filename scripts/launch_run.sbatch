@@ -20,7 +20,7 @@ BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna-ddp/"
 
 BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna-ddp/"
 export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+TOMOUNT='/etc/slurm/task_prolog:/etc/slurm/task_prolog,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp"

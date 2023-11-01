@@ -116,24 +116,33 @@ def main(config):  # noqa: C901
                 wandb_logger.log(dict_config)
             # wandb_logger.wandb_run.config.update(dict_config)
 
+    if dist.is_initialized():
+        gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
+        log.debug(f"Using GPU: {gpu}")
+    else:
+        log.info(f"available GPUS: {torch.cuda.device_count()}")
+        gpu = 0
+        # log.info(f"available GPUS: {torch.cuda.device_count()}")
+    torch.cuda.set_device(gpu)
+    device = torch.device(f"cuda:{gpu}")
     # -------- Random init settings --------------------------
     if config.seed is None:
-        seed = torch.seed()
-        #
+        seed = random.randint(0, 4294967295)
+        # seed = torch.seed()
+        tseed = torch.tensor(seed, dtype=torch.int64, device=device)
     else:
         seed = int(config.seed)
+        tseed = torch.tensor(seed, dtype=torch.int64, device=device)
     if config.training.init_method == "random":
         seed += config.rank
-    elif config.training.init_method == "unified":
-        pass
-    elif config.training.init_method == "random-sigma":
-        pass
+    elif dist.is_initialized() and config.training.init_method in ["unified", "random-sigma"]:
+        dist.broadcast(tseed, src=0)
     else:
         raise ValueError(
             f"config.training.init_method should be one of [random, unified, random-sigma],"
             f" given: {config.training.init_method}",
         )
-
+    seed = tseed.item()
     # TODO: should deterministic be True??
     cudnn.benchmark = True
     cudnn.deterministic = False
@@ -145,20 +154,6 @@ def main(config):  # noqa: C901
     log.info(f"Seed: {seed}, init method: {config.training.init_method}")
     # -------- End Random Seed init --------------------------
 
-    if config.cpu_training:
-        gpu = None
-        log.debug("NOT using GPUs!")
-        device = torch.device("cpu")
-    else:
-        if dist.is_initialized():
-            gpu = dist.get_rank() % torch.cuda.device_count()  # only 4 gpus/node
-            log.debug(f"Using GPU: {gpu}")
-        else:
-            log.info(f"available GPUS: {torch.cuda.device_count()}")
-            gpu = 0
-            # log.info(f"available GPUS: {torch.cuda.device_count()}")
-        torch.cuda.set_device(gpu)
-        device = torch.device(f"cuda:{gpu}")
     # print('before get model')
     model = madonna.utils.get_model(config)
     if not config.cpu_training:
@@ -281,7 +276,7 @@ def main(config):  # noqa: C901
     best_fitness = 0.0
     last_val_top1s = []
     # TODO: flag for full_rank training
-    model_param_dict = None
+    # model_param_dict = None
     # if not config.baseline and model.local_low_rank_model is not None and dist.is_initialized():
     #     log.info("partially syncing models from low rank")
     #     model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
@@ -295,7 +290,7 @@ def main(config):  # noqa: C901
     if not config.baseline and model.local_low_rank_model is not None:
         model.mix_svd_layers()
 
-    just_synced = False
+    # just_synced = False
 
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
@@ -310,9 +305,22 @@ def main(config):  # noqa: C901
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        if just_synced:
+        # -------- distributed workload for SVD syncing -------------------
+        if not config.baseline and epoch >= 0:  # TODO: should this kick in after a number of epochs??
+            if config.rank == 0:
+                log.info("Starting svd workload distribute")
+            tgather = time.perf_counter()
+            model.distribute_workload(min_size_fraction=0.1)
+            tgather = time.perf_counter() - tgather
+            if config.rank == 0:
+                log.info(f"finished svd workload distribute, time: {tgather}")
+            # this changes the shape: opt needs reset
+            madonna.models.utils.change_adam_shapes(optimizer)
+
             model.mix_svd_layers()
-            just_synced = False
+        # if just_synced:
+        #     model.mix_svd_layers()
+        #     just_synced = False
 
         train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
@@ -330,40 +338,46 @@ def main(config):  # noqa: C901
             metrics=train_metrics,
         )
 
-        # # -------------- pruning ----------------------------
-        # if not config.baseline and epoch >= config.training.prune_epoch:
-        #     # fc -> resnets ;;; vit -> head
-        #     madonna.lrsync.prune.prune_model(model, threshold=1e-3, perc=None, last_layer_name="fc")
-        # # -------------- end pruning ----------------------------
-        if (
-            not config.baseline
-            and model_param_dict is None
-            and model.local_low_rank_model is not None
-            and dist.is_initialized()
-        ):
-            model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
-        if (
-            not config.baseline
-            and epoch >= config.training.sync.first_epoch
-            and epoch % config.training.sync.epoch_freq == 0
-            and dist.is_initialized()
-        ):
-            if model_param_dict is not None:
-                madonna.lrsync.sync.sync_low_rank_model(
-                    model_param_dict,
-                    vecs_to_send=config.training.sync.vecs,
-                    method=config.training.sync.method,
-                    sort=config.training.sort,
-                )
-                pass
-                # madonna.models.utils.reset_opt_state(optimizer=optimizer)
-                # # self.reset_all_states(self.optimizer)
-                # # self.optimizer.reset_shapes_of_sigma(self)
-                # model.optimizer.zero_grad(set_to_none=True)
-            else:
-                madonna.lrsync.sync.sync_full_rank_model_in_low_rank(model, config)
-                pass
-            just_synced = True
+        # ------------------- old code to sync the layer weights (using fib and such) ------------------
+        # if (
+        #     not config.baseline
+        #     and model_param_dict is None
+        #     and model.local_low_rank_model is not None
+        #     and dist.is_initialized()
+        # ):
+        #     model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
+        # if (
+        #     not config.baseline
+        #     and epoch >= config.training.sync.first_epoch
+        #     and epoch % config.training.sync.epoch_freq == 0
+        #     and dist.is_initialized()
+        # ):
+        #     if model_param_dict is not None:
+        #         madonna.lrsync.sync.sync_low_rank_model(
+        #             model_param_dict,
+        #             vecs_to_send=config.training.sync.vecs,
+        #             method=config.training.sync.method,
+        #             sort=config.training.sort,
+        #         )
+        #         pass
+        #         # madonna.models.utils.reset_opt_state(optimizer=optimizer)
+        #         # # self.reset_all_states(self.optimizer)
+        #         # # self.optimizer.reset_shapes_of_sigma(self)
+        #         # model.optimizer.zero_grad(set_to_none=True)
+        #     else:
+        #         madonna.lrsync.sync.sync_full_rank_model_in_low_rank(model, config)
+        #         pass
+        #     just_synced = True
+        # --------------- end old code to sync the layer weights (using fib and such) ------------------
+        if not config.baseline:
+            if config.rank == 0:
+                log.info("Starting svd gather")
+            tgather = time.perf_counter()
+            model.gather_distributed_factorizations(sigma_cutoff_fraction=0.2)
+            tgather = time.perf_counter() - tgather
+            if config.rank == 0:
+                log.info(f"finished svd gather, time: {tgather}")
+
             # model.blur_svd_layers()
             # madonna.models.utils.reset_opt_state(optimizer=optimizer)
 
@@ -566,6 +580,7 @@ def train(
     end = time.time()
     updates_per_epoch = len(train_loader)
     num_updates = epoch * updates_per_epoch
+    tsync = 0
     for i, data in enumerate(train_loader):
         optimizer.zero_grad(set_to_none=True)
         if hasattr(config.data, "dali") and config.data.dali:
@@ -623,6 +638,15 @@ def train(
         #     # steps_remaining = lr_reset_steps - 1
         # else:
         #     # TODO: this will only work for timm schedulers
+
+        # ------ update the non-svd parameters ----------
+        if not config.baseline and (i % config.training.non_svd_freq == 0 or i == updates_per_epoch - 1):
+            # if config.rank == 0:
+            #     log.info("Starting non-svd sync")
+            tsync1 = time.perf_counter()
+            model.sync_nonsvd_params(nonblocking=False, waits=None)
+            tsync += time.perf_counter() - tsync1
+
         lr_scheduler.step_update(num_updates=num_updates, metric=loss)
 
         # if argmax.std() == 0:
@@ -645,6 +669,8 @@ def train(
 
     if config.rank == 0:
         log.info(f"Data Loading Time avg: {data_time.avg}")
+        if not config.baseline:
+            log.info(f"Average non-svd sync time: {tsync / updates_per_epoch}\t Total: {tsync}")
 
     if dist.is_initialized():
         losses.all_reduce()

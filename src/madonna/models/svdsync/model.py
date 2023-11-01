@@ -37,11 +37,11 @@ class SVDSyncModel(nn.Module):
         full_rank_model: nn.Module,
         keep_first_layer: bool = False,
         keep_last_layer: bool = True,
-        step_on_forward: bool = True,
+        step_on_forward: bool = False,
         full_rank_warmup: bool = False,  # TODO: remove me or deal with me somehow... not planed to use atm
         fixed_inner_dim: bool = True,
         inner_dim_init_ratio: float = 1.0,
-        random_simga: bool = False,
+        random_sigma: bool = False,
         # --------- blur params ----------------------
         mixing_method: str = "exp",
         mixing_options: dict = None,
@@ -74,7 +74,7 @@ class SVDSyncModel(nn.Module):
         self.fixed_inner_dim = fixed_inner_dim
         self.inner_dim_init_ratio = inner_dim_init_ratio
 
-        self.update_from_simga = True  # update_from_simga TODO: remove me?
+        self.update_from_sigma = True  # update_from_sigma TODO: remove me?
         self.first_layer = keep_first_layer
         self.keep_last_layer = keep_last_layer
         self.last_layer = None
@@ -84,7 +84,7 @@ class SVDSyncModel(nn.Module):
         self.low_rank_replacement_list = {}
         self.local_low_rank_model = None
         # self.non_svd_params = []
-        self.random_simga = random_simga
+        self.random_sigma = random_sigma
 
         if full_rank_warmup and sync_delay > 0:
             if self.rank == 0:
@@ -111,7 +111,7 @@ class SVDSyncModel(nn.Module):
         self.num_stability_layvers_to_check = 0
         self.delay = sync_delay
         # self.fib1, self.fib2 = 0, 1
-        self.next_sync_iteration = self.delay + self.fib1
+        # self.next_sync_iteration = self.delay + self.fib1
         self.trade_method = trade_method  # method for trading the singular values and vectors
         self.vecs_to_trade = vecs_to_trade  # number of vectors to send each time (upper limit)
         self.ordering = ordering  # how to order the vals/vecs
@@ -155,13 +155,13 @@ class SVDSyncModel(nn.Module):
         self.svd_modules = {}
         self.layer_names = []
         calls = 0
-        sz = 1 if not self.use_ddp else dist.get_world_size()
+        # sz = 1 if not dist.is_initialized() else dist.get_world_size()
         for name, mod in self.model.named_modules():
             if hasattr(mod, "test_stability_distributed"):
-                if self.distributed_updates:
-                    working_rank = calls % sz
-                else:
-                    working_rank = self.rank
+                # if self.distributed_updates:
+                #     working_rank = calls % sz
+                # else:
+                working_rank = self.rank
                 # self.svd_modules.append((name, mod, working_rank))
                 self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
                 self.layer_names.append(name)
@@ -180,11 +180,6 @@ class SVDSyncModel(nn.Module):
         #     if not n.endswith((".s", ".u", ".vh")) and p.requires_grad:
         #         self.non_svd_params.append(p)
 
-    def mix_svd_layers(self):
-        log.info(f"Mixing sigma of SVD layers with {self.mixing_method}")
-        for name in self.svd_modules:
-            self.svd_modules[name]["mod"].mix_simga(method=self.mixing_method, **self.mixing_options)
-
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
         if isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
@@ -193,15 +188,14 @@ class SVDSyncModel(nn.Module):
                     in_features=module.in_features,
                     out_features=module.out_features,
                     bias=module.bias is not None,
-                    uvhthreshold=self.uvhthreshold,
-                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
                     start_weight=module.weight,
                     start_bias=module.bias,
-                    update_from_simga=self.update_from_simga,
-                    reinit_shapes=self.reinit_shapes,
-                    distributed_updates=self.use_ddp,
+                    # update_from_sigma=self.update_from_sigma,
+                    # reinit_shapes=self.reinit_shapes,
+                    # distributed_updates=self.use_ddp,
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_simga,
+                    random_sigma=self.random_sigma,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "lin"]
@@ -219,8 +213,8 @@ class SVDSyncModel(nn.Module):
                     kdim=module.kdim,
                     vdim=module.vdim,
                     batch_first=module.batch_first,
-                    uvh_threshold=self.uvhthreshold,
-                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    # uvh_threshold=self.uvhthreshold,
+                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
                     start_q=module.q_proj_weight,
                     start_k=module.k_proj_weight,
                     start_v=module.v_proj_weight,
@@ -228,11 +222,11 @@ class SVDSyncModel(nn.Module):
                     start_k_bias=module.bias_k,
                     start_v_bias=module.bias_v,
                     start_in_proj_bias=module.in_proj_bias,
-                    update_from_simga=self.update_from_simga,
-                    reinit_shapes=self.reinit_shapes,
-                    distributed_updates=self.use_ddp,
+                    # update_from_sigma=self.update_from_sigma,
+                    # reinit_shapes=self.reinit_shapes,
+                    # distributed_updates=self.use_ddp,
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_simga,
+                    random_sigma=self.random_sigma,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name, None, None]
                 if module.in_proj_weight is not None:
@@ -262,17 +256,17 @@ class SVDSyncModel(nn.Module):
                     padding_mode=module.padding_mode,
                     device=module.weight.device,
                     dtype=module.weight.dtype,
-                    uvhthreshold=self.uvhthreshold,
-                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    # uvhthreshold=self.uvhthreshold,
+                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
                     start_bias=module.bias,
                     start_weight=module.weight,
-                    update_from_simga=self.update_from_simga,
-                    reinit_shapes=self.reinit_shapes,
+                    # update_from_sigma=self.update_from_sigma,
+                    # reinit_shapes=self.reinit_shapes,
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
-                    distributed_updates=self.use_ddp,
+                    # distributed_updates=self.use_ddp,
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_simga,
+                    random_sigma=self.random_sigma,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
@@ -297,17 +291,17 @@ class SVDSyncModel(nn.Module):
                     padding_mode=module.padding_mode,
                     device=module.weight.device,
                     dtype=module.weight.dtype,
-                    uvhthreshold=self.uvhthreshold,
-                    sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                    # uvhthreshold=self.uvhthreshold,
+                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
                     start_bias=module.bias,
                     start_weight=module.weight,
-                    update_from_simga=self.update_from_simga,
-                    reinit_shapes=self.reinit_shapes,
+                    # update_from_sigma=self.update_from_sigma,
+                    # reinit_shapes=self.reinit_shapes,
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
-                    distributed_updates=self.use_ddp,
+                    # distributed_updates=self.use_ddp,
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_simga,
+                    random_sigma=self.random_sigma,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
@@ -381,18 +375,18 @@ class SVDSyncModel(nn.Module):
         optimizer.state = defaultdict(dict)
 
     @torch.no_grad()  # The function is the main method of doing stability tracking
-    def sync_nonsvd_params(self, nonblocking=True, waits=None):
-        # TODO: make a buffer to hold all of the weights for this to make this faster
-        #   (unsure if it will help)
+    def sync_nonsvd_params(self, nonblocking=False, waits=None):
+        # TODO: make a buffer to hold all of the weights for this to make this work in a delayed way
+        #   unsure if needed, might be fast enough, dont know about frequency
         if not dist.is_initialized():
             return
         # for nonblocking case, check if there are waits to wait for
         # if nonblocking, wait for the sent items then exit
-        if waits is not None:
-            for w in waits:
-                w.wait()
-            if nonblocking:
-                return None
+        # if waits is not None:
+        #     for w in waits:
+        #         w.wait()
+        #     if nonblocking:
+        #         return None
         waits = []
         for n, p in self.named_parameters():
             if not p.requires_grad or n.endswith(("_u", ".u", "_vh", ".vh", ".s", "_s")):
@@ -400,11 +394,29 @@ class SVDSyncModel(nn.Module):
             waits.append(dist.all_reduce(p, op=dist.ReduceOp.AVG, async_op=True))
         # if nonblocking, return the waits for later
         # if blocking, wait for the op to complete right now
-        if nonblocking:
-            return waits
-        else:
-            for w in waits:
-                w.wait()
+        # if nonblocking:
+        #     return waits
+        # else:
+        for w in waits:
+            w.wait()
+
+    @torch.no_grad()
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2):
+        for name in self.svd_modules:
+            # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
+            self.svd_modules[name]["mod"].gather_distributed_factorizations(sigma_cutoff_fraction=sigma_cutoff_fraction)
+
+    @torch.no_grad()
+    def distribute_workload(self, min_size_fraction=0.05):
+        for name in self.svd_modules:
+            # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
+            self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=min_size_fraction)
+
+    @torch.no_grad()
+    def mix_svd_layers(self):
+        log.info(f"Mixing sigma of SVD layers with {self.mixing_method}")
+        for name in self.svd_modules:
+            self.svd_modules[name]["mod"].mix_sigma(method=self.mixing_method, **self.mixing_options)
 
     def forward(self, *args, **kwargs):
         # TODO: if we want to run this every N steps, then we need to track all of that.
