@@ -35,13 +35,13 @@ class SVDSyncModel(nn.Module):
     def __init__(
         self,
         full_rank_model: nn.Module,
-        keep_first_layer: bool = False,
-        keep_last_layer: bool = True,
         step_on_forward: bool = False,
         full_rank_warmup: bool = False,  # TODO: remove me or deal with me somehow... not planed to use atm
         fixed_inner_dim: bool = True,
         inner_dim_init_ratio: float = 1.0,
         random_sigma: bool = False,
+        sigma_cutoff_fraction: float = 0.1,
+        fixed_full_rank_layers: list = None,
         # --------- blur params ----------------------
         mixing_method: str = "exp",
         mixing_options: dict = None,
@@ -51,6 +51,7 @@ class SVDSyncModel(nn.Module):
         trade_method: str = "fib",
         vecs_to_trade: int = 100,
         ordering: str = "cat",
+        sync_min_size_fraction: float = 0.1,
     ):
         """
         FIXME: do this stuffs
@@ -69,14 +70,14 @@ class SVDSyncModel(nn.Module):
                     # print(f"{n}: {p.numel()}")
                     num += p.numel()
 
+        self.fixed_full_rank_layers = fixed_full_rank_layers
+
         self.base_trainable_parameters = num
         self.base_all_parameters = full_params
         self.fixed_inner_dim = fixed_inner_dim
         self.inner_dim_init_ratio = inner_dim_init_ratio
 
         self.update_from_sigma = True  # update_from_sigma TODO: remove me?
-        self.first_layer = keep_first_layer
-        self.keep_last_layer = keep_last_layer
         self.last_layer = None
         self.full_rank_warmup = full_rank_warmup
         self.rank = 0 if not dist.is_initialized() else dist.get_rank()
@@ -105,6 +106,7 @@ class SVDSyncModel(nn.Module):
         # TODO: add other methods here??
         self.__repr__ = self.model.__repr__
         self.train = self.model.train
+        self.sigma_cutoff_fraction = sigma_cutoff_fraction
         # ---------------- sync params -----------------------------------------
         self.sync_frequency = sync_frequency
         self.call_count = 0
@@ -115,6 +117,7 @@ class SVDSyncModel(nn.Module):
         self.trade_method = trade_method  # method for trading the singular values and vectors
         self.vecs_to_trade = vecs_to_trade  # number of vectors to send each time (upper limit)
         self.ordering = ordering  # how to order the vals/vecs
+        self.sync_min_size_fraction = sync_min_size_fraction
         # ---------------- mixing params  ------------------------------------
         self.mixing_method = mixing_method
         if mixing_options is None:
@@ -148,8 +151,8 @@ class SVDSyncModel(nn.Module):
         self.local_low_rank_model = self._replace_layers(self.local_full_rank_model)
 
         # Reset the last layer to the last layer.
-        if self.keep_last_layer:
-            self._reset_last_layer(self.local_low_rank_model)
+        # if self.keep_last_layer:
+        #     self._reset_last_layer(self.local_low_rank_model)
 
         self.model = self.local_low_rank_model
         self.svd_modules = {}
@@ -157,7 +160,7 @@ class SVDSyncModel(nn.Module):
         calls = 0
         # sz = 1 if not dist.is_initialized() else dist.get_world_size()
         for name, mod in self.model.named_modules():
-            if hasattr(mod, "test_stability_distributed"):
+            if hasattr(mod, "gather_distributed_factorizations"):
                 # if self.distributed_updates:
                 #     working_rank = calls % sz
                 # else:
@@ -182,68 +185,69 @@ class SVDSyncModel(nn.Module):
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
-        if isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
-            if not self.first_layer:
-                module_output = SVDSyncLinear(
-                    in_features=module.in_features,
-                    out_features=module.out_features,
-                    bias=module.bias is not None,
-                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    start_weight=module.weight,
-                    start_bias=module.bias,
-                    # update_from_sigma=self.update_from_sigma,
-                    # reinit_shapes=self.reinit_shapes,
-                    # distributed_updates=self.use_ddp,
-                    inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_sigma,
-                ).to(device=module.weight.device, dtype=module.weight.dtype)
-                self.last_layer = [module, name, module.weight.dtype, module.weight.device]
-                self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "lin"]
+        if isinstance(module, nn.Linear) and name not in self.fixed_full_rank_layers:
+            # print(f"layer name: {name} {self.fixed_full_rank_layers}")
+            # if not self.first_layer:
+            module_output = SVDSyncLinear(
+                in_features=module.in_features,
+                out_features=module.out_features,
+                bias=module.bias is not None,
+                # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_weight=module.weight,
+                start_bias=module.bias,
+                # update_from_sigma=self.update_from_sigma,
+                # reinit_shapes=self.reinit_shapes,
+                # distributed_updates=self.use_ddp,
+                inner_dim_init_ratio=self.inner_dim_init_ratio,
+                random_sigma=self.random_sigma,
+            ).to(device=module.weight.device, dtype=module.weight.dtype)
+            # self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+            self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "lin"]
+            # else:
+            #     self.first_layer = False
+        elif isinstance(module, nn.MultiheadAttention) and name not in self.fixed_full_rank_layers:
+            # if not self.first_layer:
+            module_output = SVDSyncMultiheadAttention(
+                embed_dim=module.embed_dim,
+                num_heads=module.num_heads,
+                dropout=module.dropout,
+                bias=module.in_proj_bias is not None,
+                add_bias_kv=module.bias_k is not None,
+                add_zero_attn=module.add_zero_attn,
+                kdim=module.kdim,
+                vdim=module.vdim,
+                batch_first=module.batch_first,
+                # uvh_threshold=self.uvhthreshold,
+                # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_q=module.q_proj_weight,
+                start_k=module.k_proj_weight,
+                start_v=module.v_proj_weight,
+                start_in_proj=module.in_proj_weight,
+                start_k_bias=module.bias_k,
+                start_v_bias=module.bias_v,
+                start_in_proj_bias=module.in_proj_bias,
+                # update_from_sigma=self.update_from_sigma,
+                # reinit_shapes=self.reinit_shapes,
+                # distributed_updates=self.use_ddp,
+                inner_dim_init_ratio=self.inner_dim_init_ratio,
+                random_sigma=self.random_sigma,
+            ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
+            # self.last_layer = [module, name, None, None]
+            if module.in_proj_weight is not None:
+                self.low_rank_replacement_list[id(module.in_proj_weight)] = [module_output.in_proj_s, "attn"]
             else:
-                self.first_layer = False
-        elif isinstance(module, nn.MultiheadAttention):
-            if not self.first_layer:
-                module_output = SVDSyncMultiheadAttention(
-                    embed_dim=module.embed_dim,
-                    num_heads=module.num_heads,
-                    dropout=module.dropout,
-                    bias=module.in_proj_bias is not None,
-                    add_bias_kv=module.bias_k is not None,
-                    add_zero_attn=module.add_zero_attn,
-                    kdim=module.kdim,
-                    vdim=module.vdim,
-                    batch_first=module.batch_first,
-                    # uvh_threshold=self.uvhthreshold,
-                    # sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-                    start_q=module.q_proj_weight,
-                    start_k=module.k_proj_weight,
-                    start_v=module.v_proj_weight,
-                    start_in_proj=module.in_proj_weight,
-                    start_k_bias=module.bias_k,
-                    start_v_bias=module.bias_v,
-                    start_in_proj_bias=module.in_proj_bias,
-                    # update_from_sigma=self.update_from_sigma,
-                    # reinit_shapes=self.reinit_shapes,
-                    # distributed_updates=self.use_ddp,
-                    inner_dim_init_ratio=self.inner_dim_init_ratio,
-                    random_sigma=self.random_sigma,
-                ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
-                self.last_layer = [module, name, None, None]
-                if module.in_proj_weight is not None:
-                    self.low_rank_replacement_list[id(module.in_proj_weight)] = [module_output.in_proj_s, "attn"]
-                else:
-                    self.low_rank_replacement_list[id(module.q_proj_weight)] = [module_output.q_s, "attn"]
-                    self.low_rank_replacement_list[id(module.k_proj_weight)] = [module_output.k_s, "attn"]
-                    self.low_rank_replacement_list[id(module.v_proj_weight)] = [module_output.v_s, "attn"]
-            else:
-                self.first_layer = False
-        elif isinstance(module, nn.Conv2d):
+                self.low_rank_replacement_list[id(module.q_proj_weight)] = [module_output.q_s, "attn"]
+                self.low_rank_replacement_list[id(module.k_proj_weight)] = [module_output.k_s, "attn"]
+                self.low_rank_replacement_list[id(module.v_proj_weight)] = [module_output.v_s, "attn"]
+            # else:
+            #     self.first_layer = False
+        elif isinstance(module, nn.Conv2d) and name not in self.fixed_full_rank_layers:
             wv = module.weight.view(module.weight.shape[0], -1)
             if wv.shape[0] < wv.shape[1]:
                 wv.T
             if wv.shape[1] < wv.shape[0] / 10:
                 pass  # skip this layer if there are not enough params
-            elif not self.first_layer:
+            else:  # if not self.first_layer:
                 module_output = SVDSyncConv2d(
                     in_channels=module.in_channels,
                     out_channels=module.out_channels,
@@ -268,17 +272,17 @@ class SVDSyncModel(nn.Module):
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
                     random_sigma=self.random_sigma,
                 )
-                self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+                # self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
-            else:
-                self.first_layer = False
-        elif isinstance(module, nn.Conv1d):
+            # else:
+            #     self.first_layer = False
+        elif isinstance(module, nn.Conv1d) and name not in self.fixed_full_rank_layers:
             wv = module.weight.view(module.weight.shape[0], -1)
             if wv.shape[0] < wv.shape[1]:
                 wv.T
             if wv.shape[1] < wv.shape[0] / 10:
                 pass  # skip this layer if there are not enough params
-            elif not self.first_layer:
+            else:  # if not self.first_layer:
                 module_output = SVDSyncConv1d(
                     in_channels=module.in_channels,
                     out_channels=module.out_channels,
@@ -303,10 +307,10 @@ class SVDSyncModel(nn.Module):
                     inner_dim_init_ratio=self.inner_dim_init_ratio,
                     random_sigma=self.random_sigma,
                 )
-                self.last_layer = [module, name, module.weight.dtype, module.weight.device]
+                # self.last_layer = [module, name, module.weight.dtype, module.weight.device]
                 self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
-            else:
-                self.first_layer = False
+            # else:
+            #     self.first_layer = False
         for n, child in module.named_children():
             module_output.add_module(
                 f"{n}",
@@ -317,26 +321,6 @@ class SVDSyncModel(nn.Module):
                 ),
             )
         del module
-        return module_output
-
-    def _reset_last_layer(self, module, name=None):
-        module_output = module
-        if name == self.last_layer[1]:
-            if self.last_layer[2] is None:
-                try:
-                    device = module.in_proj_s.device
-                    dtype = module.in_proj_s.dtype
-                except AttributeError:
-                    device = module.q_s.device
-                    dtype = module.q_s.dtype
-            else:
-                dtype = self.last_layer[2]
-                device = self.last_layer[3]
-            module_output = self.last_layer[0].to(device=device, dtype=dtype)
-            del self.low_rank_replacement_list[id(self.last_layer[0].weight)]
-        for n, child in module.named_children():
-            module_output.add_module(n, self._reset_last_layer(child, f"{name}.{n}" if name is not None else f"{n}"))
-        # del module
         return module_output
 
     @torch.no_grad()
@@ -401,16 +385,18 @@ class SVDSyncModel(nn.Module):
             w.wait()
 
     @torch.no_grad()
-    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2):
+    def gather_distributed_factorizations(self):
         for name in self.svd_modules:
             # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
-            self.svd_modules[name]["mod"].gather_distributed_factorizations(sigma_cutoff_fraction=sigma_cutoff_fraction)
+            self.svd_modules[name]["mod"].gather_distributed_factorizations(
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+            )
 
     @torch.no_grad()
-    def distribute_workload(self, min_size_fraction=0.05):
+    def distribute_workload(self):
         for name in self.svd_modules:
             # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
-            self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=min_size_fraction)
+            self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=self.sync_min_size_fraction)
 
     @torch.no_grad()
     def mix_svd_layers(self):
