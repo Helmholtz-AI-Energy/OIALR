@@ -140,6 +140,9 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
         self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
         self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
 
+        self.p = nn.Parameter(torch.ones_like(s[: self.inner_dim], requires_grad=False))
+        self.train_p = False
+
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
@@ -193,18 +196,17 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             x = self.activation(x)
         return x
 
-    @torch.no_grad()
-    def get_weight_for_svd(self):
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        return w
-
     def get_weight(self, for_svd=False):
         # detach sets 'requires grad' to False
         if self.training:
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+        if self.train_p:
+            self.p.requires_grad = True
+            w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
+        else:
+            w = torch.linalg.multi_dot([self.u, self.s, self.vh])
         if self.trans:
             w = w.T
 
@@ -404,7 +406,7 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
 
-    def distribute_workload(self, min_size_fraction=0.05):
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
         utils.split_sigma_workload(
             collected_u=self.u,
             collected_s=self.s,
@@ -412,20 +414,45 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             sigma_generator=self.sigma_generator,
             min_size_fraction=min_size_fraction,
             set_usvh=True,
+            name=name,
         )
 
-    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2):
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
         utils.collect_lr_reps_from_all(
             local_u=self.u,
             local_s=self.s,
             local_vh=self.vh,
             sigma_cutoff_fraction=sigma_cutoff_fraction,
             set_usvh=True,
+            name=name,
         )
 
     @torch.no_grad()
     def mix_sigma(self, method, *args, **kwargs):
         mixing.mix_sigma(*args, u=self.u, s=self.s, vh=self.vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def start_p_training(self):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        self.p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        self.p.add_(1 / sz)
+        self.p.requires_grad = True
+        self.train_p = True
+        self.s.requires_grad = False
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        hold = self.p.view(-1, 1) * self.s
+        self.s.zero_()
+        self.s.add_(hold)
+        self.p.zero_()
+        self.p.add_(1)
+        self.p.requires_grad = False
+        self.train_p = False
+        self.s.requires_grad = True
 
 
 class SVDSyncConv1d(nn.modules.conv._ConvNd):
@@ -525,6 +552,9 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
         self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
         self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
 
+        self.p = nn.Parameter(torch.ones_like(s[: self.inner_dim], requires_grad=False))
+        self.train_p = False
+
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
@@ -580,18 +610,17 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             x = self.activation(x)
         return x
 
-    @torch.no_grad()
-    def get_weight_for_svd(self):
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        return w
-
     def get_weight(self, for_svd=False):
         # detach sets 'requires grad' to False
         if self.training:
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+        if self.train_p:
+            self.p.requires_grad = True
+            w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
+        else:
+            w = torch.linalg.multi_dot([self.u, self.s, self.vh])
         if self.trans:
             w = w.T
 
@@ -794,7 +823,7 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
 
-    def distribute_workload(self, min_size_fraction=0.05):
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
         utils.split_sigma_workload(
             collected_u=self.u,
             collected_s=self.s,
@@ -802,17 +831,42 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             sigma_generator=self.sigma_generator,
             min_size_fraction=min_size_fraction,
             set_usvh=True,
+            name=name,
         )
 
-    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2):
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
         utils.collect_lr_reps_from_all(
             local_u=self.u,
             local_s=self.s,
             local_vh=self.vh,
             sigma_cutoff_fraction=sigma_cutoff_fraction,
             set_usvh=True,
+            name=name,
         )
 
     @torch.no_grad()
     def mix_sigma(self, method, *args, **kwargs):
         mixing.mix_sigma(*args, u=self.u, s=self.s, vh=self.vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def start_p_training(self):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        self.p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        self.p.add_(1 / sz)
+        self.p.requires_grad = True
+        self.train_p = True
+        self.s.requires_grad = False
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        hold = self.p.view(-1, 1) * self.s
+        self.s.zero_()
+        self.s.add_(hold)
+        self.p.zero_()
+        self.p.add_(1)
+        self.p.requires_grad = False
+        self.train_p = False
+        self.s.requires_grad = True

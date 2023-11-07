@@ -214,6 +214,9 @@ class SVDSyncMultiheadAttention(nn.Module):
                     torch.empty((self.v_inner_dim, self.vdim), **factory_kwargs),
                     requires_grad=False,
                 )
+            self.q_p = Parameter(torch.empty(self.q_inner_dim, **factory_kwargs), requires_grad=True)
+            self.k_p = Parameter(torch.empty(self.k_inner_dim, **factory_kwargs), requires_grad=True)
+            self.v_p = Parameter(torch.empty(self.v_inner_dim, **factory_kwargs), requires_grad=True)
             self.register_parameter("in_proj_u", None)
             self.register_parameter("in_proj_s", None)
             self.register_parameter("in_proj_vh", None)
@@ -233,6 +236,7 @@ class SVDSyncMultiheadAttention(nn.Module):
                 torch.empty((self.in_proj_inner_dim, embed_dim), **factory_kwargs),
                 requires_grad=False,
             )
+            self.in_proj_p = Parameter(torch.empty(self.in_proj_inner_dim, **factory_kwargs), requires_grad=True)
             self.in_proj_trans = False
             self.register_parameter("q_u", None)
             self.register_parameter("q_s", None)
@@ -257,6 +261,7 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.bias_k = self.bias_v = None
 
         self.add_zero_attn = add_zero_attn
+        self.train_p = False
 
         # self._reset_parameters()
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -265,6 +270,7 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.prev_uvh_q = None
             self.prev_uvh_k = None
             self.prev_uvh_v = None
+            # self.q_p = nn.Parameter(torch.)
         else:
             self.prev_uvh_in_proj = None
 
@@ -333,6 +339,7 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.first_distribute_workload = True
             if random_sigma:
                 log.debug(f"layer-local random seed: {self.gen.initial_seed()}")
+
             # reset the USVh vales for qkv/in
             if self._qkv_same_embed_dim:  # `in` case
                 u, s, vh = torch.linalg.svd(self.in_proj_weight, full_matrices=False)
@@ -420,7 +427,12 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.q_vh.requires_grad = False
         u, vh = self.q_u, self.q_vh
         s = self.q_s
-        ret = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.q_p.requires_grad = True
+            self.q_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.q_p.view(-1, 1), s, vh])
+        else:
+            ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
     # @torch.compile()
@@ -431,7 +443,12 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.k_vh.requires_grad = False
         u, vh = self.k_u, self.k_vh
         s = self.k_s
-        w = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.k_p.requires_grad = True
+            self.k_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.k_p.view(-1, 1), s, vh])
+        else:
+            w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.k_trans else w
         return ret
 
@@ -443,7 +460,12 @@ class SVDSyncMultiheadAttention(nn.Module):
             self.v_vh.requires_grad = False
         u, vh = self.v_u, self.v_vh
         s = self.v_s
-        w = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.v_p.requires_grad = True
+            self.v_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.v_p.view(-1, 1), s, vh])
+        else:
+            w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.v_trans else w
         return ret
 
@@ -459,7 +481,12 @@ class SVDSyncMultiheadAttention(nn.Module):
         u = self.in_proj_u  # .detach()
         vh = self.in_proj_vh  # .detach()
         s = self.in_proj_s
-        ret = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.in_proj_p.requires_grad = True
+            self.in_proj_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.in_proj_p.view(-1, 1), s, vh])
+        else:
+            ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
     # @torch.compile()
@@ -1052,7 +1079,7 @@ class SVDSyncMultiheadAttention(nn.Module):
             "in_proj": self.in_proj_inner_dim,
         }
 
-    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2):
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
         if not self._qkv_same_embed_dim:
             for qkv in "qkv":
                 u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
@@ -1062,6 +1089,7 @@ class SVDSyncMultiheadAttention(nn.Module):
                     local_vh=vh,
                     sigma_cutoff_fraction=sigma_cutoff_fraction,
                     set_usvh=True,
+                    name=name + f".{qkv}",
                 )
         else:
             u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
@@ -1071,9 +1099,10 @@ class SVDSyncMultiheadAttention(nn.Module):
                 local_vh=vh,
                 sigma_cutoff_fraction=sigma_cutoff_fraction,
                 set_usvh=True,
+                name=name,
             )
 
-    def distribute_workload(self, min_size_fraction=0.05):
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
         if not self._qkv_same_embed_dim:
             for qkv in "qkv":
                 u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
@@ -1084,6 +1113,7 @@ class SVDSyncMultiheadAttention(nn.Module):
                     sigma_generator=self.sigma_generator,
                     min_size_fraction=min_size_fraction,
                     set_usvh=True,
+                    name=name + f".{qkv}",
                 )
         else:
             u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
@@ -1094,6 +1124,7 @@ class SVDSyncMultiheadAttention(nn.Module):
                 sigma_generator=self.sigma_generator,
                 min_size_fraction=min_size_fraction,
                 set_usvh=True,
+                name=name,
             )
         self.first_distribute_workload = False
 
@@ -1108,3 +1139,46 @@ class SVDSyncMultiheadAttention(nn.Module):
         else:
             u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
             mixing.mix_sigma(*args, u=u, s=s, vh=vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def _start_p_training_qkvin(self, qkv):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        s = getattr(self, f"{qkv}_s")
+        p = getattr(self, f"{qkv}_p")
+        p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        p.add_(1 / sz)
+        p.requires_grad = True
+        self.train_p = True
+        s.requires_grad = False
+
+    @torch.no_grad()
+    def _update_sp_train_normally_qkvin(self, qkv):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        s = getattr(self, f"{qkv}_s")
+        p = getattr(self, f"{qkv}_p")
+        hold = p.view(-1, 1) * s
+        s.zero_()
+        s.add_(hold)
+        p.zero_()
+        p.add_(1)
+        p.requires_grad = False
+        self.train_p = False
+        s.requires_grad = True
+
+    @torch.no_grad()
+    def start_p_training(self):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                self._start_p_training_qkvin(qkv)
+        else:
+            self._start_p_training_qkvin("in_proj")
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                self._update_sp_train_normally_qkvin(qkv)
+        else:
+            self._update_sp_train_normally_qkvin("in_proj")
