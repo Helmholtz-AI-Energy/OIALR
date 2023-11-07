@@ -6,6 +6,8 @@ def mix_sigma(u, s, vh, method: str = "exp", generator=None, *args, **kwargs):
         return rbf_update_usvh_mix_sigma(*args, u=u, s=s, vh=vh, generator=generator, **kwargs)
     elif method == "exp":
         return exp_update_usvh_mix_sigma(u=u, s=s, vh=vh, **kwargs)
+    elif method is None:
+        pass
     else:
         return NotImplementedError(f"blurring method ({method}) not implemented, write it and add switch here")
 
@@ -57,7 +59,7 @@ def rbf_update_usvh_mix_sigma(u, s, vh, sigma=1.0, neigh=0.05, generator=None):
     s.add_(s)
 
 
-def exp_update_usvh_mix_sigma(u, s, vh, scaling=10):
+def exp_update_usvh_mix_sigma(u, s, vh, scaling=100):
     """
     NOTE: scaling will scale the array by sigma.shape[0] / scaling
             - this will make it invariant of the size of sigma

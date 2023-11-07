@@ -35,7 +35,6 @@ class SVDSyncModel(nn.Module):
     def __init__(
         self,
         full_rank_model: nn.Module,
-        step_on_forward: bool = False,
         full_rank_warmup: bool = False,  # TODO: remove me or deal with me somehow... not planed to use atm
         fixed_inner_dim: bool = True,
         inner_dim_init_ratio: float = 1.0,
@@ -46,8 +45,9 @@ class SVDSyncModel(nn.Module):
         mixing_method: str = "exp",
         mixing_options: dict = None,
         # --------- sync params ----------------------
-        sync_frequency: int = 1000,
-        sync_delay: int = 1000,
+        delay: int = 1000,
+        distributed_steps: int = 1000,
+        p_steps: int = 10,
         trade_method: str = "fib",
         vecs_to_trade: int = 100,
         ordering: str = "cat",
@@ -87,7 +87,7 @@ class SVDSyncModel(nn.Module):
         # self.non_svd_params = []
         self.random_sigma = random_sigma
 
-        if full_rank_warmup and sync_delay > 0:
+        if full_rank_warmup and delay > 0:
             if self.rank == 0:
                 log.info("Starting with training in full rank")
             self.model = self.local_full_rank_model
@@ -108,16 +108,19 @@ class SVDSyncModel(nn.Module):
         self.train = self.model.train
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         # ---------------- sync params -----------------------------------------
-        self.sync_frequency = sync_frequency
-        self.call_count = 0
+        self.train_count = 0
         self.num_stability_layvers_to_check = 0
-        self.delay = sync_delay
+        self.delay = delay
+        self.distributed_steps = distributed_steps
+        self.p_steps = p_steps
+
         # self.fib1, self.fib2 = 0, 1
         # self.next_sync_iteration = self.delay + self.fib1
         self.trade_method = trade_method  # method for trading the singular values and vectors
         self.vecs_to_trade = vecs_to_trade  # number of vectors to send each time (upper limit)
         self.ordering = ordering  # how to order the vals/vecs
         self.sync_min_size_fraction = sync_min_size_fraction
+        self.train_p = False
         # ---------------- mixing params  ------------------------------------
         self.mixing_method = mixing_method
         if mixing_options is None:
@@ -127,12 +130,19 @@ class SVDSyncModel(nn.Module):
         self.local_generator = torch.Generator()
         self.local_generator.manual_seed(self.rank)
 
-    def set_optimizer(self, optimizer):
-        self.optimizer = optimizer  # optimizers.MixedSVDOpt
-        if isinstance(optimizer, (optim.Adam, optim.AdamW)):
+    def set_optimizers(self, optimizer_normal, optimizer_p):
+        # Set normal training optimizer
+        self.optimizer_normal = optimizer_normal
+        if isinstance(optimizer_normal, (optim.Adam, optim.AdamW)):
             self.reshape_opt_state_fn = change_adam_shapes
-        elif isinstance(optimizer, optim.SGD):
+        elif isinstance(optimizer_normal, optim.SGD):
             self.reshape_opt_state_fn = change_sgd_shapes
+        # set optimizer for p steps
+        self.optimizer_p = optimizer_p
+        if isinstance(optimizer_p, (optim.Adam, optim.AdamW)):
+            self.reshape_opt_state_fn_p = change_adam_shapes
+        elif isinstance(optimizer_p, optim.SGD):
+            self.reshape_opt_state_fn_p = change_sgd_shapes
 
     @torch.no_grad()
     def setup_low_rank_training(self, skip_optimizer_init=False):
@@ -156,28 +166,93 @@ class SVDSyncModel(nn.Module):
 
         self.model = self.local_low_rank_model
         self.svd_modules = {}
+        self.non_svd_modules = {}
         self.layer_names = []
         calls = 0
         # sz = 1 if not dist.is_initialized() else dist.get_world_size()
+
+        ign_norm_train = []
+        ign_p_train = []
         for name, mod in self.model.named_modules():
             if hasattr(mod, "gather_distributed_factorizations"):
                 # if self.distributed_updates:
                 #     working_rank = calls % sz
                 # else:
-                working_rank = self.rank
+                # working_rank = self.rank
                 # self.svd_modules.append((name, mod, working_rank))
-                self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
+                self.svd_modules[name] = {"mod": mod}
                 self.layer_names.append(name)
-                try:  # only a module in the attention layers and its just faster to try to get something
-                    if mod._qkv_same_embed_dim:
+                try:
+                    # only a module in the attention layers and its just faster to try to get something
+                    if mod._qkv_same_embed_dim:  # using in_proj
                         calls += 1
+                        # ign_norm_train.extend([f"{name}.in_proj_u", f"{name}.in_proj_s", f"{name}.in_proj_vh"])
+                        ign_norm_train.extend(
+                            [f"{name}.in_proj_u", f"{name}.in_proj_s", f"{name}.in_proj_vh", f"{name}.in_proj_p"],
+                        )
+                        ign_p_train.extend([f"{name}.in_proj_u", f"{name}.in_proj_s", f"{name}.in_proj_vh"])
                     else:
                         calls += 3
+                        ign_norm_train.extend(
+                            [
+                                f"{name}.q_u",
+                                f"{name}.q_s",
+                                f"{name}.q_vh",
+                                f"{name}.q_p",
+                                f"{name}.k_u",
+                                f"{name}.k_s",
+                                f"{name}.k_vh",
+                                f"{name}.k_p",
+                                f"{name}.v_u",
+                                f"{name}.v_s",
+                                f"{name}.v_vh",
+                                f"{name}.v_p",
+                            ],
+                        )
+                        ign_norm_train.extend(
+                            [
+                                f"{name}.q_u",
+                                f"{name}.q_s",
+                                f"{name}.q_vh",
+                                f"{name}.k_u",
+                                f"{name}.k_s",
+                                f"{name}.k_vh",
+                                f"{name}.v_u",
+                                f"{name}.v_s",
+                                f"{name}.v_vh",
+                            ],
+                        )
                 except AttributeError:
+                    # non-attn case
                     calls += 1
+                    # ign.extend([f"{name}.u", f"{name}.s", f"{name}.vh"])
+                    ign_norm_train.extend([f"{name}.u", f"{name}.s", f"{name}.vh", f"{name}.p"])
+                    ign_p_train.extend([f"{name}.u", f"{name}.s", f"{name}.vh", f"{name}.p"])
+            elif len(list(mod.children())) == 0:
+                self.non_svd_modules[name] = {"mod": mod}
+                for n, p in mod.named_parameters():
+                    # in P_training, need to ignore all the other parameters -> not training
+                    ign_p_train.append(f"{name}.{n}")
+
+        self.ignore_norm_train = ign_norm_train
+        self.ignore_p_train = ign_p_train
+        self.model._ddp_params_and_buffers_to_ignore = ign_norm_train
         if not skip_optimizer_init:  # only need to do this if we start in full rank
             replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
 
+        # No reason not to do DDP training if we can ignore the low-rank parameters
+        self.model = DDP(self.model)
+        if dist.get_rank() == 0:
+            ids = []
+            dct = {}
+            for n, p in self.model.named_parameters():
+                # print(n, id(p))
+                ids.append(id(p))
+                dct[id(p)] = n
+            for p in self.model._module_parameters:
+                del dct[id(p)]
+        #     print(dct)
+        # raise ValueError
         # self.non_svd_params = []
         # for n, p in self.named_parameters():
         #     if not n.endswith((".s", ".u", ".vh")) and p.requires_grad:
@@ -352,6 +427,18 @@ class SVDSyncModel(nn.Module):
             )
         return 100 * (full_active / full_normal), full_active, full_normal, compression_perc
 
+    def set_epoch_length(self, len_dataloader):
+        self.epoch_len = len_dataloader
+        self.distributed_steps -= self.distributed_steps % self.epoch_len
+        self.distributed_steps -= self.p_steps
+        self.last_step = self.distributed_steps + self.p_steps
+        self.last_step += self.last_step % self.epoch_len  # add epoch len
+        if self.distributed_steps < 10:
+            raise ValueError(
+                "Distributed steps must be > 10 (so it learns something), "
+                f"distributed steps: {self.distributed_steps} epoch len: {self.epoch_len} p steps: {self.p_steps}",
+            )
+
     @staticmethod
     def reset_all_opt_states(optimizer: optim.Optimizer):
         # reset op1 first
@@ -359,7 +446,7 @@ class SVDSyncModel(nn.Module):
         optimizer.state = defaultdict(dict)
 
     @torch.no_grad()  # The function is the main method of doing stability tracking
-    def sync_nonsvd_params(self, nonblocking=False, waits=None):
+    def average_models(self):
         # TODO: make a buffer to hold all of the weights for this to make this work in a delayed way
         #   unsure if needed, might be fast enough, dont know about frequency
         if not dist.is_initialized():
@@ -373,7 +460,7 @@ class SVDSyncModel(nn.Module):
         #         return None
         waits = []
         for n, p in self.named_parameters():
-            if not p.requires_grad or n.endswith(("_u", ".u", "_vh", ".vh", ".s", "_s")):
+            if not p.requires_grad or n.endswith(("_u", ".u", "_vh", ".vh")):
                 continue
             waits.append(dist.all_reduce(p, op=dist.ReduceOp.AVG, async_op=True))
         # if nonblocking, return the waits for later
@@ -388,15 +475,13 @@ class SVDSyncModel(nn.Module):
     def gather_distributed_factorizations(self):
         for name in self.svd_modules:
             # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
-            self.svd_modules[name]["mod"].gather_distributed_factorizations(
-                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
-            )
+            self.svd_modules[name]["mod"].gather_distributed_factorizations(name=name)
 
     @torch.no_grad()
     def distribute_workload(self):
         for name in self.svd_modules:
             # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
-            self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=self.sync_min_size_fraction)
+            self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=self.sync_min_size_fraction, name=name)
 
     @torch.no_grad()
     def mix_svd_layers(self):
@@ -410,7 +495,36 @@ class SVDSyncModel(nn.Module):
         # if self.step_on_forward and self.model.training:
         #     # print("in stability tracking block")
         #     self.model_stability_tracking(force=False)
-        return self.model(*args, **kwargs)
+        if not self.training:
+            pass
+        elif self.train_count < self.delay:  # in delay before doing anything
+            return_opt = self.optimizer_normal
+        elif self.train_count == self.delay:
+            # at delay point -> distribute workload and prep normal training methods
+            self.distribute_workload()
+            self.prep_normal_training()
+            self.train_count, self.delay = 0, -1
+            return_opt = self.optimizer_normal
+        elif self.train_count < self.distributed_steps:
+            # continue to train locally on SVD layers and globally on others
+            return_opt = self.optimizer_normal
+        elif self.train_count == self.distributed_steps:
+            # collect all trained models, prepare to train P vectors
+            self.gather_distributed_factorizations()
+            self.prep_p_training()
+            return_opt = self.optimizer_p
+        elif self.distributed_steps < self.train_count < self.last_step - 1:
+            # train P vectors on each layer, no training other layers
+            return_opt = self.optimizer_p
+        elif self.train_count == self.last_step - 1:
+            # fold P values into sigma, resume normal training in parallal
+            # NOTE: this will let the sigma values dift slightly before they get distributed....
+            # FIXME: see above
+            self.prep_normal_training()
+            return_opt = self.optimizer_normal
+
+        self.train_count += 1
+        return self.model(*args, **kwargs), return_opt
 
     @torch.no_grad()
     def load_state_dict(self, best_model_path):
@@ -432,3 +546,53 @@ class SVDSyncModel(nn.Module):
 
         self.local_low_rank_model.load_state_dict(state_dict)
         self.get_perc_params_all_layers()
+
+    @torch.no_grad()
+    def prep_validate(self):
+        # average non-svd parameters
+        # should the P values be folder in here as well?
+        # TODO: fix the SVD layers
+        ...
+
+    @torch.no_grad()
+    def freeze_non_p(self):
+        # freeze the network's parameters which are not P (mixing vectors)
+        for name in self.non_svd_modules:
+            # self.svd_modules[name] = {"mod": mod, }
+            self.non_svd_modules[name]["mod"].eval()
+
+    @torch.no_grad()
+    def unfreeze_non_p(self):
+        # freeze the network's parameters which are not P (mixing vectors)
+        for name in self.non_svd_modules:
+            # self.svd_modules[name] = {"mod": mod, }
+            self.non_svd_modules[name]["mod"].train()
+
+    @torch.no_grad()
+    def fold_p_into_simga(self):
+        # fold P into sigma and switch to normal training
+        for name in self.svd_modules:
+            # self.svd_modules[name] = {"mod": mod, }
+            self.svd_modules[name]["mod"].update_sp_train_normally()
+        self.train_p = False
+
+    @torch.no_grad()
+    def prep_p_training(self):
+        # freeze training other values and start training P
+        self.train_p = True
+        self.freeze_non_p()
+        for name in self.svd_modules:
+            # self.svd_modules[name] = {"mod": mod, }
+            self.svd_modules[name]["mod"].start_p_training()
+        self.train_p = True
+        self.model._ddp_params_and_buffers_to_ignore = self.ignore_p_train
+        self.ddp_model = DDP(self.model)
+
+    @torch.no_grad()
+    def prep_normal_training(self):
+        # return to normal training -> no distributed sigma sync, but sync everything else
+        self.train_p = False
+        self.fold_p_into_simga()
+        self.unfreeze_non_p()
+        self.model._ddp_params_and_buffers_to_ignore = self.ignore_norm_train
+        self.ddp_model = DDP(self.model)

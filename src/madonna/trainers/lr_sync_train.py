@@ -152,6 +152,9 @@ def main(config):  # noqa: C901
 
     # if config.rank == 0:
     log.info(f"Seed: {seed}, init method: {config.training.init_method}")
+    if config.training.init_method == "random-simga":
+        with open_dict(config):
+            config.training.fixing_method.random_simga = True
     # -------- End Random Seed init --------------------------
 
     # print('before get model')
@@ -177,7 +180,9 @@ def main(config):  # noqa: C901
         log.info("using SVD model")
     # else:
     #     log.info("using baseline 1 process model")
-    # print(model)
+
+    if config.rank == 0:
+        print(model)
 
     # model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
 
@@ -305,12 +310,14 @@ def main(config):  # noqa: C901
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        # -------- distributed workload for SVD syncing -------------------
-        if not config.baseline and epoch >= 0:  # TODO: should this kick in after a number of epochs??
-            if config.rank == 0:
-                log.info("Starting svd workload distribute")
+        # ----------- distributed workload for SVD syncing --------------------
+        if (
+            not config.baseline and epoch >= config.training.first_sync_epoch
+        ):  # TODO: should this kick in after a number of epochs??
+            # if config.rank == 0:
+            #     log.info("Starting svd workload distribute")
             tgather = time.perf_counter()
-            model.distribute_workload(min_size_fraction=0.1)
+            model.distribute_workload()
             tgather = time.perf_counter() - tgather
             if config.rank == 0:
                 log.info(f"finished svd workload distribute, time: {tgather}")
@@ -321,6 +328,7 @@ def main(config):  # noqa: C901
         # if just_synced:
         #     model.mix_svd_layers()
         #     just_synced = False
+        # -------- end distributed workload for SVD syncing -------------------
 
         train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
@@ -369,17 +377,16 @@ def main(config):  # noqa: C901
         #         pass
         #     just_synced = True
         # --------------- end old code to sync the layer weights (using fib and such) ------------------
-        if not config.baseline:
-            if config.rank == 0:
-                log.info("Starting svd gather")
+        if not config.baseline and epoch >= config.training.first_sync_epoch:
+            # if config.rank == 0:
+            #     log.info("Starting svd gather")
             tgather = time.perf_counter()
-            model.gather_distributed_factorizations(sigma_cutoff_fraction=0.2)
+            model.gather_distributed_factorizations()
             tgather = time.perf_counter() - tgather
             if config.rank == 0:
                 log.info(f"finished svd gather, time: {tgather}")
-
-            # model.blur_svd_layers()
-            # madonna.models.utils.reset_opt_state(optimizer=optimizer)
+        # elif not config.baseline and epoch == config.training.first_sync_epoch - 1:
+        #     model.average_models()
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
@@ -639,13 +646,13 @@ def train(
         # else:
         #     # TODO: this will only work for timm schedulers
 
-        # ------ update the non-svd parameters ----------
-        if not config.baseline and (i % config.training.non_svd_freq == 0 or i == updates_per_epoch - 1):
-            # if config.rank == 0:
-            #     log.info("Starting non-svd sync")
-            tsync1 = time.perf_counter()
-            model.sync_nonsvd_params(nonblocking=False, waits=None)
-            tsync += time.perf_counter() - tsync1
+        # # ------ update the non-svd parameters ----------
+        # if not config.baseline and (i % config.training.non_svd_freq == 0 or i == updates_per_epoch - 1):
+        #     # if config.rank == 0:
+        #     #     log.info("Starting non-svd sync")
+        #     tsync1 = time.perf_counter()
+        #     model.sync_nonsvd_params(nonblocking=False, waits=None)
+        #     tsync += time.perf_counter() - tsync1
 
         lr_scheduler.step_update(num_updates=num_updates, metric=loss)
 
