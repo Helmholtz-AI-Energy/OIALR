@@ -6,6 +6,7 @@ from copy import deepcopy
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.modules.batchnorm import _BatchNorm
 
@@ -64,29 +65,43 @@ def change_adam_shapes(optimizer, update_from_svd=False):
     for group in optimizer.param_groups:
         for p in group["params"]:
             state = optimizer.state[p]
-            if len(list(state.keys())) > 0:
-                for k in ["exp_avg", "exp_avg_sq"]:
-                    if state[k].shape != p.shape:
-                        # this will only happen for Sigma matrices!
-                        # therefore, we dont need to worry about shapes/transposes
-                        # st = state[k].to(torch.float32)
-                        # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
-                        sl = []
-                        for d in range(p.ndim):
-                            sl.append(slice(0, p.shape[d]))
-                        state[k] = state[k][tuple(sl)]
-                        # TODO: should there be a way to make the state larger??
+            if len(list(state.keys())) == 0:
+                continue
+            for k in ["exp_avg", "exp_avg_sq"]:
+                if state[k].shape == p.shape:
+                    continue
+                # this will only happen for Sigma matrices!
+                # therefore, we dont need to worry about shapes/transposes
+                # st = state[k].to(torch.float32)
+                # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
+                sl = []
+                pad = []
+                for d in range(p.ndim):
+                    sl.append(slice(0, p.shape[d]))
+                    if state[k].shape[d] < p.shape[d]:
+                        pad = [0, p.shape[d] - state[k].shape[d]] + pad
 
-                if group["amsgrad"]:
-                    if state["max_exp_avg_sq"].shape != p.shape:
-                        sl = []
-                        for d in range(p.ndim):
-                            sl.append(slice(0, p.shape[d]))
-                        # st = state["max_exp_avg_sq"].to(torch.float32)
-                        # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
-                        state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
-                        # state["max_exp_avg_sq"] *= 0
-                        # state["max_exp_avg_sq"] = torch.diag(s)[tuple(sl)].to(state["max_exp_avg_sq"].dtype)
+                state[k] = state[k][tuple(sl)]
+                if len(pad) > 0:
+                    state[k] = F.pad(state[k], pad, "constant", 0)
+                # TODO: should there be a way to make the state larger??
+
+            if group["amsgrad"] and state["max_exp_avg_sq"].shape != p.shape:
+                sl = []
+                pad = []
+                for d in range(p.ndim):
+                    sl.append(slice(0, p.shape[d]))
+                    if state["max_exp_avg_sq"].shape[d] < p.shape[d]:
+                        pad = [0, p.shape[d] - state["max_exp_avg_sq"].shape[d]] + pad
+
+                state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
+                if len(pad) > 0:
+                    state["max_exp_avg_sq"] = F.pad(state["max_exp_avg_sq"], pad, "constant", 0)
+                # st = state["max_exp_avg_sq"].to(torch.float32)
+                # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
+
+                # state["max_exp_avg_sq"] *= 0
+                # state["max_exp_avg_sq"] = torch.diag(s)[tuple(sl)].to(state["max_exp_avg_sq"].dtype)
     if rank == 0:
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
