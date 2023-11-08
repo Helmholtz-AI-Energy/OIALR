@@ -253,10 +253,12 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
             self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+            self.p.set_(self.p[: self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
             self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+            self.p[self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -282,97 +284,16 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
-    def test_stability_distributed(self, working_rank, name, nonblocking=True):
+    def remove_smaller_vecs(self, name):
         self.name = name
-
-        self.last_send_rank = working_rank
-        if working_rank != self.rank:
-            # move on for now, coming back later
-            # make sure to save the rank which did this layer
-            self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
-            self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
-            # if in the first iteration
-            # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
-            self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
-            # receive the wait_k from the working process
-            if self.distributed_updates:
-                self.wait_inner_dim = dist.broadcast(
-                    self.inner_dim_buffer,
-                    src=working_rank,
-                    async_op=nonblocking,
-                )
-            return
-
-        # case 3: update the stable U and Vh from the full rank sigma matrix
-        status = self._full_rank_update_usv()
-        # shapes are updated within above (as is slice update)
+        # no SVD here, just cutting off sigma vals based on cutoff
+        self._update_inner_dim_and_shapes()
         perc, _, _ = self.get_perc_params()
-        # normalize self.s to max == 1
-        # maxs = self.s.max()
-        # self.s /= maxs
-        # self.vh *= maxs
-        log.info(
-            f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
-            f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
-        )
-
-        self.inner_dim_buffer[0] = self.inner_dim.to(torch.float)
-        self.inner_dim_buffer[1] = status["csmean"]
-        self.inner_dim_buffer[2] = status["change_k"]
-        if not dist.is_initialized():
-            return
-        self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-
-        if self.distributed_updates:
-            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
-        # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        if self.last_send_rank is None:  # skip all comms
-            return reset_optimizer, True
-        # self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=self.last_send_rank, async_op=False)
-        if self.wait_inner_dim is not None:
-            self.wait_inner_dim.wait()
-            self.wait_inner_dim = None
-            if self.rank != self.last_send_rank:
-                self.inner_dim = self.inner_dim_buffer[0].to(torch.int)
-                # print('before reshape')
-                self._update_usvh_shapes()
-
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        stable = self.inner_dim_buffer[1] >= self.uvhthreshold
-        self.inner_dim_buffer *= 0
-        self.bcast_usvh(src=self.last_send_rank, nonblocking=nonblocking)
-        return reset_optimizer, stable
-
-    @torch.no_grad()
-    def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
-            return
-        # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
-        if not self.u.is_contiguous():
-            self.u.set_(self.u.contiguous())
-        if not self.s.is_contiguous():
-            self.s.set_(self.s.contiguous())
-        if not self.vh.is_contiguous():
-            self.vh.set_(self.vh.contiguous())
-        self.wait_u = dist.broadcast(self.u, src=src, async_op=nonblocking)
-        self.wait_s = dist.broadcast(self.s, src=src, async_op=nonblocking)
-        self.wait_vh = dist.broadcast(self.vh, src=src, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_on_usvh(self):
-        if self.wait_u is not None:
-            self.wait_u.wait()
-            self.wait_u = None
-        if self.wait_s is not None:
-            self.wait_s.wait()
-            self.wait_s = None
-        if self.wait_vh is not None:
-            self.wait_vh.wait()
-            self.wait_u = None
+        if self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
+            )
 
     def get_interior_inner_dim(self):
         return {
@@ -667,10 +588,12 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
             self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+            self.p.set_(self.p[: self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
             self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+            self.p[self.inner_dim :]
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -699,97 +622,16 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
-    def test_stability_distributed(self, working_rank, name, nonblocking=True):
+    def remove_smaller_vecs(self, name):
         self.name = name
-
-        self.last_send_rank = working_rank
-        if working_rank != self.rank:
-            # move on for now, coming back later
-            # make sure to save the rank which did this layer
-            self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
-            self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
-            # if in the first iteration
-            # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
-            self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
-            # receive the wait_k from the working process
-            if self.distributed_updates:
-                self.wait_inner_dim = dist.broadcast(
-                    self.inner_dim_buffer,
-                    src=working_rank,
-                    async_op=nonblocking,
-                )
-            return
-
-        # case 3: update the stable U and Vh from the full rank sigma matrix
-        status = self._full_rank_update_usv()
-        # shapes are updated within above (as is slice update)
+        # no SVD here, just cutting off sigma vals based on cutoff
+        self._update_inner_dim_and_shapes()
         perc, _, _ = self.get_perc_params()
-        # normalize self.s to max == 1
-        # maxs = self.s.max()
-        # self.s /= maxs
-        # self.vh *= maxs
-        log.info(
-            f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
-            f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
-        )
-
-        self.inner_dim_buffer[0] = self.inner_dim.to(torch.float)
-        self.inner_dim_buffer[1] = status["csmean"]
-        self.inner_dim_buffer[2] = status["change_k"]
-        if not dist.is_initialized():
-            return
-        self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-
-        if self.distributed_updates:
-            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
-        # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        if self.last_send_rank is None:  # skip all comms
-            return reset_optimizer, True
-        # self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=self.last_send_rank, async_op=False)
-        if self.wait_inner_dim is not None:
-            self.wait_inner_dim.wait()
-            self.wait_inner_dim = None
-            if self.rank != self.last_send_rank:
-                self.inner_dim = self.inner_dim_buffer[0].to(torch.int)
-                # print('before reshape')
-                self._update_usvh_shapes()
-
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        stable = self.inner_dim_buffer[1] >= self.uvhthreshold
-        self.inner_dim_buffer *= 0
-        self.bcast_usvh(src=self.last_send_rank, nonblocking=nonblocking)
-        return reset_optimizer, stable
-
-    @torch.no_grad()
-    def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
-            return
-        # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
-        if not self.u.is_contiguous():
-            self.u.set_(self.u.contiguous())
-        if not self.s.is_contiguous():
-            self.s.set_(self.s.contiguous())
-        if not self.vh.is_contiguous():
-            self.vh.set_(self.vh.contiguous())
-        self.wait_u = dist.broadcast(self.u, src=src, async_op=nonblocking)
-        self.wait_s = dist.broadcast(self.s, src=src, async_op=nonblocking)
-        self.wait_vh = dist.broadcast(self.vh, src=src, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_on_usvh(self):
-        if self.wait_u is not None:
-            self.wait_u.wait()
-            self.wait_u = None
-        if self.wait_s is not None:
-            self.wait_s.wait()
-            self.wait_s = None
-        if self.wait_vh is not None:
-            self.wait_vh.wait()
-            self.wait_u = None
+        if self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
+            )
 
     def get_interior_inner_dim(self):
         return {

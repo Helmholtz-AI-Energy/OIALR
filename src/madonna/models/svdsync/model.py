@@ -479,6 +479,8 @@ class SVDSyncModel(nn.Module):
 
     @torch.no_grad()
     def distribute_workload(self):
+        if self.rank == 0:
+            log.debug("Distributing workload")
         for name in self.svd_modules:
             # self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
             self.svd_modules[name]["mod"].distribute_workload(min_size_fraction=self.sync_min_size_fraction, name=name)
@@ -521,6 +523,7 @@ class SVDSyncModel(nn.Module):
             # NOTE: this will let the sigma values dift slightly before they get distributed....
             # FIXME: see above
             self.prep_normal_training()
+            self.train_count = 0
             return_opt = self.optimizer_normal
 
         self.train_count += 1
@@ -578,6 +581,8 @@ class SVDSyncModel(nn.Module):
 
     @torch.no_grad()
     def prep_p_training(self):
+        if self.rank == 0:
+            log.debug("Starting P training")
         # freeze training other values and start training P
         self.train_p = True
         self.freeze_non_p()
@@ -590,9 +595,17 @@ class SVDSyncModel(nn.Module):
 
     @torch.no_grad()
     def prep_normal_training(self):
+        if self.rank == 0:
+            log.debug("Folding P into sigma, removing smaller vecs, and prep training of non-P parameters")
         # return to normal training -> no distributed sigma sync, but sync everything else
         self.train_p = False
         self.fold_p_into_simga()
+        self.remove_smaller_vecs()
         self.unfreeze_non_p()
         self.model._ddp_params_and_buffers_to_ignore = self.ignore_norm_train
         self.ddp_model = DDP(self.model)
+
+    @torch.no_grad()
+    def remove_smaller_vecs(self):
+        for name in self.svd_modules:
+            self.svd_modules[name].remove_smaller_vecs()

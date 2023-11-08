@@ -214,9 +214,9 @@ class SVDSyncMultiheadAttention(nn.Module):
                     torch.empty((self.v_inner_dim, self.vdim), **factory_kwargs),
                     requires_grad=False,
                 )
-            self.q_p = Parameter(torch.empty(self.q_inner_dim, **factory_kwargs), requires_grad=True)
-            self.k_p = Parameter(torch.empty(self.k_inner_dim, **factory_kwargs), requires_grad=True)
-            self.v_p = Parameter(torch.empty(self.v_inner_dim, **factory_kwargs), requires_grad=True)
+            self.q_p = Parameter(torch.ones(self.q_inner_dim, **factory_kwargs), requires_grad=True)
+            self.k_p = Parameter(torch.ones(self.k_inner_dim, **factory_kwargs), requires_grad=True)
+            self.v_p = Parameter(torch.ones(self.v_inner_dim, **factory_kwargs), requires_grad=True)
             self.register_parameter("in_proj_u", None)
             self.register_parameter("in_proj_s", None)
             self.register_parameter("in_proj_vh", None)
@@ -236,7 +236,7 @@ class SVDSyncMultiheadAttention(nn.Module):
                 torch.empty((self.in_proj_inner_dim, embed_dim), **factory_kwargs),
                 requires_grad=False,
             )
-            self.in_proj_p = Parameter(torch.empty(self.in_proj_inner_dim, **factory_kwargs), requires_grad=True)
+            self.in_proj_p = Parameter(torch.ones(self.in_proj_inner_dim, **factory_kwargs), requires_grad=True)
             self.in_proj_trans = False
             self.register_parameter("q_u", None)
             self.register_parameter("q_s", None)
@@ -1025,14 +1025,17 @@ class SVDSyncMultiheadAttention(nn.Module):
     def _update_usvh_shapes(self, qkvin):
         # either update the shapes of USVh or set the irrelevant values to 0
         u, s, vh, sl = self._get_usvh_from_qkvin(qkvin)
+        p = getattr(self, f"{qkvin}_p")
         if self.reinit_shapes:
             u.set_(u[:, :sl].contiguous())
             vh.set_(vh[:sl].contiguous())
             s.set_(s[:sl, :sl].contiguous())
+            p.set_(p[:sl].contiguous())
         else:
             u[:, sl:] *= 0
             vh[sl:] *= 0
             s[sl:, sl:].mul_(0)
+            p[sl:].mul_(0)
 
     @torch.no_grad()
     def _get_usvh_from_qkvin(self, qkvin):
@@ -1127,6 +1130,33 @@ class SVDSyncMultiheadAttention(nn.Module):
                 name=name,
             )
         self.first_distribute_workload = False
+
+    @torch.no_grad()
+    def remove_smaller_vecs(self, name):
+        self.name = name
+        # no SVD here, just cutting off sigma vals based on cutoff
+        lst = ["q", "k", "v" if not self._qkv_same_embed_dim else "in_proj"]
+        for qkv in lst:
+            self._update_inner_dim_and_shapes_abs(qkv)
+        perc, _, _ = self.get_perc_params()
+        if self._qkv_same_embed_dim and self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.in_proj_u.shape[0]} {self.in_proj_s.shape[0]} {self.in_proj_vh.shape[1]}]",
+            )
+        elif not self._qkv_same_embed_dim and self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.q_u.shape[0]} {self.q_s.shape[0]} {self.q_vh.shape[1]}]",
+            )
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.k_u.shape[0]} {self.k_s.shape[0]} {self.k_vh.shape[1]}]",
+            )
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.v_u.shape[0]} {self.v_s.shape[0]} {self.v_vh.shape[1]}]",
+            )
 
     @torch.no_grad()
     def mix_sigma(self, method, *args, **kwargs):

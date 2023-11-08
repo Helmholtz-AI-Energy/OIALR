@@ -227,10 +227,12 @@ class SVDSyncLinear(nn.Module):
             self.u.set_(self.u[:, : self.inner_dim].contiguous())
             self.vh.set_(self.vh[: self.inner_dim].contiguous())
             self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+            self.p.set_(self.p[: self.inner_dim].contiguous())
         else:
             self.u[:, self.inner_dim :] *= 0
             self.vh[self.inner_dim :] *= 0
             self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+            self.p[self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -267,6 +269,17 @@ class SVDSyncLinear(nn.Module):
         # self.inner_dim_buffer[0] = self.inner_dim.to(dtype=torch.float)
         # self.inner_dim_buffer[1] = status["csmean"]
         # self.inner_dim_buffer[2] = status["change_k"]
+
+    @torch.no_grad()
+    def remove_smaller_vecs(self, name):
+        self.name = name
+        # no SVD here, just cutting off sigma vals based on cutoff
+        self._update_inner_dim_and_shapes()
+        perc, _, _ = self.get_perc_params()
+        log.info(
+            f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+            f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
+        )
 
     def get_interior_inner_dim(self):
         return {
