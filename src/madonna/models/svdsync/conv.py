@@ -202,8 +202,12 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        if self.train_p:
+            if self.bias is not None:
+                self.bias.requires_grad = True
+        if self.train_p and self.training:
             self.p.requires_grad = True
+            if self.bias is not None:
+                self.bias.requires_grad = False
             w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
         else:
             w = torch.linalg.multi_dot([self.u, self.s, self.vh])
@@ -249,16 +253,16 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
     @torch.no_grad()
     def _update_usvh_shapes(self):
         # either update the shapes of USVh or set the irrelevant values to 0
-        if self.reinit_shapes:
-            self.u.set_(self.u[:, : self.inner_dim].contiguous())
-            self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            self.p.set_(self.p[: self.inner_dim].contiguous())
-        else:
-            self.u[:, self.inner_dim :] *= 0
-            self.vh[self.inner_dim :] *= 0
-            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            self.p[self.inner_dim :].mul_(0)
+        # if self.reinit_shapes:
+        self.u.set_(self.u[:, : self.inner_dim].contiguous())
+        self.vh.set_(self.vh[: self.inner_dim].contiguous())
+        self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+        self.p.set_(self.p[: self.inner_dim].contiguous())
+        # else:
+        #     self.u[:, self.inner_dim :] *= 0
+        #     self.vh[self.inner_dim :] *= 0
+        #     self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        #     self.p[self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -336,6 +340,7 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             min_size_fraction=min_size_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
@@ -343,9 +348,9 @@ class SVDSyncConv2d(nn.modules.conv._ConvNd):
             local_u=self.u,
             local_s=self.s,
             local_vh=self.vh,
-            sigma_cutoff_fraction=sigma_cutoff_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     @torch.no_grad()
@@ -537,8 +542,12 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        if self.train_p:
+            if self.bias is not None:
+                self.bias.requires_grad = True
+        if self.train_p and self.training:
             self.p.requires_grad = True
+            if self.bias is not None:
+                self.bias.requires_grad = False
             w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
         else:
             w = torch.linalg.multi_dot([self.u, self.s, self.vh])
@@ -584,16 +593,16 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
     @torch.no_grad()
     def _update_usvh_shapes(self):
         # either update the shapes of USVh or set the irrelevant values to 0
-        if self.reinit_shapes:
-            self.u.set_(self.u[:, : self.inner_dim].contiguous())
-            self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            self.p.set_(self.p[: self.inner_dim].contiguous())
-        else:
-            self.u[:, self.inner_dim :] *= 0
-            self.vh[self.inner_dim :] *= 0
-            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            self.p[self.inner_dim :]
+        # if self.reinit_shapes:
+        self.u.set_(self.u[:, : self.inner_dim].contiguous())
+        self.vh.set_(self.vh[: self.inner_dim].contiguous())
+        self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+        self.p.set_(self.p[: self.inner_dim].contiguous())
+        # else:
+        #     self.u[:, self.inner_dim :] *= 0
+        #     self.vh[self.inner_dim :] *= 0
+        #     self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        #     self.p[self.inner_dim :]
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -674,6 +683,7 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             min_size_fraction=min_size_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
@@ -684,6 +694,7 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
             sigma_cutoff_fraction=sigma_cutoff_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     @torch.no_grad()
@@ -699,6 +710,8 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
         self.p.requires_grad = True
         self.train_p = True
         self.s.requires_grad = False
+        if self.bias is not None:
+            self.bias.requires_grad = False
 
     @torch.no_grad()
     def update_sp_train_normally(self):
@@ -712,3 +725,5 @@ class SVDSyncConv1d(nn.modules.conv._ConvNd):
         self.p.requires_grad = False
         self.train_p = False
         self.s.requires_grad = True
+        if self.bias is not None:
+            self.bias.requires_grad = True

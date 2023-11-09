@@ -181,17 +181,19 @@ def main(config):  # noqa: C901
     # else:
     #     log.info("using baseline 1 process model")
 
-    if config.rank == 0:
-        print(model)
+    # if config.rank == 0:
+    #     print(model)
 
     # model_param_dict = madonna.lrsync.sync.get_param_dict_with_svds(model)
 
     criterion = madonna.utils.get_criterion(config)
     optimizer = madonna.utils.get_optimizer(config, model, lr=config.training.lr)
-
+    all_opts = {"normal": optimizer}
     # set optimizer for references for SVD model to reset shapes of state params
     if not config.baseline:
-        model.set_optimizer(optimizer)
+        p_optim = hydra.utils.instantiate(config.training.p_optimizer)
+        all_opts["p"] = p_optim(model.parameters())
+        model.set_optimizers(optimizer_normal=optimizer, optimizer_p=all_opts["p"])
 
     dset_dict = madonna.utils.datasets.get_dataset(config)
     train_loader, train_sampler = dset_dict["train"]["loader"], dset_dict["train"]["sampler"]
@@ -200,6 +202,9 @@ def main(config):  # noqa: C901
     # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
     train_len = len(train_loader)
     scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, train_len)
+
+    if not config.baseline:
+        model.set_epoch_length(train_len)
 
     # optionally resume from a checkpoint
     # Reminder: when resuming from a single checkpoint, make sure to call init_model with
@@ -310,29 +315,9 @@ def main(config):  # noqa: C901
         if dist.is_initialized() and config.data.distributed_sample and train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
-        # ----------- distributed workload for SVD syncing --------------------
-        if (
-            not config.baseline and epoch >= config.training.first_sync_epoch
-        ):  # TODO: should this kick in after a number of epochs??
-            # if config.rank == 0:
-            #     log.info("Starting svd workload distribute")
-            tgather = time.perf_counter()
-            model.distribute_workload()
-            tgather = time.perf_counter() - tgather
-            if config.rank == 0:
-                log.info(f"finished svd workload distribute, time: {tgather}")
-            # this changes the shape: opt needs reset
-            madonna.models.utils.change_adam_shapes(optimizer)
-
-            model.mix_svd_layers()
-        # if just_synced:
-        #     model.mix_svd_layers()
-        #     just_synced = False
-        # -------- end distributed workload for SVD syncing -------------------
-
         train_loss, last_loss, refactory_warmup, train_t1 = train(
             train_loader=train_loader,
-            optimizer=optimizer,
+            optimizers=all_opts,
             model=model,
             criterion=criterion,
             epoch=epoch,
@@ -377,16 +362,6 @@ def main(config):  # noqa: C901
         #         pass
         #     just_synced = True
         # --------------- end old code to sync the layer weights (using fib and such) ------------------
-        if not config.baseline and epoch >= config.training.first_sync_epoch:
-            # if config.rank == 0:
-            #     log.info("Starting svd gather")
-            tgather = time.perf_counter()
-            model.gather_distributed_factorizations()
-            tgather = time.perf_counter() - tgather
-            if config.rank == 0:
-                log.info(f"finished svd gather, time: {tgather}")
-        # elif not config.baseline and epoch == config.training.first_sync_epoch - 1:
-        #     model.average_models()
 
         if config.rank == 0:
             log.info(f"Average Training loss across process space: {train_loss}")
@@ -554,7 +529,7 @@ def get_lrs(opt):
 
 def train(
     train_loader,
-    optimizer: madonna.optimizers.MixedSVDOpt,
+    optimizers: dict,
     model,
     criterion,
     epoch,
@@ -588,8 +563,11 @@ def train(
     updates_per_epoch = len(train_loader)
     num_updates = epoch * updates_per_epoch
     tsync = 0
+    for opt in optimizers:
+        optimizers[opt].zero_grad(set_to_none=True)
+    optimizer = optimizers["normal"]
     for i, data in enumerate(train_loader):
-        optimizer.zero_grad(set_to_none=True)
+        # optimizers['normal'].zero_grad(set_to_none=True)
         if hasattr(config.data, "dali") and config.data.dali:
             images = data[0]["data"]
             target = data[0]["label"].squeeze(-1).long()
@@ -610,7 +588,10 @@ def train(
         #     print(f"LRS: {lrs}")
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=config.model.autocast):
             # NOTE: some things dont play well with autocast - one should not put anything aside from the model in here
-            output = model(images)
+            if not config.baseline:
+                output, optimizer = model(images)
+            else:
+                output = model(images)
             loss = criterion(output, target)
 
         if torch.isnan(loss):
@@ -624,6 +605,8 @@ def train(
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
         scaler.step(optimizer)
         scaler.update()
+
+        optimizer.zero_grad(set_to_none=True)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5), mixup=mixup is not None)
         losses.update(loss.item(), images.size(0))
@@ -753,7 +736,10 @@ def validate(val_loader, model, criterion, config, epoch, device, print_on_rank,
                     raise ValueError("NaN in images... - VAL")
 
                 # compute output
-                output = model(images)
+                if config.baseline:
+                    output = model(images)
+                else:
+                    output, _ = model(images)
                 loss = criterion(output, target)
                 # argmax = torch.argmax(output.output, dim=1).to(torch.float32)
 

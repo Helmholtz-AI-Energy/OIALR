@@ -495,6 +495,17 @@ class SVDSyncMultiheadAttention(nn.Module):
             q = self._get_q()
             k = self._get_k()
             v = self._get_v()
+            with torch.no_grad():
+                if self.train_p and self.training:
+                    train_bias = False
+                elif not self.train_p:
+                    train_bias = True
+                if self.bias_k is not None:
+                    self.bias_k.requires_grad = train_bias
+                if self.bias_v is not None:
+                    self.bias_v.requires_grad = train_bias
+                if self.in_proj_bias is not None:
+                    self.in_proj_bias.requires_grad = train_bias
             return q, k, v
         else:
             return self._get_in_proj()
@@ -1205,6 +1216,13 @@ class SVDSyncMultiheadAttention(nn.Module):
         else:
             self._start_p_training_qkvin("in_proj")
 
+        if self.in_proj_bias is not None:
+            self.in_proj_bias.requires_grad = False
+        if self.bias_k is not None:
+            self.bias_k.requires_grad = False
+        if self.bias_v is not None:
+            self.bias_v.requires_grad = False
+
     @torch.no_grad()
     def update_sp_train_normally(self):
         if not self._qkv_same_embed_dim:
@@ -1212,3 +1230,9 @@ class SVDSyncMultiheadAttention(nn.Module):
                 self._update_sp_train_normally_qkvin(qkv)
         else:
             self._update_sp_train_normally_qkvin("in_proj")
+        if self.in_proj_bias is not None:
+            self.in_proj_bias.requires_grad = True
+        if self.bias_k is not None:
+            self.bias_k.requires_grad = True
+        if self.bias_v is not None:
+            self.bias_v.requires_grad = True

@@ -84,7 +84,7 @@ def change_adam_shapes(optimizer, update_from_svd=False):
                 state[k] = state[k][tuple(sl)]
                 if len(pad) > 0:
                     state[k] = F.pad(state[k], pad, "constant", 0)
-                # TODO: should there be a way to make the state larger??
+                    state[k].mul_(0)
 
             if group["amsgrad"] and state["max_exp_avg_sq"].shape != p.shape:
                 sl = []
@@ -97,6 +97,7 @@ def change_adam_shapes(optimizer, update_from_svd=False):
                 state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
                 if len(pad) > 0:
                     state["max_exp_avg_sq"] = F.pad(state["max_exp_avg_sq"], pad, "constant", 0)
+                    state["max_exp_avg_sq"].mul_(0)
                 # st = state["max_exp_avg_sq"].to(torch.float32)
                 # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
 
@@ -120,12 +121,20 @@ def change_sgd_shapes(optimizer):
             state = optimizer.state[p]
             if len(list(state.keys())) > 0:
                 # only need to change "momentum_buffer"
+                if state["momentum_buffer"] is None:
+                    continue
                 if state["momentum_buffer"].shape != p.shape:
                     sl = []
+                    k = "momentum_buffer"
+                    pad = []
                     for d in range(p.ndim):
                         sl.append(slice(0, p.shape[d]))
-                    # print(type(state[k]))
-                    state["momentum_buffer"] = state["momentum_buffer"][tuple(sl)]
+                        if state[k].shape[d] < p.shape[d]:
+                            pad = [0, p.shape[d] - state[k].shape[d]] + pad
+
+                    state[k] = state[k][tuple(sl)]
+                    if len(pad) > 0:
+                        state[k] = F.pad(state[k], pad, "constant", 0)
     if rank == 0:
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 

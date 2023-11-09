@@ -47,29 +47,35 @@ mixup_args:
 
 optimizer:
   # _target_: torch.optim.SGD
-  # _partial_: True
-  # momentum: 0.9
-  # weight_decay: 1.0e-5
-  # nesterov: True
-  _target_: torch.optim.AdamW
   _partial_: True
+  # lr: 0.1
+  _target_: torch.optim.AdamW
   weight_decay: 0.01  # default 0.01
+  # momentum: 0.9
+  # nesterov: True
   beta1: 0.9
   beta2: 0.999
   # fused: True
 max_grad_norm: -1.
+
+p_optimizer:
+  _target_: torch.optim.SGD
+  _partial_: True
+  lr: 0.1
+  # momentum: 0.9
+  # weight_decay: 1.0e-5
+  # nesterov: True
 
 init_opt_with_model: False
 print_freq: 50
 
 # Model parameters
 use_ddp: False
-init_method: random-sigma  # options: random, unified, random-sigma
+init_method: unified  # options: random, unified, random-sigma
 fixing_method:
   _target_: madonna.models.SVDSyncModel
   _partial_: True
   # stability_frequency: 100
-  sync_delay: 0
   sigma_cutoff_fraction: 0.2
   # init_fraction: 1.0
   fixed_full_rank_layers:
@@ -77,7 +83,6 @@ fixing_method:
     - patch_embed.proj  # first layer
   # reinit_shapes: True
   # stable_update_delay: 1
-  step_on_forward: True
   full_rank_warmup: False
   # use_ddp: False
   # distributed_updates: False
@@ -89,6 +94,9 @@ fixing_method:
   mixing_options:
     scaling: 10
   sync_min_size_fraction: 0.05
+  delay: 1000
+  distributed_steps: 200
+  p_steps: 100
   # sync_frequency: 1000
 
 non_svd_freq: 1

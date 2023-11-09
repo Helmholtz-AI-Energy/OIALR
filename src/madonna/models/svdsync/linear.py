@@ -64,6 +64,7 @@ class SVDSyncLinear(nn.Module):
         start_weight=None,
         start_bias=None,
         distributed_updates=True,
+        sigma_cutoff_fraction: int = 0.1,
         inner_dim_init_ratio=1.0,
         random_sigma: bool = False,
     ) -> None:
@@ -73,6 +74,7 @@ class SVDSyncLinear(nn.Module):
         self.out_features = out_features
         self.distributed_updates = distributed_updates
         self.inner_dim_init_ratio = inner_dim_init_ratio
+        self.sigma_cutoff_fraction = sigma_cutoff_fraction
 
         if start_weight is not None:
             self.weight = start_weight
@@ -152,6 +154,7 @@ class SVDSyncLinear(nn.Module):
             min_size_fraction=min_size_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
@@ -159,9 +162,9 @@ class SVDSyncLinear(nn.Module):
             local_u=self.u,
             local_s=self.s,
             local_vh=self.vh,
-            sigma_cutoff_fraction=sigma_cutoff_fraction,
             set_usvh=True,
             name=name,
+            p=self.p,
         )
 
     # @torch.compile()  # TODO: compiling seems to be weird here...might need to compile two different functions?
@@ -171,10 +174,15 @@ class SVDSyncLinear(nn.Module):
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
+            if self.bias is not None:
+                self.bias.requires_grad = True
         # print(self.u.shape, self.s.shape, self.vh.shape)
-        if self.train_p:
+        # print(self.train_p)
+        if self.train_p and self.training:
             self.p.requires_grad = True
             self.s.requires_grad = False
+            if self.bias is not None:
+                self.bias.requires_grad = False
             w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
         else:
             w = torch.linalg.multi_dot([self.u, self.s, self.vh])
@@ -223,16 +231,16 @@ class SVDSyncLinear(nn.Module):
     @torch.no_grad()
     def _update_usvh_shapes(self):
         # either update the shapes of USVh or set the irrelevant values to 0
-        if self.reinit_shapes:
-            self.u.set_(self.u[:, : self.inner_dim].contiguous())
-            self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-            self.p.set_(self.p[: self.inner_dim].contiguous())
-        else:
-            self.u[:, self.inner_dim :] *= 0
-            self.vh[self.inner_dim :] *= 0
-            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
-            self.p[self.inner_dim :].mul_(0)
+        # if self.reinit_shapes:
+        self.u.set_(self.u[:, : self.inner_dim].contiguous())
+        self.vh.set_(self.vh[: self.inner_dim].contiguous())
+        self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+        self.p.set_(self.p[: self.inner_dim].contiguous())
+        # else:
+        # self.u[:, self.inner_dim :] *= 0
+        # self.vh[self.inner_dim :] *= 0
+        # self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        # self.p[self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -313,20 +321,31 @@ class SVDSyncLinear(nn.Module):
         # set P to be 1/sz to emulate an average, will let the network learn how to use this
         self.p.zero_()
         sz = dist.get_world_size() if dist.is_initialized() else 1
-        self.p.add_(1 / sz)
+        self.p.add_(torch.randn_like(self.p) * 0.1 + 1 / sz)
         self.p.requires_grad = True
         self.train_p = True
         self.s.requires_grad = False
+        if self.bias is not None:
+            self.bias.requires_grad = False
 
     @torch.no_grad()
     def update_sp_train_normally(self):
         # revert to normal training for the layer
         # update sigma from P and start training normally
+        print(f"{self.p.mean():.4f}, {self.p.min():.4f}, {self.p.max():.4f}, {self.p.std():.4f}")
+        # if we start the P vals at 0.5
+        # p = torch.clamp(self.p, min=0.0, max=1.0)
+        self.p /= self.p.max()
+
         hold = self.p.view(-1, 1) * self.s
         self.s.zero_()
         self.s.add_(hold)
+        ds = self.s.diag()
+        print(f"s {ds.mean():.4f}, {ds.min():.4f}, {ds.max():.4f}, {ds.std():.4f}")
         self.p.zero_()
         self.p.add_(1)
         self.p.requires_grad = False
         self.train_p = False
         self.s.requires_grad = True
+        if self.bias is not None:
+            self.bias.requires_grad = True

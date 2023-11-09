@@ -17,6 +17,7 @@ def split_sigma_workload(
     set_usvh: bool = True,
     num_base_vectors: int = 0,
     name: str = None,
+    p: torch.Tensor = None,
 ):
     # assumptions: - sigma is diagonal and full-rank
     #              - collection of all LR reps has already been done
@@ -101,6 +102,7 @@ def split_sigma_workload(
         collected_u.set_(new_u)
         collected_s.set_(torch.diag(new_sigma))
         collected_vh.set_(new_vh)
+        p.set_(torch.ones_like(new_sigma))
     else:
         return new_u, new_sigma, new_vh
     # print(f"{new_u.shape}, {new_sigma.shape}, {new_vh.shape}")
@@ -113,6 +115,7 @@ def collect_lr_reps_from_all(
     local_vh: torch.Tensor,
     set_usvh: bool = True,
     name: str = None,
+    p: torch.Tensor = None,
 ):
     if not dist.is_initialized():
         return
@@ -205,6 +208,7 @@ def collect_lr_reps_from_all(
         local_u.set_(full_u)
         local_s.set_(new_s.diag())
         local_vh.set_(full_vh)
+        p.set_(torch.ones_like(new_s))
     else:
         return full_u, new_s, full_vh
     # print(f"{full_u.shape}, {new_s.shape}, {full_vh.shape}")
