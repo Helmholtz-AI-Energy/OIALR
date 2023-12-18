@@ -1,5 +1,5 @@
 start_epoch: 0
-epochs: 300
+epochs: 90
 
 # number of validation steps to execute at the beginning of the training
 # num_sanity_val_steps: 0
@@ -7,8 +7,8 @@ trainer: "ortho_fix_train"
 init_ddp: True
 
 # ckpt path
-checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna/madonna/models
+checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna2/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
+checkpoint_out_root: /hkfs/work/workspace/scratch/qv2382-madonna2/madonna/models
 save_period: 5
 resume_run: False
 resume: False  # TODO: are both of these needed??
@@ -34,29 +34,32 @@ criterion:
 #   lr_k_decay: 0.4  # default 1.0
 #   sched_on_updates: True
 
-lr: 0.0001
+lr: 0.001
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
-  sched: cosine  # cosine LR scheduler from timm
-  epochs: 300  # number of epochs for the cycle to run for
-  warmup_epochs: 10
+  sched: cosine # cosine  # cosine LR scheduler from timm
+  epochs: 90  # number of epochs for the cycle to run for
+  warmup_epochs: 15
   cooldown_epochs: 10
   min_lr: 0.00001  # min LR of cosine annealing pattern
-  warmup_lr: 0.00001  # starting point of warmup
+  warmup_lr: 0.0001  # starting point of warmup
   warmup_prefix: True  # default
   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
   lr_cycle_limit: 30
   lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
   lr_k_decay: 1.0  # default 1.0
+  # step lr stuff
+  # decay_rate: 0.1
+  # decay_epochs: 30
   sched_on_updates: True
 
-sync_batchnorm: True
+sync_batchnorm: False
 
 mixup: False
 mixup_args:
-  mixup_alpha: 0.8  # 0.8
-  cutmix_alpha: 0.
+  mixup_alpha: 0.1  # 0.8
+  cutmix_alpha: 1.0
   cutmix_minmax: null
   prob: 1.0  # 1.0
   switch_prob: 0.5
@@ -66,15 +69,15 @@ mixup_args:
 optimizer:
   # _target_: torch.optim.SGD
   # _partial_: True
-  # momentum: 0.1
-  # weight_decay: 1.0e-5
+  # momentum: 0.9
+  # weight_decay: 0.00005
   # nesterov: True
   _target_: torch.optim.AdamW
   _partial_: True
   weight_decay: 0.01  # default 0.01
   beta1: 0.9
   beta2: 0.999
-  # fused: True
+  # # fused: True
 max_grad_norm: -1.
 
 init_opt_with_model: False
@@ -85,14 +88,15 @@ svd_epoch_freq: 4
 fixing_method:
   _target_: madonna.models.OIALRModel
   _partial_: True
-  stability_frequency: 1000
-  delay: 4000
+  stability_frequency: 400
+  delay: 12000
   uvhthreshold: 0.99
-  sigma_cutoff_fraction: 0.2
+  sigma_cutoff_fraction: 0.1
   # init_fraction: 1.0
-  keep_first_layer: False
+  keep_first_layer: True
   keep_last_layer: True
   reinit_shapes: True
   stable_update_delay: 1
   step_on_forward: True
   full_rank_warmup: True
+  network_layer_perc_step: 0.01

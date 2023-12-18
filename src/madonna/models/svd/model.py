@@ -14,6 +14,7 @@ from ..utils import (
     change_sgd_shapes,
     create_svd_param_groups,
     replace_opt_state_with_svd_adam,
+    replace_opt_state_with_svd_sgd,
 )
 from .attentionusvh import SVDMultiheadAttentionUSVh
 from .convusvh import SVDConv1dUSVh, SVDConv2dUSVh
@@ -218,7 +219,10 @@ class OIALRModel(nn.Module):
                 except AttributeError:
                     calls += 1
         if not skip_optimizer_init:  # only need to do this if we start in full rank
-            replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
+            if isinstance(self.optimizer, (optim.Adam, optim.AdamW)):
+                replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
+            else:
+                replace_opt_state_with_svd_sgd(self.optimizer, self.low_rank_replacement_list)
 
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module

@@ -44,13 +44,13 @@ system=${HOSTNAME:0:3}
 
 if [ $system == "hkn" ]
 then
-  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
   export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-  TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+  TOMOUNT='/etc/slurm/task_prolog:/etc/slurm/task_prolog,'
   TOMOUNT+="${EXT_DATA_PREFIX},"
   TOMOUNT+="${BASE_DIR},"
-  TOMOUNT+="/scratch,/tmp,"
-  TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
+  TOMOUNT+="/scratch,/tmp"
+  # TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 
   salloc --partition=accelerated \
     -N "${SLURM_NNODES}" \
@@ -63,7 +63,7 @@ then
     -A hk-project-madonna
 elif [ $system == "uc2" ]
 then
-  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/,/scratch,"
   TOMOUNT+='/etc/slurm/:/etc/slurm/,'
   # TOMOUNT+="${EXT_DATA_PREFIX},"
   # TOMOUNT+="${BASE_DIR},"

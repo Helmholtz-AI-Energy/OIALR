@@ -2,8 +2,8 @@
 
 defaults:
   - _self_
-  - data: cifar10.yaml # imagenet.yaml #
-  - model: vit.yaml # resnet-rs.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
+  - data: imagenet.yaml # cifar10.yaml #
+  - model: resnet-rs.yaml # vit.yaml # general_torchvision.yaml # cirsean4.yaml # conv_dense.yaml #
   - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
   - training: oialr_trainer.yaml
   - log_dir: default.yaml
@@ -39,7 +39,7 @@ validate: True
 test: False
 seed: null
 # default name for the experiment for logging
-name: "oialr"
+name: "imagenet-sweep-svd"
 baseline: False
 
 comm_method: "nccl"

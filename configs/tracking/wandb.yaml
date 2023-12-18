@@ -13,8 +13,8 @@
 #   job_type: "train"
 #   group: ""
 #   tags: []
-project: "oialr"
-sweep: null
+project: oialr
 # tags:
 #   - final
 # sweep: sweep name
+sweep: null  # oialr/a97ubrzf

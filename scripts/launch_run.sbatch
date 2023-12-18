@@ -1,34 +1,34 @@
 #!/usr/bin/env bash
 
 # Slurm job configuration
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=1:00:00
+#SBATCH --time=10:00:00
 #SBATCH --job-name=madonna
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
-#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna/madonna/logs/slurm/slurm-%j"
-#####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna2/madonna/logs/slurm/slurm-%j"
+#####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/madonna/logs/slurm/slurm-%j"
 
 ml purge
 
 # pmi2 cray_shasta
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
 # export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-# BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/"
+# BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/madonna/"
 
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
 export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
+TOMOUNT='/etc/slurm/task_prolog:/etc/slurm/task_prolog,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
-TOMOUNT+="/scratch,/tmp,"
-TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
+TOMOUNT+="/scratch,/tmp"
+# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
 export TOMOUNT="${TOMOUNT}"
 export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
 
-# TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+# TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/,/scratch,"
 # TOMOUNT+='/etc/slurm/:/etc/slurm/,'
 # # TOMOUNT+="${EXT_DATA_PREFIX},"
 # # TOMOUNT+="${BASE_DIR},"
@@ -50,7 +50,7 @@ SRUN_PARAMS=(
 )
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-# SCRIPT_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+# SCRIPT_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
 # TODO: set up singularity as well?
 
 export UCX_MEMTYPE_CACHE=0
@@ -63,7 +63,7 @@ export NCCL_COLLNET_ENABLE=0
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export CONFIG_NAME="ortho_train.yaml"
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='svd-untuned-final' baseline=False enable_tracking=True"
-# srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; wandb agent hai-energy/madonna2/mv00rpa5"
+srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='base-adamw-f1' baseline=True enable_tracking=True"
+# srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; wandb agent hai-energy/oialr/a97ubrzf"
 
 # srun "${SRUN_PARAMS[@]}" bash -c "cd ${BASE_DIR}madonna/; python -u ${BASE_DIR}madonna/scripts/propulate_train.py"
