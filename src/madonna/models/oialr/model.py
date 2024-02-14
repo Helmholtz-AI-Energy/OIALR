@@ -14,6 +14,7 @@ from ..utils import (
     change_sgd_shapes,
     create_svd_param_groups,
     replace_opt_state_with_svd_adam,
+    replace_opt_state_with_svd_sgd,
 )
 from .attentionusvh import SVDMultiheadAttentionUSVh
 from .convusvh import SVDConv1dUSVh, SVDConv2dUSVh
@@ -141,6 +142,8 @@ class OIALRModel(nn.Module):
         self.local_low_rank_model = None
         # self.non_svd_params = []
 
+        # self.layers_to_make_low_rank = OrderedDict()
+
         if full_rank_warmup and delay > 0:
             if self.rank == 0:
                 log.info("Starting with training in full rank")
@@ -150,6 +153,11 @@ class OIALRModel(nn.Module):
                 if self.rank == 0:
                     log.info("Initializing DDP")
                 self.model = DDP(full_rank_model, find_unused_parameters=False)
+            # # populate layers to replace
+            # self._get_layers_to_replace(self.model)
+            # if self.keep_last_layer:
+            #     del self.layers_to_make_low_rank[next(reversed(self.layers_to_make_low_rank))]
+            # self.layers_that_need_to_transition = list(reversed(self.layers_to_make_low_rank))
         else:
             self.setup_low_rank_training(skip_optimizer_init=True)
 
@@ -164,6 +172,8 @@ class OIALRModel(nn.Module):
         self.delay = delay
         self.stable_list = []
         self.stable_update_delay = stable_update_delay
+
+        # self._get_layers_to_replace(self.model)
 
         self.fib1, self.fib2 = 0, 1
         self.next_stability_iteration = self.delay + self.fib1
@@ -191,6 +201,56 @@ class OIALRModel(nn.Module):
             self.reshape_opt_state_fn = change_adam_shapes
         elif isinstance(optimizer, optim.SGD):
             self.reshape_opt_state_fn = change_sgd_shapes
+
+    @torch.no_grad()
+    def _slow_transition_to_lr_training(self, perc_layers_to_trans, skip_optimizer_init=False):
+        """transition SOME of the layers to USV training while keeping other full-rank
+        until they get to the point that they also need to be changed
+
+        Args:
+            skip_optimizer_init (bool, optional): _description_. Defaults to False.
+        """
+        # if self.rank == 0:
+        #     log.info("Starting with training in low rank")
+        num_to_trans = int(len(self.layers_to_make_low_rank) * perc_layers_to_trans)
+        names_to_trans = self.layers_that_need_to_transition[:num_to_trans]  # already reversed
+        # slicing list returns a list
+
+        self.local_low_rank_model = self._replace_layers_by_name(
+            self.local_full_rank_model,
+            target_names=names_to_trans,
+        )
+
+        if dist.is_initialized():
+            if self.rank == 0:
+                log.info("Initializing DDP")
+            self.model = DDP(self.local_low_rank_model, find_unused_parameters=False)
+        else:
+            self.model = self.local_low_rank_model
+        self.svd_modules = {}
+        self.layer_names = []
+        calls = 0
+        sz = 1 if not dist.is_initialized() else dist.get_world_size()
+        for name, mod in self.model.named_modules():
+            if hasattr(mod, "test_stability_distributed"):
+                working_rank = calls % sz
+                # self.svd_modules.append((name, mod, working_rank))
+                self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
+                self.layer_names.append(name)
+                try:  # only a module in the attention layers and its just faster to try to get something
+                    if mod._qkv_same_embed_dim:
+                        calls += 1
+                    else:
+                        calls += 3
+                except AttributeError:
+                    calls += 1
+        if not skip_optimizer_init:  # only need to do this if we start in full rank
+            if isinstance(self.optimizer, (optim.Adam, optim.AdamW)):
+                replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
+            else:
+                replace_opt_state_with_svd_sgd(self.optimizer, self.low_rank_replacement_list)
+        # at end, remove the names as they done need to transition anymore
+        del self.layers_that_need_to_transition[:num_to_trans]
 
     @torch.no_grad()
     def setup_low_rank_training(self, skip_optimizer_init=False):
@@ -239,7 +299,10 @@ class OIALRModel(nn.Module):
                 except AttributeError:
                     calls += 1
         if not skip_optimizer_init:  # only need to do this if we start in full rank
-            replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
+            if isinstance(self.optimizer, (optim.Adam, optim.AdamW)):
+                replace_opt_state_with_svd_adam(self.optimizer, self.low_rank_replacement_list)
+            else:
+                replace_opt_state_with_svd_sgd(self.optimizer, self.low_rank_replacement_list)
 
         # self.non_svd_params = []
         # for n, p in self.named_parameters():
@@ -387,6 +450,173 @@ class OIALRModel(nn.Module):
         del module
         return module_output
 
+    def _get_layers_to_replace(self, module, name=None):
+        if isinstance(module, nn.Linear):  # and min(module.weight.shape) > max(module.weight.shape) / 10:
+            if not self.first_layer:
+                self.layers_to_make_low_rank[name] = {
+                    "mod": module,
+                    "full rank": True,
+                    "last layer": False,
+                }
+                self.last_layer_new = name
+            else:
+                self.first_layer = False
+        elif isinstance(module, nn.MultiheadAttention):
+            if not self.first_layer:
+                self.layers_to_make_low_rank[name] = {
+                    "mod": module,
+                    "full rank": True,
+                    "last layer": False,
+                }
+                self.last_layer_new = name
+            else:
+                self.first_layer = False
+        elif isinstance(module, nn.Conv2d):
+            wv = module.weight.view(module.weight.shape[0], -1)
+            if wv.shape[0] < wv.shape[1]:
+                wv.T
+            if wv.shape[1] < wv.shape[0] / 10:
+                pass  # skip this layer if there are not enough params
+            elif not self.first_layer:
+                self.layers_to_make_low_rank[name] = {
+                    "mod": module,
+                    "full rank": True,
+                    "last layer": False,
+                }
+                self.last_layer_new = name
+            else:
+                self.first_layer = False
+        elif isinstance(module, nn.Conv1d):
+            wv = module.weight.view(module.weight.shape[0], -1)
+            if wv.shape[0] < wv.shape[1]:
+                wv.T
+            if wv.shape[1] < wv.shape[0] / 10:
+                pass  # skip this layer if there are not enough params
+            elif not self.first_layer:
+                self.layers_to_make_low_rank[name] = {
+                    "mod": module,
+                    "full rank": True,
+                    "last layer": False,
+                }
+                self.last_layer_new = name
+            else:
+                self.first_layer = False
+        for n, child in module.named_children():
+            self._get_layers_to_replace(
+                child,
+                name=f"{name}.{n}" if name is not None else f"{n}",
+            )
+
+    def _replace_layers_by_name(self, module, target_names: list, name=None):
+        module_output = module
+        # if not hasattr(target_names, 'pop'):
+        #     raise ValueError(f"target names must be a list!! -> {target_names}")
+        if name in target_names:
+            pass
+        elif isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
+            module_output = SVDLinearUSVh(
+                in_features=module.in_features,
+                out_features=module.out_features,
+                bias=module.bias is not None,
+                uvhthreshold=self.uvhthreshold,
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_weight=module.weight,
+                start_bias=module.bias,
+                update_from_simga=self.update_from_simga,
+                reinit_shapes=self.reinit_shapes,
+            ).to(device=module.weight.device, dtype=module.weight.dtype)
+            self.layers_to_make_low_rank[name] = {"mod": module_output, "full rank": False}
+            self.low_rank_replacement_list[module.weight] = [module_output.s, "lin"]
+        elif isinstance(module, nn.MultiheadAttention):
+            module_output = SVDMultiheadAttentionUSVh(
+                embed_dim=module.embed_dim,
+                num_heads=module.num_heads,
+                dropout=module.dropout,
+                bias=module.in_proj_bias is not None,
+                add_bias_kv=module.bias_k is not None,
+                add_zero_attn=module.add_zero_attn,
+                kdim=module.kdim,
+                vdim=module.vdim,
+                batch_first=module.batch_first,
+                uvh_threshold=self.uvhthreshold,
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_q=module.q_proj_weight,
+                start_k=module.k_proj_weight,
+                start_v=module.v_proj_weight,
+                start_in_proj=module.in_proj_weight,
+                start_k_bias=module.bias_k,
+                start_v_bias=module.bias_v,
+                start_in_proj_bias=module.in_proj_bias,
+                update_from_simga=self.update_from_simga,
+                reinit_shapes=self.reinit_shapes,
+            ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
+            self.layers_to_make_low_rank[name] = {"mod": module_output, "full rank": False}
+            if module.in_proj_weight is not None:
+                self.low_rank_replacement_list[module.in_proj_weight] = [module_output.in_proj_s, "attn"]
+            else:
+                self.low_rank_replacement_list[module.q_proj_weight] = [module_output.q_s, "attn"]
+                self.low_rank_replacement_list[module.k_proj_weight] = [module_output.k_s, "attn"]
+                self.low_rank_replacement_list[module.v_proj_weight] = [module_output.v_s, "attn"]
+        elif isinstance(module, nn.Conv2d):
+            module_output = SVDConv2dUSVh(
+                in_channels=module.in_channels,
+                out_channels=module.out_channels,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+                bias=module.bias is not None,
+                padding_mode=module.padding_mode,
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+                uvhthreshold=self.uvhthreshold,
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_bias=module.bias,
+                start_weight=module.weight,
+                update_from_simga=self.update_from_simga,
+                reinit_shapes=self.reinit_shapes,
+                norm=module.norm if hasattr(module, "norm") else None,
+                activation=module.activation if hasattr(module, "activation") else None,
+            )
+            self.layers_to_make_low_rank[name] = {"mod": module_output, "full rank": False}
+            self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
+        elif isinstance(module, nn.Conv1d):
+            module_output = SVDConv1dUSVh(
+                in_channels=module.in_channels,
+                out_channels=module.out_channels,
+                kernel_size=module.kernel_size,
+                stride=module.stride,
+                padding=module.padding,
+                dilation=module.dilation,
+                groups=module.groups,
+                bias=module.bias is not None,
+                padding_mode=module.padding_mode,
+                device=module.weight.device,
+                dtype=module.weight.dtype,
+                uvhthreshold=self.uvhthreshold,
+                sigma_cutoff_fraction=self.sigma_cutoff_fraction,
+                start_bias=module.bias,
+                start_weight=module.weight,
+                update_from_simga=self.update_from_simga,
+                reinit_shapes=self.reinit_shapes,
+                norm=module.norm if hasattr(module, "norm") else None,
+                activation=module.activation if hasattr(module, "activation") else None,
+            )
+            self.layers_to_make_low_rank[name] = {"mod": module_output, "full rank": False}
+            self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
+        for n, child in module.named_children():
+            module_output.add_module(
+                f"{n}",
+                self._replace_layers_by_name(
+                    child,
+                    target_names=target_names,
+                    name=f"{name}.{n}" if name is not None else f"{n}",
+                ),
+            )
+        del module
+        return module_output
+
     def _reset_last_layer(self, module, name=None):
         module_output = module
         if name == self.last_layer[1]:
@@ -418,6 +648,7 @@ class OIALRModel(nn.Module):
         # want to select a number of layers to run the stability on
         # increate the number based on the num_stability_checks
         inds = torch.arange(len(self.svd_modules))
+        # inds = torch.arange(len(self.layers_to_make_low_rank))
         self.num_stability_layvers_to_check += int(inds[-1].item() * self.network_layer_perc_step)
         # work in factors of 5% of the network
         cutoff = self.num_stability_layvers_to_check

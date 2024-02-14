@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -9,7 +10,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import timedelta
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PosixPath
 
 import hydra
 
@@ -30,7 +31,7 @@ from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
 from rich.console import Console
-from rich.pretty import pprint
+from rich.pretty import pprint, pretty_repr
 from torch.autograd.grad_mode import no_grad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
@@ -45,7 +46,7 @@ log = logging.getLogger(__name__)
 
 
 def main(config):  # noqa: C901
-    log.info(config)
+    # log.info(config)
     hydra_cfg = hydra.core.hydra_config.HydraConfig.get()
     print(hydra_cfg["runtime"]["output_dir"])
     # log.info("here is some log testing")
@@ -97,7 +98,12 @@ def main(config):  # noqa: C901
                 # if key in config:
                 OmegaConf.update(config, key, sweep_config[key])
             # dict_config.update(sweep_config)
-            print(sweep_config)
+            # print('sweep_config')
+            try:
+                del sweep_config["_wandb"]
+            except KeyError:
+                pass
+            # print(sweep_config)
             # need to send and update all the dicts
         dict_config = OmegaConf.to_container(config, resolve=False)
 
@@ -110,10 +116,13 @@ def main(config):  # noqa: C901
             config.rank = dist.get_rank() if dist.is_initialized() else 0
 
         if config.rank == 0:
-            pprint(dict(config))
+            # pprint(dict(config))
+            # log.info(pretty_repr(config))
+            log.info(json.dumps(new_dict, indent=2))
             # madonna.utils.tracking.log_config(config, wandb_logger)
             if wandb_logger is not None:
-                wandb_logger.log(dict_config)
+                make_dict_paths_strings(new_dict)
+                # wandb_logger.log(new_dict)
             # wandb_logger.wandb_run.config.update(dict_config)
     # -------- Random Seed init --------------------------
     if config.seed is None:
@@ -275,6 +284,14 @@ def main(config):  # noqa: C901
     len_train = len(train_loader)
     best_fitness = 0.0
     last_val_top1s = []
+    # if config.rank == 0:
+    #     # Reset the log to have everything from thing point already
+    #     # print(type(wandb_logger.log_dict))
+    #     wandb.log(wandb_logger.log_dict)
+    #     wandb_logger.log_dict = {}
+
+    # roll_val_top1 = []
+    # raise ValueError
     for epoch in range(start_epoch, config.training["epochs"]):
         torch.cuda.reset_peak_memory_stats()
         if config["rank"] == 0:
@@ -353,17 +370,17 @@ def main(config):  # noqa: C901
             # "train/precision": train_metrics_epoch["MulticlassPrecision"],
             # "train/recall": train_metrics_epoch["MulticlassRecall"],
             # "train/loss": train_loss,
-            "val/f1": val_metrics_epoch["MulticlassF1Score"],
-            "val/precision": val_metrics_epoch["MulticlassPrecision"],
-            "val/recall": val_metrics_epoch["MulticlassRecall"],
+            "val/f1": val_metrics_epoch["MulticlassF1Score"].item(),
+            "val/precision": val_metrics_epoch["MulticlassPrecision"].item(),
+            "val/recall": val_metrics_epoch["MulticlassRecall"].item(),
             # "val/loss": val_loss,
         }
 
         # Save model
         if dist.is_initialized():
             wait = dist.barrier(async_op=True)
+        last_val_top1s.append(val_top1.item() if isinstance(val_top1, torch.Tensor) else val_top1)
         if rank == 0 and config.enable_tracking:
-            last_val_top1s.append(val_top1.item() if isinstance(val_top1, torch.Tensor) else val_top1)
             if len(last_val_top1s) > 10:
                 slope, _ = np.polyfit(x=np.arange(10), y=np.array(last_val_top1s[-10:]), deg=1)
                 log.info(f"Slope of Top1 for last 10 epochs: {slope:.5f}")
@@ -380,9 +397,9 @@ def main(config):  # noqa: C901
                 f"{log_dict['val/precision']:.4f} / {log_dict['val/recall']:.4f}",
             )
             wandb_logger.log(log_dict)
-
-            wandb_logger.end_epoch(best_result=best_fitness == val_top1)
-
+            # print("h")
+            wandb_logger.end_epoch(best_result=bool(best_fitness == val_top1))
+            # print("hh")
             ckpt = {
                 "epoch": epoch,
                 "best_fitness": best_fitness,
@@ -430,14 +447,19 @@ def main(config):  # noqa: C901
             # wait here for the saving and such...it didnt work to have it afterwards
             wait.wait(timeout=timedelta(seconds=60))
         # # early stopping for imagenet...
-        # if (val_top1 < 15. and epoch >= 5) or \
-        #    (val_top1 < 60. and epoch >= 25) or \
-        #    (val_top1 < 70. and epoch >= 50):  # or \
-        #     #    (val_top1 < 75. and epoch >= 70):  # or \
-        #     # (val_top1 < 78. and epoch >= 100):
-        #     if rank == 0:
-        #         log.info("Early stopping")
-        #     break
+        avg_last_5_vt1 = sum(last_val_top1s[-5:]) / len(last_val_top1s[-5:])
+        if (
+            (avg_last_5_vt1 < 10.0 and epoch >= 5)
+            or (avg_last_5_vt1 < 50.0 and epoch >= 20)
+            or (avg_last_5_vt1 < 62.0 and epoch >= 40)
+            or (avg_last_5_vt1 < 70.0 and epoch >= 60)
+            or (avg_last_5_vt1 < 72.0 and epoch >= 80)
+            or (val_top1 < 1.0 and epoch >= 1)
+        ):  # or \
+            # (val_top1 < 78. and epoch >= 100):
+            if rank == 0:
+                log.info("Early stopping")
+            break
         # set up next epoch after saving everything
         # wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)
@@ -453,8 +475,8 @@ def main(config):  # noqa: C901
     # ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
     # ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
     # print("from train", ret_dict)
-    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/configs/tmp/")
-    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/configs/tmp/")
+    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna2/madonna/configs/tmp/")
+    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
     # with open(out_file / f"{os.environ['RANK']}-output.txt", "w") as convert_file:
     #     # convert_file.write(json.dumps(ret_dict))
     #     json.dump(ret_dict, convert_file)
@@ -986,3 +1008,11 @@ def accuracy(output, target, topk=(1,), mixup=False):
                 correct_k = correct[:k].flatten().sum(dtype=torch.float32)
                 res.append(correct_k * (100.0 / batch_size))
             return res
+
+
+def make_dict_paths_strings(config_dict):
+    for k in config_dict:
+        if isinstance(config_dict[k], dict):
+            make_dict_paths_strings(config_dict[k])
+        elif isinstance(config_dict[k], PosixPath):
+            config_dict[k] = str(config_dict[k])

@@ -13,8 +13,8 @@
 #   job_type: "train"
 #   group: ""
 #   tags: []
-project: "lr-sync"
-sweep: null
+project: oialr # oialr
 # tags:
-#   - final
-# sweep: sweep name
+#   - sweep
+# # sweep: sweep name
+sweep: null  # example: oialr/a97ubrzf

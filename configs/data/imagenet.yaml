@@ -11,7 +11,7 @@ persistent_workers: True
 distributed_sample: True
 prefetch_factor: 4
 distributed_sample_val: True
-train_crop_size: 160
+train_crop_size: 224
 val_crop_size: 224
 dali: False
 classes: 1000

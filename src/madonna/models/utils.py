@@ -256,11 +256,51 @@ def replace_opt_state_with_svd_adam(optimizer: optim.Optimizer, replacement_dict
             replace_idx += 1
 
 
-def reset_opt_state(optimizer: optim.Optimizer):
+def replace_opt_state_with_svd_sgd(optimizer: optim.Optimizer, replacement_dict):
     # replacement_dict: [full_rank_param] -> low_rank param
-    optimizer.state = defaultdict(dict)
-    # for group in optimizer.param_groups:
-    #     replace_idx = 0
-    #     group.state = defaultdict(dict)
-    #     for p in group["params"]:
-    #         # change the state info to the svd
+    for group in optimizer.param_groups:
+        replace_idx = 0
+        for p in group["params"]:
+            if p not in replacement_dict:
+                replace_idx += 1
+                continue
+            new_p = replacement_dict[p][0]
+            layer_type = replacement_dict[p][1]
+            # change the state info to the svd
+            state = optimizer.state[p]
+            if len(list(state.keys())) > 0:
+                for k in ["momentum_buffer"]:
+                    st = state[k].to(torch.float32)
+                    if layer_type in ["lin", "attn"]:
+                        if st.shape[0] < st.shape[1]:
+                            st = st.T
+                    elif layer_type == "conv":
+                        m = st.shape[0]
+                        n = int(st.numel() / st.shape[0])
+                        # svd shapes: [m, n] -> u[m, k] * s[k, k] * vh [k, n]    k-> min(m, n)
+                        st = st.view(m, n)
+                        if m < n:
+                            hold = m
+                            n = m
+                            m = hold
+                            st = st.T
+                    min_s = min(tuple(st.shape))
+
+                    # this will only happen for Sigma matrices!
+                    # therefore, we dont need to worry about shapes/transposes
+                    # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
+                    # sl = []
+                    # for d in range(p.ndim):
+                    #     sl.append(slice(0, p.shape[d]))
+                    # state[k] = state[k][tuple(sl)]
+                    # state[k] = torch.diag(s).to(state[k].dtype)
+                    state[k] = torch.zeros((min_s, min_s), dtype=state[k].dtype, device=state[k].device)
+
+            # replace the reference in the group dict
+            optimizer.state[new_p] = state
+            del optimizer.state[p]
+            # change the state KEY to the svd param
+            # del group["params"][id(p)]
+            group["params"][replace_idx] = new_p
+            # group["params"].append(new_p)
+            replace_idx += 1

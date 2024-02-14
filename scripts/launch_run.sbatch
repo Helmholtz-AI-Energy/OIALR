@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 
 # Slurm job configuration
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gres=gpu:4
-#SBATCH --time=1:00:00
+#SBATCH --time=10:00:00
 #SBATCH --job-name=madonna
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
@@ -25,7 +25,7 @@ TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp"
 export TOMOUNT="${TOMOUNT}"
-export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
+export WANDB_API_KEY="none"
 
 # TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/,/scratch,"
 # TOMOUNT+='/etc/slurm/:/etc/slurm/,'
@@ -62,7 +62,7 @@ export NCCL_COLLNET_ENABLE=0
 #export CONFIGS="${SCRIPT_DIR}DLRT/configs/"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 export CONFIG_NAME="ortho_train.yaml"
-srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='svd-untuned-final' baseline=False enable_tracking=True"
-# srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; wandb agent hai-energy/madonna2/mv00rpa5"
+srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; python -u ${BASE_DIR}madonna/scripts/train.py name='svd-search' baseline=False enable_tracking=True"
+# srun "${SRUN_PARAMS[@]}" bash -c "export CONFIG_NAME=${CONFIG_NAME}; wandb agent hai-energy/oialr/a97ubrzf"
 
 # srun "${SRUN_PARAMS[@]}" bash -c "cd ${BASE_DIR}madonna/; python -u ${BASE_DIR}madonna/scripts/propulate_train.py"
