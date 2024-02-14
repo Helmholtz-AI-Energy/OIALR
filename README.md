@@ -1,4 +1,4 @@
-# madonna
+# Orthogonality Informed Adaptive Low Rank Training
 
 # Description
 Orthogonal DPNN training methods
@@ -41,7 +41,6 @@ sbatch job_submission.sbatch
 │   ├── data                                    <- Datamodule configs
 │   ├── debug                                   <- Debugging configs
 │   ├── experiment                              <- Experiment configs
-│   ├── hparams_search                          <- Hyperparameter search configs
 │   ├── local                                   <- Local configs
 │   ├── log_dir                                 <- Logging directory configs
 │   ├── logger                                  <- Logger configs
@@ -50,11 +49,6 @@ sbatch job_submission.sbatch
 │   │
 │   ├── test.yaml                               <- Main config for testing
 │   └── train.yaml                              <- Main config for training
-│
-├── data                                 <- Project data
-│   └── MNIST
-│       ├── processed                               <- Processed data
-│       └── raw                                     <- Raw data
 │
 ├── docs                                 <- Directory for Sphinx documentation in rst or md.
 ├── models                               <- Trained and serialized models, model predictions
@@ -70,15 +64,7 @@ sbatch job_submission.sbatch
 ├── src/madonna             <- Source code
 │   ├── datamodules                             <- Lightning datamodules
 │   ├── models                                  <- Lightning models
-│   ├── utils                                   <- Utility scripts
-│   │
-│   ├── testing_pipeline.py                     <- Model evaluation workflow
-│   └── training_pipeline.py                    <- Model training workflow
-│
-├── tests                                <- Tests of any kind
-│   ├── helpers                                 <- A couple of testing utilities
-│   ├── shell                                   <- Shell/command based tests
-│   └── unit                                    <- Unit tests
+│   └── utils                                   <- Utility scripts
 │
 ├── .gitignore                           <- List of files/folders ignored by git
 ├── .pre-commit-config.yaml              <- Configuration of pre-commit hooks for code formatting
