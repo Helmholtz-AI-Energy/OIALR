@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
@@ -30,7 +31,7 @@ from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
 from rich.console import Console
-from rich.pretty import pprint
+from rich.pretty import pprint, pretty_repr
 from torch.autograd.grad_mode import no_grad
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Subset
@@ -116,10 +117,12 @@ def main(config):  # noqa: C901
 
         if config.rank == 0:
             # pprint(dict(config))
+            # log.info(pretty_repr(config))
+            log.info(json.dumps(new_dict, indent=2))
             # madonna.utils.tracking.log_config(config, wandb_logger)
             if wandb_logger is not None:
                 make_dict_paths_strings(new_dict)
-                wandb_logger.log(new_dict)
+                # wandb_logger.log(new_dict)
             # wandb_logger.wandb_run.config.update(dict_config)
     # -------- Random Seed init --------------------------
     if config.seed is None:
@@ -444,14 +447,19 @@ def main(config):  # noqa: C901
             # wait here for the saving and such...it didnt work to have it afterwards
             wait.wait(timeout=timedelta(seconds=60))
         # # early stopping for imagenet...
-        # avg_last_5_vt1 = sum(last_val_top1s[-5:]) / len(last_val_top1s[-5:])
-        # if (avg_last_5_vt1 < 20. and epoch >= 15) or \
-        #    (avg_last_5_vt1 < 70. and epoch >= 50) or \
-        #    (avg_last_5_vt1 < 1. and epoch >= 5):  # or \
-        #     # (val_top1 < 78. and epoch >= 100):
-        #     if rank == 0:
-        #         log.info("Early stopping")
-        #     break
+        avg_last_5_vt1 = sum(last_val_top1s[-5:]) / len(last_val_top1s[-5:])
+        if (
+            (avg_last_5_vt1 < 10.0 and epoch >= 5)
+            or (avg_last_5_vt1 < 50.0 and epoch >= 20)
+            or (avg_last_5_vt1 < 62.0 and epoch >= 40)
+            or (avg_last_5_vt1 < 70.0 and epoch >= 60)
+            or (avg_last_5_vt1 < 72.0 and epoch >= 80)
+            or (val_top1 < 1.0 and epoch >= 1)
+        ):  # or \
+            # (val_top1 < 78. and epoch >= 100):
+            if rank == 0:
+                log.info("Early stopping")
+            break
         # set up next epoch after saving everything
         # wandb.log({"epoch": epoch}, step=(epoch + 1) * len_train)
         scheduler.step(epoch + 1, metric=val_loss)

@@ -1,8 +1,8 @@
 model: # vit_b_16
-  _target_: timm.models.vgg16 # timm.models.resnet50 #
+  _target_: timm.models.resnet50 # timm.models.vgg16 #
   drop_rate: 0.  # Dropout probability before classifier, for training
   # drop_path_rate: 0.  # Stochastic depth drop-path rate
   # drop_block_rate: 0.  # Drop block rate
 
-name: vgg16
+name: resnet50
 autocast: True
