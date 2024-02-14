@@ -15,4 +15,4 @@ configs/propulate*
 .vscode*
 models/*
 outputs/*
-wandb/*
+*wandb/*
