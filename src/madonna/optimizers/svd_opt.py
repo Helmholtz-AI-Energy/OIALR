@@ -9,7 +9,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 
-from ..models.svd import SVDLinear, SVDMultiheadAttention
+from ..models.oialr import SVDLinear, SVDMultiheadAttention
 from .utils import change_adam_shapes, change_sgd_shapes
 
 log = logging.getLogger(__name__)

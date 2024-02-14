@@ -1,4 +1,5 @@
 import logging
+import random
 from typing import Optional, Tuple, Union
 
 import torch
@@ -9,10 +10,12 @@ from torch import Tensor
 from torch.nn import Parameter
 from torch.nn.modules.linear import NonDynamicallyQuantizableLinear
 
+from . import mixing, utils
+
 log = logging.getLogger(__name__)
 
 
-class SVDMultiheadAttentionUSVh(nn.Module):
+class SVDSyncMultiheadAttention(nn.Module):
     r"""
     Almost all of this class is based on the torch standard MultiheadAttention class
     I have changed things to work with the SVD abstractions, but that is it.
@@ -109,11 +112,16 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         start_in_proj_bias=None,
         update_from_simga: bool = True,
         reinit_shapes=False,
+        distributed_updates=True,
+        inner_dim_init_ratio=1.0,
+        random_sigma: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.update_from_simga = update_from_simga
         self.embed_dim = embed_dim
+
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         self.kdim = kdim if kdim is not None else embed_dim
         self.vdim = vdim if vdim is not None else embed_dim
         self._qkv_same_embed_dim = self.kdim == embed_dim and self.vdim == embed_dim
@@ -123,106 +131,113 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         self.batch_first = batch_first
         self.head_dim = embed_dim // num_heads
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
         assert self.head_dim * num_heads == self.embed_dim, "num_heads must be factor of embed_dim"
 
         if not self._qkv_same_embed_dim:
             self.q_proj_weight = Parameter(torch.randn((embed_dim, embed_dim), **factory_kwargs))
-            self.q_u = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+            self.q_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
+
+            self.q_u = Parameter(torch.empty((embed_dim, self.q_inner_dim), **factory_kwargs), requires_grad=False)
             self.q_s = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.q_inner_dim, self.q_inner_dim), **factory_kwargs),
                 requires_grad=True,
             )
-            self.q_vh = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs), requires_grad=False)
+            self.q_vh = Parameter(torch.empty((self.q_inner_dim, embed_dim), **factory_kwargs), requires_grad=False)
             self.q_trans = False
-            self.q_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
 
             self.k_proj_weight = Parameter(torch.randn((embed_dim, self.kdim), **factory_kwargs))
             if self.kdim > embed_dim:
                 # u - kdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x kdim
                 self.k_trans = True
+                self.k_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
+
                 self.k_u = Parameter(
-                    torch.empty((self.kdim, embed_dim), **factory_kwargs),
+                    torch.empty((self.kdim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.k_s = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.k_vh = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, embed_dim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.k_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             else:
                 # u - embed x kdim, s - kdim x kdim, vh - kdim x kdim
                 self.k_trans = False
+                self.k_inner_dim = torch.tensor(self.kdim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.k_u = Parameter(
-                    torch.empty((embed_dim, self.kdim), **factory_kwargs),
+                    torch.empty((embed_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.k_s = Parameter(
-                    torch.empty((self.kdim, self.kdim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.k_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.k_vh = Parameter(
-                    torch.empty((self.kdim, self.kdim), **factory_kwargs),
+                    torch.empty((self.k_inner_dim, self.kdim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.k_inner_dim = torch.tensor(self.kdim, dtype=torch.int)
 
             self.v_proj_weight = Parameter(torch.randn((embed_dim, self.vdim), **factory_kwargs))
             if self.vdim > embed_dim:
                 # u - vdim x embed, s - embed x embed, vh - embed x embed -> after trans is embed x vdim
                 self.v_trans = True
+                self.v_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.v_u = Parameter(
-                    torch.empty((self.vdim, embed_dim), **factory_kwargs),
+                    torch.empty((self.vdim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.v_s = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.v_vh = Parameter(
-                    torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, embed_dim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.v_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             else:
                 # u - embed x vdim, s - vdim x vdim, vh - vdim x vdim
                 self.v_trans = False
+                self.v_inner_dim = torch.tensor(self.vdim * self.inner_dim_init_ratio, dtype=torch.int)
                 self.v_u = Parameter(
-                    torch.empty((embed_dim, self.vdim), **factory_kwargs),
+                    torch.empty((embed_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=False,
                 )
                 self.v_s = Parameter(
-                    torch.empty((self.vdim, self.vdim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.v_inner_dim), **factory_kwargs),
                     requires_grad=True,
                 )
                 self.v_vh = Parameter(
-                    torch.empty((self.vdim, self.vdim), **factory_kwargs),
+                    torch.empty((self.v_inner_dim, self.vdim), **factory_kwargs),
                     requires_grad=False,
                 )
-                self.v_inner_dim = torch.tensor(self.vdim, dtype=torch.int)
+            self.q_p = Parameter(torch.ones(self.q_inner_dim, **factory_kwargs), requires_grad=True)
+            self.k_p = Parameter(torch.ones(self.k_inner_dim, **factory_kwargs), requires_grad=True)
+            self.v_p = Parameter(torch.ones(self.v_inner_dim, **factory_kwargs), requires_grad=True)
             self.register_parameter("in_proj_u", None)
             self.register_parameter("in_proj_s", None)
             self.register_parameter("in_proj_vh", None)
         else:
             self.in_proj_weight = Parameter(torch.randn((3 * embed_dim, embed_dim), **factory_kwargs))
+            self.in_proj_inner_dim = torch.tensor(embed_dim * self.inner_dim_init_ratio, dtype=torch.int)
             # in_proj is always TS
             self.in_proj_u = Parameter(
-                torch.empty((3 * embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((3 * embed_dim, self.in_proj_inner_dim), **factory_kwargs),
                 requires_grad=False,
             )
             self.in_proj_s = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.in_proj_inner_dim, self.in_proj_inner_dim), **factory_kwargs),
                 requires_grad=True,
             )
             self.in_proj_vh = Parameter(
-                torch.empty((embed_dim, embed_dim), **factory_kwargs),
+                torch.empty((self.in_proj_inner_dim, embed_dim), **factory_kwargs),
                 requires_grad=False,
             )
+            self.in_proj_p = Parameter(torch.ones(self.in_proj_inner_dim, **factory_kwargs), requires_grad=True)
             self.in_proj_trans = False
-            self.in_proj_inner_dim = torch.tensor(embed_dim, dtype=torch.int)
             self.register_parameter("q_u", None)
             self.register_parameter("q_s", None)
             self.register_parameter("q_vh", None)
@@ -246,6 +261,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.bias_k = self.bias_v = None
 
         self.add_zero_attn = add_zero_attn
+        self.train_p = False
 
         # self._reset_parameters()
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -254,6 +270,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.prev_uvh_q = None
             self.prev_uvh_k = None
             self.prev_uvh_v = None
+            # self.q_p = nn.Parameter(torch.)
         else:
             self.prev_uvh_in_proj = None
 
@@ -315,28 +332,63 @@ class SVDMultiheadAttentionUSVh(nn.Module):
                 self.in_proj_bias.data = self.in_proj_bias.data.to(**factory)
                 self.in_proj_bias.add_(start_in_proj_bias)
 
+            self.gen = torch.Generator(device=factory_kwargs["device"])
+            self.gen.manual_seed(random.randint(0, 68719476735))
+            self.sigma_generator = torch.Generator(device=factory_kwargs["device"])
+            self.sigma_generator.manual_seed(random.randint(0, 68719476735))
+            self.first_distribute_workload = True
+            if random_sigma:
+                log.debug(f"layer-local random seed: {self.gen.initial_seed()}")
+
             # reset the USVh vales for qkv/in
             if self._qkv_same_embed_dim:  # `in` case
                 u, s, vh = torch.linalg.svd(self.in_proj_weight, full_matrices=False)
+                if random_sigma:
+                    s = torch.rand(s.shape[0], device=s.device, dtype=s.dtype, generator=self.gen) * s.max()
 
-                self.in_proj_u = Parameter(u.contiguous(), requires_grad=False)
-                self.in_proj_s = Parameter(torch.diag(s).contiguous(), requires_grad=True)
-                self.in_proj_vh = Parameter(vh.contiguous(), requires_grad=False)
+                self.in_proj_u = Parameter(u[:, : self.in_proj_inner_dim].contiguous(), requires_grad=False)
+                self.in_proj_s = Parameter(torch.diag(s[: self.in_proj_inner_dim]).contiguous(), requires_grad=True)
+                self.in_proj_vh = Parameter(vh[: self.in_proj_inner_dim].contiguous(), requires_grad=False)
 
-                del self.in_proj_weight
+                self.in_proj_weight = property(lambda self: self._get_in_proj())
+                # del self.in_proj_weight
             else:
                 for qkv in "qkv":
                     target = getattr(self, f"{qkv}_proj_weight")
                     if getattr(self, f"{qkv}_trans"):
                         target = target.T
                     u, s, vh = torch.linalg.svd(getattr(self, f"{qkv}_proj_weight"), full_matrices=False)
+                    if random_sigma:
+                        s = torch.rand(s.shape[0], device=s.device, dtype=s.dtype, generator=self.gen) * s.max()
                     # u, _ = torch.linalg.qr(torch.randn_like(u), mode="reduced")
                     # vh, _ = torch.linalg.qr(torch.randn_like(vh), mode="reduced")
-                    setattr(self, f"{qkv}_u", Parameter(u.contiguous(), requires_grad=False))
-                    setattr(self, f"{qkv}_s", Parameter(torch.diag(s).contiguous(), requires_grad=True))
-                    setattr(self, f"{qkv}_vh", Parameter(vh.contiguous(), requires_grad=False))
+                    setattr(
+                        self,
+                        f"{qkv}_u",
+                        Parameter(u[:, : self.in_proj_inner_dim].contiguous(), requires_grad=False),
+                    )
+                    setattr(
+                        self,
+                        f"{qkv}_s",
+                        Parameter(torch.diag(s[: self.in_proj_inner_dim]).contiguous(), requires_grad=True),
+                    )
+                    setattr(
+                        self,
+                        f"{qkv}_vh",
+                        Parameter(vh[: self.in_proj_inner_dim].contiguous(), requires_grad=False),
+                    )
+                self.q_proj_weight = property(lambda self: self._get_q())
+                self.k_proj_weight = property(lambda self: self._get_k())
+                self.v_proj_weight = property(lambda self: self._get_v())
+                # del self.q_proj_weight, self.k_proj_weight, self.v_proj_weight
 
-                del self.q_proj_weight, self.k_proj_weight, self.v_proj_weight
+        # internal random generator
+        seed = torch.seed()
+        if dist.is_initialized():
+            seed = seed + dist.get_rank() + 1000
+        # log.info(f"Internal seed for linear layer: {seed}")
+        self.gen = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+        self.gen.manual_seed(seed)
 
     def _reset_parameters(self):
         # if self._qkv_same_embed_dim:
@@ -375,7 +427,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.q_vh.requires_grad = False
         u, vh = self.q_u, self.q_vh
         s = self.q_s
-        ret = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.q_p.requires_grad = True
+            self.q_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.q_p.view(-1, 1), s, vh])
+        else:
+            ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
     # @torch.compile()
@@ -386,7 +443,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.k_vh.requires_grad = False
         u, vh = self.k_u, self.k_vh
         s = self.k_s
-        w = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.k_p.requires_grad = True
+            self.k_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.k_p.view(-1, 1), s, vh])
+        else:
+            w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.k_trans else w
         return ret
 
@@ -398,7 +460,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             self.v_vh.requires_grad = False
         u, vh = self.v_u, self.v_vh
         s = self.v_s
-        w = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.v_p.requires_grad = True
+            self.v_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.v_p.view(-1, 1), s, vh])
+        else:
+            w = torch.linalg.multi_dot([u, s, vh])
         ret = w.T if self.v_trans else w
         return ret
 
@@ -414,7 +481,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         u = self.in_proj_u  # .detach()
         vh = self.in_proj_vh  # .detach()
         s = self.in_proj_s
-        ret = torch.linalg.multi_dot([u, s, vh])
+        if self.train_p:
+            self.in_proj_p.requires_grad = True
+            self.in_proj_s.requires_grad = False
+            ret = torch.linalg.multi_dot([u, self.in_proj_p.view(-1, 1), s, vh])
+        else:
+            ret = torch.linalg.multi_dot([u, s, vh])
         return ret
 
     # @torch.compile()
@@ -423,6 +495,17 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             q = self._get_q()
             k = self._get_k()
             v = self._get_v()
+            with torch.no_grad():
+                if self.train_p and self.training:
+                    train_bias = False
+                elif not self.train_p:
+                    train_bias = True
+                if self.bias_k is not None:
+                    self.bias_k.requires_grad = train_bias
+                if self.bias_v is not None:
+                    self.bias_v.requires_grad = train_bias
+                if self.in_proj_bias is not None:
+                    self.in_proj_bias.requires_grad = train_bias
             return q, k, v
         else:
             return self._get_in_proj()
@@ -767,11 +850,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
             setattr(self, f"prev_uvh_{qkvin}", torch.tensor(1, device=dev))
             self.waits[qkvin]["inner_dim"] = None
             # receive the info from the working process
-            self.waits[qkvin]["inner_dim"] = dist.broadcast(
-                self.inner_dim_buffers[qkvin],
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.waits[qkvin]["inner_dim"] = dist.broadcast(
+                    self.inner_dim_buffers[qkvin],
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             # print('for waits')
             return
 
@@ -797,11 +881,12 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         for qkv in self.inner_dim_buffers:
             self.inner_dim_buffers[qkv] = self.inner_dim_buffers[qkv].to(dev)
 
-        self.waits[qkvin]["inner_dim"] = dist.broadcast(
-            self.inner_dim_buffers[qkvin],
-            src=working_rank,
-            async_op=nonblocking,
-        )
+        if self.distributed_updates:
+            self.waits[qkvin]["inner_dim"] = dist.broadcast(
+                self.inner_dim_buffers[qkvin],
+                src=working_rank,
+                async_op=nonblocking,
+            )
 
     @torch.no_grad()
     def _full_rank_sigma_update_usv_abs(self, qkvin, working_rank=0):
@@ -832,7 +917,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
     def _wait_inner_dim_reshape_bcast_usvh_abs(self, qkvin, nonblocking=True):
         # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
         reset_optimizer = bool(self.inner_dim_buffers[qkvin][2].item())
-        if self.last_send_ranks[qkvin] is None:
+        if self.last_send_ranks[qkvin] is None or not self.distributed_updates:
             return reset_optimizer, True
         if self.waits[qkvin]["inner_dim"] is not None:
             self.waits[qkvin]["inner_dim"].wait()
@@ -850,7 +935,7 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         return reset_optimizer, stable
 
     def _bcast_usvh_abs(self, qkvin, src, nonblocking):
-        if not dist.is_initialized():
+        if not dist.is_initialized() or not self.distributed_updates:
             return
         u, s, vh, _ = self._get_usvh_from_qkvin(qkvin)
         if not u.is_contiguous():
@@ -951,14 +1036,17 @@ class SVDMultiheadAttentionUSVh(nn.Module):
     def _update_usvh_shapes(self, qkvin):
         # either update the shapes of USVh or set the irrelevant values to 0
         u, s, vh, sl = self._get_usvh_from_qkvin(qkvin)
+        p = getattr(self, f"{qkvin}_p")
         if self.reinit_shapes:
             u.set_(u[:, :sl].contiguous())
             vh.set_(vh[:sl].contiguous())
             s.set_(s[:sl, :sl].contiguous())
+            p.set_(p[:sl].contiguous())
         else:
             u[:, sl:] *= 0
             vh[sl:] *= 0
             s[sl:, sl:].mul_(0)
+            p[sl:].mul_(0)
 
     @torch.no_grad()
     def _get_usvh_from_qkvin(self, qkvin):
@@ -1004,3 +1092,147 @@ class SVDMultiheadAttentionUSVh(nn.Module):
         return {
             "in_proj": self.in_proj_inner_dim,
         }
+
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
+                utils.collect_lr_reps_from_all(
+                    local_u=u,
+                    local_s=s,
+                    local_vh=vh,
+                    sigma_cutoff_fraction=sigma_cutoff_fraction,
+                    set_usvh=True,
+                    name=name + f".{qkv}",
+                )
+        else:
+            u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
+            utils.collect_lr_reps_from_all(
+                local_u=u,
+                local_s=s,
+                local_vh=vh,
+                sigma_cutoff_fraction=sigma_cutoff_fraction,
+                set_usvh=True,
+                name=name,
+            )
+
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
+                utils.split_sigma_workload(
+                    collected_u=u,
+                    collected_s=s,
+                    collected_vh=vh,
+                    sigma_generator=self.sigma_generator,
+                    min_size_fraction=min_size_fraction,
+                    set_usvh=True,
+                    name=name + f".{qkv}",
+                )
+        else:
+            u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
+            utils.split_sigma_workload(
+                collected_u=u,
+                collected_s=s,
+                collected_vh=vh,
+                sigma_generator=self.sigma_generator,
+                min_size_fraction=min_size_fraction,
+                set_usvh=True,
+                name=name,
+            )
+        self.first_distribute_workload = False
+
+    @torch.no_grad()
+    def remove_smaller_vecs(self, name):
+        self.name = name
+        # no SVD here, just cutting off sigma vals based on cutoff
+        lst = ["q", "k", "v" if not self._qkv_same_embed_dim else "in_proj"]
+        for qkv in lst:
+            self._update_inner_dim_and_shapes_abs(qkv)
+        perc, _, _ = self.get_perc_params()
+        if self._qkv_same_embed_dim and self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.in_proj_u.shape[0]} {self.in_proj_s.shape[0]} {self.in_proj_vh.shape[1]}]",
+            )
+        elif not self._qkv_same_embed_dim and self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.q_u.shape[0]} {self.q_s.shape[0]} {self.q_vh.shape[1]}]",
+            )
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.k_u.shape[0]} {self.k_s.shape[0]} {self.k_vh.shape[1]}]",
+            )
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.v_u.shape[0]} {self.v_s.shape[0]} {self.v_vh.shape[1]}]",
+            )
+
+    @torch.no_grad()
+    def mix_sigma(self, method, *args, **kwargs):
+        # NOTE: this will also update U/Vh as well
+        # blur sigma with a specified method, only RBF available right now
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                u, s, vh, sl = self._get_usvh_from_qkvin(qkv)
+                mixing.mix_sigma(*args, u=u, s=s, vh=vh, method=method, generator=self.gen, **kwargs)
+        else:
+            u, s, vh, sl = self._get_usvh_from_qkvin("in_proj")
+            mixing.mix_sigma(*args, u=u, s=s, vh=vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def _start_p_training_qkvin(self, qkv):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        s = getattr(self, f"{qkv}_s")
+        p = getattr(self, f"{qkv}_p")
+        p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        p.add_(1 / sz)
+        p.requires_grad = True
+        self.train_p = True
+        s.requires_grad = False
+
+    @torch.no_grad()
+    def _update_sp_train_normally_qkvin(self, qkv):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        s = getattr(self, f"{qkv}_s")
+        p = getattr(self, f"{qkv}_p")
+        hold = p.view(-1, 1) * s
+        s.zero_()
+        s.add_(hold)
+        p.zero_()
+        p.add_(1)
+        p.requires_grad = False
+        self.train_p = False
+        s.requires_grad = True
+
+    @torch.no_grad()
+    def start_p_training(self):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                self._start_p_training_qkvin(qkv)
+        else:
+            self._start_p_training_qkvin("in_proj")
+
+        if self.in_proj_bias is not None:
+            self.in_proj_bias.requires_grad = False
+        if self.bias_k is not None:
+            self.bias_k.requires_grad = False
+        if self.bias_v is not None:
+            self.bias_v.requires_grad = False
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        if not self._qkv_same_embed_dim:
+            for qkv in "qkv":
+                self._update_sp_train_normally_qkvin(qkv)
+        else:
+            self._update_sp_train_normally_qkvin("in_proj")
+        if self.in_proj_bias is not None:
+            self.in_proj_bias.requires_grad = True
+        if self.bias_k is not None:
+            self.bias_k.requires_grad = True
+        if self.bias_v is not None:
+            self.bias_v.requires_grad = True

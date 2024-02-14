@@ -8,14 +8,14 @@
 #SBATCH --job-name=madonna-test
 #SBATCH --partition=sdil
 ####SBATCH --account=hk-project-test-mlperf
-#SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/madonna/logs/slurm/slurm-%j"
 
 
 # gpu_4_h100 accelerated
 ml purge
 
 # pmi2 cray_shasta
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna-ddp/"
 
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 TOMOUNT+="${BASE_DIR},"
@@ -35,7 +35,7 @@ SRUN_PARAMS=(
 )
 
 #export CUDA_AVAILABLE_DEVICES="0,1,2,3"
-SCRIPT_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna"
+SCRIPT_DIR="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/madonna"
 
 export UCX_MEMTYPE_CACHE=0
 export NCCL_IB_TIMEOUT=100
@@ -55,10 +55,10 @@ export NCCL_COLLNET_ENABLE=0
 # TOMOUNT+="/home/kit/scc/qv2382/"
 
 
-BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna"
+BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/madonna"
 
 # TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
-TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/,/scratch,"
+TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/,/scratch,"
 # TOMOUNT+="${EXT_DATA_PREFIX},"
 # TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/sys,/tmp,"

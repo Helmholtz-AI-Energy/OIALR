@@ -1,0 +1,50 @@
+# @package _global_
+
+defaults:
+  - _self_
+  - data: cifar10.yaml # imagenet.yaml #
+  - model: vit.yaml # resnet.yaml # resnet-rs.yaml # cirsean4.yaml # conv_dense.yaml #
+  - tracking: wandb.yaml  # mlflow.yaml # set tracking here or use command line (e.g. `python train.py tracking=tensorboard`)
+  - training: lr_sync_trainer.yaml
+  - log_dir: default.yaml
+  # experiment configs allow for version control of specific configurations
+  # e.g. hyperparameters for each combination of model and data
+  - experiment: null
+  # debugging config (enable through command line, e.g. `python train.py debug=default)
+  - debug: null
+  # config for hyperparameter optimization
+  - hparams_search: null
+  # optional local config for machine/user specific settings
+  # it's optional since it doesn't need to exist and is excluded from version control
+  - optional local: default.yaml
+  - override hydra/job_logging: colorlog
+  - override hydra/hydra_logging: colorlog
+
+# putting this in here because i see the fix in colorlog...
+hydra:
+  job_logging:
+    handlers:
+      file:
+        filename: ${hydra.runtime.output_dir}/${hydra.job.name}.log
+
+# path to original working directory
+# hydra hijacks working directory by changing it to the new log directory
+# https://hydra.cc/docs/next/tutorials/basic/running_your_app/working_directory
+original_work_dir: ${hydra:runtime.cwd}
+# pretty print config at the start of the run using Rich library
+print_config: False
+# set False to skip model training
+train: True
+validate: True
+test: False
+seed: null
+# default name for the experiment for logging
+name: "lr-sync"
+baseline: False
+
+comm_method: "nccl"
+cpu_training: False
+enable_tracking: True
+tracker: wandb
+iteration: 0  # only used for propulate searching
+handle: 0  # only used for propulate searching

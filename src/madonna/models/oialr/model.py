@@ -47,6 +47,10 @@ class OIALRModel(nn.Module):
         step_on_forward: bool = True,
         full_rank_warmup: bool = True,
         network_layer_perc_step: float = 0.1,
+        use_ddp: bool = True,
+        distributed_updates: bool = True,
+        fixed_inner_dim: bool = False,
+        inner_dim_init_ratio: float = 1.0,
     ):
         """
         Othogonality-Informed Adaptive Low-Rank Model.
@@ -97,6 +101,13 @@ class OIALRModel(nn.Module):
                 I.e. the first time the layers are tested the last 10% of the layers are updated,
                 the second time the last 20% of the layers are updated, the 3rd time its 30%, etc.
                 Defaults to 0.1.
+            use_ddp (bool, optional):
+                if DDP should be used for the model.
+                This also determines if the low-rank updates are performed in parallel (TODO: maybe it shouldnt??)
+                Defaults to True
+            distributed_updates (bool, optional):
+                Set to true to distribute the SVD update steps across the ranks then sync them up after.
+                Defautls to True
         """
         super().__init__()
 
@@ -111,6 +122,8 @@ class OIALRModel(nn.Module):
 
         self.base_trainable_parameters = num
         self.base_all_parameters = full_params
+        self.fixed_inner_dim = fixed_inner_dim
+        self.inner_dim_init_ratio = inner_dim_init_ratio
 
         self.uvhthreshold = uvhthreshold
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
@@ -124,6 +137,10 @@ class OIALRModel(nn.Module):
         self.local_full_rank_model = full_rank_model
         self.low_rank_replacement_list = {}
         self.network_layer_perc_step = network_layer_perc_step
+        self.use_ddp = use_ddp and dist.is_initialized()
+        self.distributed_updates = distributed_updates
+        self.local_low_rank_model = None
+        # self.non_svd_params = []
 
         # self.layers_to_make_low_rank = OrderedDict()
 
@@ -131,7 +148,8 @@ class OIALRModel(nn.Module):
             if self.rank == 0:
                 log.info("Starting with training in full rank")
             self.model = self.local_full_rank_model
-            if dist.is_initialized():
+
+            if self.use_ddp:
                 if self.rank == 0:
                     log.info("Initializing DDP")
                 self.model = DDP(full_rank_model, find_unused_parameters=False)
@@ -254,7 +272,7 @@ class OIALRModel(nn.Module):
         if self.keep_last_layer:
             self._reset_last_layer(self.local_low_rank_model)
 
-        if dist.is_initialized():
+        if self.use_ddp:
             if self.rank == 0:
                 log.info("Initializing DDP")
             self.model = DDP(self.local_low_rank_model, find_unused_parameters=False)
@@ -263,10 +281,13 @@ class OIALRModel(nn.Module):
         self.svd_modules = {}
         self.layer_names = []
         calls = 0
-        sz = 1 if not dist.is_initialized() else dist.get_world_size()
+        sz = 1 if not self.use_ddp else dist.get_world_size()
         for name, mod in self.model.named_modules():
             if hasattr(mod, "test_stability_distributed"):
-                working_rank = calls % sz
+                if self.distributed_updates:
+                    working_rank = calls % sz
+                else:
+                    working_rank = self.rank
                 # self.svd_modules.append((name, mod, working_rank))
                 self.svd_modules[name] = {"mod": mod, "working_rank": working_rank, "stable": False, "stable_delay": 0}
                 self.layer_names.append(name)
@@ -283,6 +304,16 @@ class OIALRModel(nn.Module):
             else:
                 replace_opt_state_with_svd_sgd(self.optimizer, self.low_rank_replacement_list)
 
+        # self.non_svd_params = []
+        # for n, p in self.named_parameters():
+        #     if not n.endswith((".s", ".u", ".vh")) and p.requires_grad:
+        #         self.non_svd_params.append(p)
+
+    def blur_svd_layers(self):
+        log.info("blurring models")
+        for name in self.svd_modules:
+            self.svd_modules[name]["mod"].blur_sigma()
+
     def _replace_layers(self, module, name=None, process_group=None):
         module_output = module
         if isinstance(module, nn.Linear) and min(module.weight.shape) > max(module.weight.shape) / 10:
@@ -297,9 +328,11 @@ class OIALRModel(nn.Module):
                     start_bias=module.bias,
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
+                    distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 ).to(device=module.weight.device, dtype=module.weight.dtype)
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
-                self.low_rank_replacement_list[module.weight] = [module_output.s, "lin"]
+                self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "lin"]
             else:
                 self.first_layer = False
         elif isinstance(module, nn.MultiheadAttention):
@@ -325,14 +358,16 @@ class OIALRModel(nn.Module):
                     start_in_proj_bias=module.in_proj_bias,
                     update_from_simga=self.update_from_simga,
                     reinit_shapes=self.reinit_shapes,
+                    distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 ).to(device=module.out_proj.weight.device, dtype=module.out_proj.weight.dtype)
                 self.last_layer = [module, name, None, None]
                 if module.in_proj_weight is not None:
-                    self.low_rank_replacement_list[module.in_proj_weight] = [module_output.in_proj_s, "attn"]
+                    self.low_rank_replacement_list[id(module.in_proj_weight)] = [module_output.in_proj_s, "attn"]
                 else:
-                    self.low_rank_replacement_list[module.q_proj_weight] = [module_output.q_s, "attn"]
-                    self.low_rank_replacement_list[module.k_proj_weight] = [module_output.k_s, "attn"]
-                    self.low_rank_replacement_list[module.v_proj_weight] = [module_output.v_s, "attn"]
+                    self.low_rank_replacement_list[id(module.q_proj_weight)] = [module_output.q_s, "attn"]
+                    self.low_rank_replacement_list[id(module.k_proj_weight)] = [module_output.k_s, "attn"]
+                    self.low_rank_replacement_list[id(module.v_proj_weight)] = [module_output.v_s, "attn"]
             else:
                 self.first_layer = False
         elif isinstance(module, nn.Conv2d):
@@ -362,9 +397,11 @@ class OIALRModel(nn.Module):
                     reinit_shapes=self.reinit_shapes,
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
+                    distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
-                self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
+                self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
             else:
                 self.first_layer = False
         elif isinstance(module, nn.Conv1d):
@@ -394,9 +431,11 @@ class OIALRModel(nn.Module):
                     reinit_shapes=self.reinit_shapes,
                     norm=module.norm if hasattr(module, "norm") else None,
                     activation=module.activation if hasattr(module, "activation") else None,
+                    distributed_updates=self.use_ddp,
+                    inner_dim_init_ratio=self.inner_dim_init_ratio,
                 )
                 self.last_layer = [module, name, module.weight.dtype, module.weight.device]
-                self.low_rank_replacement_list[module.weight] = [module_output.s, "conv"]
+                self.low_rank_replacement_list[id(module.weight)] = [module_output.s, "conv"]
             else:
                 self.first_layer = False
         for n, child in module.named_children():
@@ -592,7 +631,7 @@ class OIALRModel(nn.Module):
                 dtype = self.last_layer[2]
                 device = self.last_layer[3]
             module_output = self.last_layer[0].to(device=device, dtype=dtype)
-            del self.low_rank_replacement_list[self.last_layer[0].weight]
+            del self.low_rank_replacement_list[id(self.last_layer[0].weight)]
         for n, child in module.named_children():
             module_output.add_module(n, self._reset_last_layer(child, f"{name}.{n}" if name is not None else f"{n}"))
         # del module
@@ -602,10 +641,9 @@ class OIALRModel(nn.Module):
     def test_basis_stability_all_layers(self):
         # if self.skip_stability:
         #     return
-        rank = dist.get_rank() if dist.is_initialized() else 0
+        rank = dist.get_rank() if self.use_ddp else 0
         if rank == 0:
             log.info("Testing Stability")
-        all_stable = True
         reset_optimizer = False
         # want to select a number of layers to run the stability on
         # increate the number based on the num_stability_checks
@@ -629,7 +667,6 @@ class OIALRModel(nn.Module):
             if self.svd_modules[layer]["stable_delay"] == 0:
                 mod, working_rank = self.svd_modules[layer]["mod"], self.svd_modules[layer]["working_rank"]
                 mod.test_stability_distributed(name=layer, working_rank=working_rank, nonblocking=True)
-        # dist.barrier()
         for layer in working_layers:
             if self.svd_modules[layer]["stable_delay"] == 0:
                 mod, working_rank = self.svd_modules[layer]["mod"], self.svd_modules[layer]["working_rank"]
@@ -639,8 +676,6 @@ class OIALRModel(nn.Module):
                     self.svd_modules[layer]["stable_delay"] = self.stable_update_delay
                 if reset_opt:
                     reset_optimizer = True
-                if not stable:
-                    all_stable = False
         for layer in working_layers:
             if self.svd_modules[layer]["stable_delay"] == 0:
                 mod, working_rank = self.svd_modules[layer]["mod"], self.svd_modules[layer]["working_rank"]
@@ -648,7 +683,7 @@ class OIALRModel(nn.Module):
             else:
                 self.svd_modules[layer]["stable_delay"] -= 1
 
-        return reset_optimizer, all_stable
+        return reset_optimizer
 
     @torch.no_grad()
     def get_perc_params_all_layers(self):
@@ -698,26 +733,28 @@ class OIALRModel(nn.Module):
         # 3. check stability of layers (see self.test_basis_stability_all_layers)
         # 4. if the optimizer needs to be reset, do it (reshapes the buffers within it)
         self.call_count += 1
-        # print(self.call_count, self.delay)
+        low_shift = False
         if self.call_count == self.delay and self.full_rank_warmup:  # - self.stability_frequency:
             self.setup_low_rank_training()
-            # self._slow_transition_to_lr_training(self.network_layer_perc_step)
-            # return
+            low_shift = True
 
         if not force and self.call_count != self.next_stability_iteration:
+            if low_shift:
+                self.reshape_opt_state_fn(self.optimizer)
+                self.optimizer.zero_grad(set_to_none=True)
             return
+        elif self.fixed_inner_dim:
+            if low_shift:
+                self.reshape_opt_state_fn(self.optimizer)
+                self.optimizer.zero_grad(set_to_none=True)
+            return
+        # log.info(f"Is model DDP (sanity check hope for False!!): {isinstance(self.model, DDP)}")
         self.call_count_stability += 1
 
         stabtime = time.perf_counter()
-        reset_optimizer, all_layers_stable = self.test_basis_stability_all_layers()
+        reset_optimizer = self.test_basis_stability_all_layers()
 
-        if all_layers_stable and not self.all_stable:
-            # NOTE: no need to remove the full_rank_weights, they will cause a few extra clock ticks but nothing more
-            # self.optimizer.remove_full_rank_weights()
-            # self.reset_all_states(self.optimizer)
-            self.all_stable = all_layers_stable
-
-        if dist.is_initialized():
+        if self.use_ddp:
             # this indicates that the shapes of the parameters changed
             # need to re-init DDP to have the correct buckets
             ddp_time = perf_counter()
@@ -727,15 +764,8 @@ class OIALRModel(nn.Module):
         if reset_optimizer:
             self.reshape_opt_state_fn(self.optimizer)
             # self.reset_all_states(self.optimizer)
-            # self.insert_noise(noise_level=1e-2)
-            # self.optimizer.reset_shapes_of_sigma(self)
         self.optimizer.zero_grad(set_to_none=True)
 
-        # self.model = DDP(self.local_model, find_unused_parameters=False, static_graph=False)
-        # dist.barrier()
-
-        # self.fib1, self.fib2 = self.fib2, self.fib1 + self.fib2
-        # self.next_stability_iteration = self.delay + (self.fib2 * self.stability_frequency)
         self.next_stability_iteration += self.stability_frequency
         self.next_stability_iteration = int(self.next_stability_iteration)
 

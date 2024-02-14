@@ -1,6 +1,7 @@
 import collections
 import logging
 import math
+import random
 from copy import copy
 from itertools import repeat
 from typing import List, Optional, Tuple, Union
@@ -11,6 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch.nn.common_types import _size_1_t, _size_2_t, _size_3_t
+
+from . import mixing, utils
 
 
 def _ntuple(n, name="parse"):
@@ -33,7 +36,7 @@ log = logging.getLogger(__name__)
 # TODO: make general convNd class to inherit from
 
 
-class SVDConv2dUSVh(nn.modules.conv._ConvNd):
+class SVDSyncConv2d(nn.modules.conv._ConvNd):
     __doc__ = r"""
     TODO: link to torch conv2D docs
     add other docs about this function itself
@@ -60,6 +63,9 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         reinit_shapes=False,
         norm=None,
         activation=None,
+        distributed_updates=True,
+        inner_dim_init_ratio=1.0,
+        random_sigma: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -80,6 +86,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             padding_mode,
             **factory_kwargs,
         )
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         # detectron2 things...norm/activation is wrapped into one place here
         self.norm = norm
         self.activation = activation
@@ -94,6 +101,7 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
 
         self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
 
         weight_shape = self.weight.shape
         self.base_weigh_shape = tuple(weight_shape)
@@ -118,13 +126,24 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             w2 = torch.empty_like(w)
             nn.init.kaiming_normal_(w2, a=math.sqrt(5))
             u, s, vh = torch.linalg.svd(w2, full_matrices=False)
-        self.u = nn.Parameter(u, requires_grad=False)
+
+        self.gen = torch.Generator(device=w.device)
+        self.gen.manual_seed(random.randint(0, 68719476735))
+        if random_sigma:
+            log.debug(f"layer-local random seed: {self.gen.initial_seed()}")
+            s = torch.rand(s.shape[0], device=s.device, dtype=s.dtype, generator=self.gen) * s.max()
+
+        self.inner_dim = torch.tensor(k * self.inner_dim_init_ratio, dtype=torch.int)
+
+        self.u = nn.Parameter(u[:, : self.inner_dim].clone(), requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
+
+        self.p = nn.Parameter(torch.ones_like(s[: self.inner_dim], requires_grad=False))
+        self.train_p = False
 
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
@@ -135,9 +154,20 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         else:
             self.rank = 0
             self.size = 1
+
+        self.sigma_generator = torch.Generator(device=s.device)
+        self.sigma_generator.manual_seed(random.randint(0, 68719476735))
         self.last_send_rank = None
         self.prev_uvh = None
         del self.weight
+
+        # internal random generator
+        seed = torch.seed()
+        if dist.is_initialized():
+            seed = seed + dist.get_rank() + 1000
+        # log.info(f"Internal seed for linear layer: {seed}")
+        self.gen = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+        self.gen.manual_seed(seed)
 
     def _conv_forward(self, input: Tensor, weight: Tensor, bias: Optional[Tensor]):
         # From nn.conv2d
@@ -166,18 +196,21 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
             x = self.activation(x)
         return x
 
-    @torch.no_grad()
-    def get_weight_for_svd(self):
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        return w
-
     def get_weight(self, for_svd=False):
         # detach sets 'requires grad' to False
         if self.training:
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+            if self.bias is not None:
+                self.bias.requires_grad = True
+        if self.train_p and self.training:
+            self.p.requires_grad = True
+            if self.bias is not None:
+                self.bias.requires_grad = False
+            w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
+        else:
+            w = torch.linalg.multi_dot([self.u, self.s, self.vh])
         if self.trans:
             w = w.T
 
@@ -220,14 +253,16 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
     @torch.no_grad()
     def _update_usvh_shapes(self):
         # either update the shapes of USVh or set the irrelevant values to 0
-        if self.reinit_shapes:
-            self.u.set_(self.u[:, : self.inner_dim].contiguous())
-            self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-        else:
-            self.u[:, self.inner_dim :] *= 0
-            self.vh[self.inner_dim :] *= 0
-            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        # if self.reinit_shapes:
+        self.u.set_(self.u[:, : self.inner_dim].contiguous())
+        self.vh.set_(self.vh[: self.inner_dim].contiguous())
+        self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+        self.p.set_(self.p[: self.inner_dim].contiguous())
+        # else:
+        #     self.u[:, self.inner_dim :] *= 0
+        #     self.vh[self.inner_dim :] *= 0
+        #     self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        #     self.p[self.inner_dim :].mul_(0)
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -253,95 +288,16 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
-    def test_stability_distributed(self, working_rank, name, nonblocking=True):
+    def remove_smaller_vecs(self, name):
         self.name = name
-
-        self.last_send_rank = working_rank
-        if working_rank != self.rank:
-            # move on for now, coming back later
-            # make sure to save the rank which did this layer
-            self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
-            self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
-            # if in the first iteration
-            # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
-            self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
-            # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
-            return
-
-        # case 3: update the stable U and Vh from the full rank sigma matrix
-        status = self._full_rank_update_usv()
-        # shapes are updated within above (as is slice update)
+        # no SVD here, just cutting off sigma vals based on cutoff
+        self._update_inner_dim_and_shapes()
         perc, _, _ = self.get_perc_params()
-        # normalize self.s to max == 1
-        # maxs = self.s.max()
-        # self.s /= maxs
-        # self.vh *= maxs
-        log.info(
-            f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
-            f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
-        )
-
-        self.inner_dim_buffer[0] = self.inner_dim.to(torch.float)
-        self.inner_dim_buffer[1] = status["csmean"]
-        self.inner_dim_buffer[2] = status["change_k"]
-        if not dist.is_initialized():
-            return
-        self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
-        # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        if self.last_send_rank is None:  # skip all comms
-            return reset_optimizer, True
-        # self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=self.last_send_rank, async_op=False)
-        if self.wait_inner_dim is not None:
-            self.wait_inner_dim.wait()
-            self.wait_inner_dim = None
-            if self.rank != self.last_send_rank:
-                self.inner_dim = self.inner_dim_buffer[0].to(torch.int)
-                # print('before reshape')
-                self._update_usvh_shapes()
-
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        stable = self.inner_dim_buffer[1] >= self.uvhthreshold
-        self.inner_dim_buffer *= 0
-        self.bcast_usvh(src=self.last_send_rank, nonblocking=nonblocking)
-        return reset_optimizer, stable
-
-    @torch.no_grad()
-    def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
-            return
-        # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
-        if not self.u.is_contiguous():
-            self.u.set_(self.u.contiguous())
-        if not self.s.is_contiguous():
-            self.s.set_(self.s.contiguous())
-        if not self.vh.is_contiguous():
-            self.vh.set_(self.vh.contiguous())
-        self.wait_u = dist.broadcast(self.u, src=src, async_op=nonblocking)
-        self.wait_s = dist.broadcast(self.s, src=src, async_op=nonblocking)
-        self.wait_vh = dist.broadcast(self.vh, src=src, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_on_usvh(self):
-        if self.wait_u is not None:
-            self.wait_u.wait()
-            self.wait_u = None
-        if self.wait_s is not None:
-            self.wait_s.wait()
-            self.wait_s = None
-        if self.wait_vh is not None:
-            self.wait_vh.wait()
-            self.wait_u = None
+        if self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
+            )
 
     def get_interior_inner_dim(self):
         return {
@@ -375,8 +331,57 @@ class SVDConv2dUSVh(nn.modules.conv._ConvNd):
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
 
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
+        utils.split_sigma_workload(
+            collected_u=self.u,
+            collected_s=self.s,
+            collected_vh=self.vh,
+            sigma_generator=self.sigma_generator,
+            min_size_fraction=min_size_fraction,
+            set_usvh=True,
+            name=name,
+            p=self.p,
+        )
 
-class SVDConv1dUSVh(nn.modules.conv._ConvNd):
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
+        utils.collect_lr_reps_from_all(
+            local_u=self.u,
+            local_s=self.s,
+            local_vh=self.vh,
+            set_usvh=True,
+            name=name,
+            p=self.p,
+        )
+
+    @torch.no_grad()
+    def mix_sigma(self, method, *args, **kwargs):
+        mixing.mix_sigma(*args, u=self.u, s=self.s, vh=self.vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def start_p_training(self):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        self.p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        self.p.add_(1 / sz)
+        self.p.requires_grad = True
+        self.train_p = True
+        self.s.requires_grad = False
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        hold = self.p.view(-1, 1) * self.s
+        self.s.zero_()
+        self.s.add_(hold)
+        self.p.zero_()
+        self.p.add_(1)
+        self.p.requires_grad = False
+        self.train_p = False
+        self.s.requires_grad = True
+
+
+class SVDSyncConv1d(nn.modules.conv._ConvNd):
     __doc__ = r"""
     TODO: link to torch conv2D docs
     add other docs about this function itself
@@ -403,6 +408,9 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         reinit_shapes=False,
         norm=None,
         activation=None,
+        distributed_updates=True,
+        inner_dim_init_ratio=1.0,
+        random_sigma: bool = False,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         kernel_size_ = _pair(kernel_size)
@@ -423,6 +431,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             padding_mode,
             **factory_kwargs,
         )
+        self.inner_dim_init_ratio = inner_dim_init_ratio
         # detectron2 things...norm/activation is wrapped into one place here
         self.norm = norm
         self.activation = activation
@@ -440,6 +449,7 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
 
         weight_shape = self.weight.shape
         self.base_weigh_shape = tuple(weight_shape)
+        self.distributed_updates = distributed_updates
         m = weight_shape[0]
         n = int(self.weight.numel() / m)
         k = min(m, n)
@@ -453,15 +463,25 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             n = m
             m = hold
             w = w.T
-
         u, s, vh = torch.linalg.svd(w, full_matrices=False)
-        self.u = nn.Parameter(u, requires_grad=False)
+
+        self.gen = torch.Generator(device=w.device)
+        self.gen.manual_seed(random.randint(0, 68719476735))
+        if random_sigma:
+            log.debug(f"layer-local random seed: {self.gen.initial_seed()}")
+            s = torch.rand(s.shape[0], device=s.device, dtype=s.dtype, generator=self.gen) * s.max()
+
+        self.inner_dim = torch.tensor(k * self.inner_dim_init_ratio, dtype=torch.int)
+
+        self.u = nn.Parameter(u[:, : self.inner_dim].clone(), requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim].clone(), requires_grad=False)
+
+        self.p = nn.Parameter(torch.ones_like(s[: self.inner_dim], requires_grad=False))
+        self.train_p = False
 
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
-        self.inner_dim = torch.tensor(k, dtype=torch.int)
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
@@ -472,9 +492,22 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         else:
             self.rank = 0
             self.size = 1
+
+        self.sigma_generator = torch.Generator(device=s.device)
+        self.sigma_generator.manual_seed(random.randint(0, 68719476735))
+
+        self.first_distribute_workload = True
         self.last_send_rank = None
         self.prev_uvh = None
         del self.weight
+
+        # internal random generator
+        seed = torch.initial_seed()
+        if dist.is_initialized():
+            seed = seed + dist.get_rank() + 1000
+        log.info(f"Internal seed for linear layer: {seed}")
+        self.gen = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+        self.gen.manual_seed(seed)
 
     def _conv_forward(self, input: Tensor, weight: Tensor, bias: Optional[Tensor]):
         # From nn.conv2d
@@ -503,18 +536,21 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
             x = self.activation(x)
         return x
 
-    @torch.no_grad()
-    def get_weight_for_svd(self):
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
-        return w
-
     def get_weight(self, for_svd=False):
         # detach sets 'requires grad' to False
         if self.training:
             self.s.requires_grad = True
             self.u.requires_grad = False
             self.vh.requires_grad = False
-        w = torch.linalg.multi_dot([self.u, self.s, self.vh])
+            if self.bias is not None:
+                self.bias.requires_grad = True
+        if self.train_p and self.training:
+            self.p.requires_grad = True
+            if self.bias is not None:
+                self.bias.requires_grad = False
+            w = torch.linalg.multi_dot([self.u, self.p.view(-1, 1) * self.s, self.vh])
+        else:
+            w = torch.linalg.multi_dot([self.u, self.s, self.vh])
         if self.trans:
             w = w.T
 
@@ -557,14 +593,16 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
     @torch.no_grad()
     def _update_usvh_shapes(self):
         # either update the shapes of USVh or set the irrelevant values to 0
-        if self.reinit_shapes:
-            self.u.set_(self.u[:, : self.inner_dim].contiguous())
-            self.vh.set_(self.vh[: self.inner_dim].contiguous())
-            self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
-        else:
-            self.u[:, self.inner_dim :] *= 0
-            self.vh[self.inner_dim :] *= 0
-            self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        # if self.reinit_shapes:
+        self.u.set_(self.u[:, : self.inner_dim].contiguous())
+        self.vh.set_(self.vh[: self.inner_dim].contiguous())
+        self.s.set_(self.s[: self.inner_dim, : self.inner_dim].contiguous())
+        self.p.set_(self.p[: self.inner_dim].contiguous())
+        # else:
+        #     self.u[:, self.inner_dim :] *= 0
+        #     self.vh[self.inner_dim :] *= 0
+        #     self.s[self.inner_dim :, self.inner_dim :].mul_(0)
+        #     self.p[self.inner_dim :]
 
     @torch.no_grad()
     def _full_rank_update_usv(self):
@@ -593,95 +631,16 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         return {"csmean": csmean, "change_k": change_k}
 
     @torch.no_grad()
-    def test_stability_distributed(self, working_rank, name, nonblocking=True):
+    def remove_smaller_vecs(self, name):
         self.name = name
-
-        self.last_send_rank = working_rank
-        if working_rank != self.rank:
-            # move on for now, coming back later
-            # make sure to save the rank which did this layer
-            self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
-            self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
-            # if in the first iteration
-            # self.bcast_usvh(src=working_rank, nonblocking=nonblocking)
-            self.prev_uvh = torch.tensor(1, device=self.s.device)  # doing this to satisfy 'not None'
-            # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
-            return
-
-        # case 3: update the stable U and Vh from the full rank sigma matrix
-        status = self._full_rank_update_usv()
-        # shapes are updated within above (as is slice update)
+        # no SVD here, just cutting off sigma vals based on cutoff
+        self._update_inner_dim_and_shapes()
         perc, _, _ = self.get_perc_params()
-        # normalize self.s to max == 1
-        # maxs = self.s.max()
-        # self.s /= maxs
-        # self.vh *= maxs
-        log.info(
-            f"{name[-30:]}: Full rank update, csmean: {status['csmean']:.3f}, params: {perc * 100:.2f}, "
-            f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
-        )
-
-        self.inner_dim_buffer[0] = self.inner_dim.to(torch.float)
-        self.inner_dim_buffer[1] = status["csmean"]
-        self.inner_dim_buffer[2] = status["change_k"]
-        if not dist.is_initialized():
-            return
-        self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
-        # if wait_k is None -> K is the same -> optimizer is fine (shapes are the same)
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        if self.last_send_rank is None:  # skip all comms
-            return reset_optimizer, True
-        # self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=self.last_send_rank, async_op=False)
-        if self.wait_inner_dim is not None:
-            self.wait_inner_dim.wait()
-            self.wait_inner_dim = None
-            if self.rank != self.last_send_rank:
-                self.inner_dim = self.inner_dim_buffer[0].to(torch.int)
-                # print('before reshape')
-                self._update_usvh_shapes()
-
-        reset_optimizer = bool(self.inner_dim_buffer[2].item())
-        stable = self.inner_dim_buffer[1] >= self.uvhthreshold
-        self.inner_dim_buffer *= 0
-        self.bcast_usvh(src=self.last_send_rank, nonblocking=nonblocking)
-        return reset_optimizer, stable
-
-    @torch.no_grad()
-    def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
-            return
-        # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
-        if not self.u.is_contiguous():
-            self.u.set_(self.u.contiguous())
-        if not self.s.is_contiguous():
-            self.s.set_(self.s.contiguous())
-        if not self.vh.is_contiguous():
-            self.vh.set_(self.vh.contiguous())
-        self.wait_u = dist.broadcast(self.u, src=src, async_op=nonblocking)
-        self.wait_s = dist.broadcast(self.s, src=src, async_op=nonblocking)
-        self.wait_vh = dist.broadcast(self.vh, src=src, async_op=nonblocking)
-
-    @torch.no_grad()
-    def wait_on_usvh(self):
-        if self.wait_u is not None:
-            self.wait_u.wait()
-            self.wait_u = None
-        if self.wait_s is not None:
-            self.wait_s.wait()
-            self.wait_s = None
-        if self.wait_vh is not None:
-            self.wait_vh.wait()
-            self.wait_u = None
+        if self.rank == 0:
+            log.info(
+                f"{name[-30:]}: Update inner dim: params: {perc * 100:.2f}, "
+                f"\t[{self.u.shape[0]} {self.s.shape[0]} {self.vh.shape[1]}]",
+            )
 
     def get_interior_inner_dim(self):
         return {
@@ -714,3 +673,57 @@ class SVDConv1dUSVh(nn.modules.conv._ConvNd):
         normal_params += bias_params
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
+
+    def distribute_workload(self, min_size_fraction=0.05, name=None):
+        utils.split_sigma_workload(
+            collected_u=self.u,
+            collected_s=self.s,
+            collected_vh=self.vh,
+            sigma_generator=self.sigma_generator,
+            min_size_fraction=min_size_fraction,
+            set_usvh=True,
+            name=name,
+            p=self.p,
+        )
+
+    def gather_distributed_factorizations(self, sigma_cutoff_fraction=0.2, name=None):
+        utils.collect_lr_reps_from_all(
+            local_u=self.u,
+            local_s=self.s,
+            local_vh=self.vh,
+            sigma_cutoff_fraction=sigma_cutoff_fraction,
+            set_usvh=True,
+            name=name,
+            p=self.p,
+        )
+
+    @torch.no_grad()
+    def mix_sigma(self, method, *args, **kwargs):
+        mixing.mix_sigma(*args, u=self.u, s=self.s, vh=self.vh, method=method, generator=self.gen, **kwargs)
+
+    @torch.no_grad()
+    def start_p_training(self):
+        # set P to be 1/sz to emulate an average, will let the network learn how to use this
+        self.p.zero_()
+        sz = dist.get_world_size() if dist.is_initialized() else 1
+        self.p.add_(1 / sz)
+        self.p.requires_grad = True
+        self.train_p = True
+        self.s.requires_grad = False
+        if self.bias is not None:
+            self.bias.requires_grad = False
+
+    @torch.no_grad()
+    def update_sp_train_normally(self):
+        # revert to normal training for the layer
+        # update sigma from P and start training normally
+        hold = self.p.view(-1, 1) * self.s
+        self.s.zero_()
+        self.s.add_(hold)
+        self.p.zero_()
+        self.p.add_(1)
+        self.p.requires_grad = False
+        self.train_p = False
+        self.s.requires_grad = True
+        if self.bias is not None:
+            self.bias.requires_grad = True
