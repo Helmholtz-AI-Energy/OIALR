@@ -26,12 +26,6 @@ sbatch job_submission.sbatch
 # or sbatch job_submission_interactive.sbatch
 ```
 > * The experiments, evaluations, etc., are stored under the `logs` directory.
-> * The default experiments tracking system is mlflow. The `mlruns` directory is contained in `logs`. To view a user friendly view of the experiments, run:
-> ```
-> # make sure you are inside logs (where mlruns is located)
-> mlflow ui --host 0000
-> ```
-> * When evaluating (running `test.py`), make sure you give the correct checkpoint path in `configs/test.yaml`
 
 
 # Project Organization
