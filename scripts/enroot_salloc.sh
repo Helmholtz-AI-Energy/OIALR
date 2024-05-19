@@ -36,7 +36,7 @@ export SHARP_COLL_LOG_LEVEL=3
 export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
-export WANDB_API_KEY="none"
+export WANDB_API_KEY="NONE"
 
 # export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
   # -A hk-project-test-mlperf \
@@ -44,13 +44,14 @@ system=${HOSTNAME:0:3}
 
 if [ $system == "hkn" ]
 then
-  BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna-ddp/"
+  BASE_DIR="/CHANGE/ME/"
   export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
   TOMOUNT='/etc/slurm/task_prolog:/etc/slurm/task_prolog,'
   TOMOUNT+="${EXT_DATA_PREFIX},"
   TOMOUNT+="${BASE_DIR},"
   TOMOUNT+="/scratch,/tmp"
-  echo $TOMOUNT
+  # TOMOUNT+="/hkfs/work/workspace/scratch/CHANGE/ME-dlrt2/datasets"
+
   salloc --partition=accelerated \
     -N "${SLURM_NNODES}" \
     --time "${TIMELIMIT}" \
@@ -62,12 +63,12 @@ then
     -A hk-project-madonna
 elif [ $system == "uc2" ]
 then
-  TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/,/scratch,"
+  TOMOUNT="/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/,/scratch,"
   TOMOUNT+='/etc/slurm/:/etc/slurm/,'
   # TOMOUNT+="${EXT_DATA_PREFIX},"
   # TOMOUNT+="${BASE_DIR},"
   # TOMOUNT+="/sys,/tmp,"
-  export TOMOUNT+="/home/kit/scc/qv2382/"
+  export TOMOUNT+="/home/kit/scc/CHANGE/ME/"
   salloc --partition=sdil \
     -N "${SLURM_NNODES}" \
     --time "${TIMELIMIT}" \

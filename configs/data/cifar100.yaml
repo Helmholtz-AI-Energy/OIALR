@@ -1,6 +1,6 @@
 dataset: cifar100
 data_dir_horeka: "/hkfs/home/dataset/datasets/CIFAR100/"
-data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/datasets/cifar100"
+data_dir_uc2: "/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/datasets/cifar100"
 num_workers: 6
 pin_memory: True
 local_batch_size: 512

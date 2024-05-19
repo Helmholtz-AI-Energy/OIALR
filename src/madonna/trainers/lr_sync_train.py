@@ -26,6 +26,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+import wandb
 from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
@@ -38,7 +39,6 @@ from torchmetrics import MetricCollection, Precision, Recall
 from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import madonna
-import wandb
 
 best_acc1 = 0
 log = logging.getLogger(__name__)

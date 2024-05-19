@@ -19,7 +19,7 @@ def submit_and_catch():
     out_string = output.stdout.decode("utf-8")
     print(out_string[:-1])
     jobid = re.findall(r"\d+", out_string)[0]
-    log = Path("/hkfs/work/workspace/scratch/qv2382-madonna2/madonna/logs/slurm/")
+    log = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/madonna/logs/slurm/")
     log = log / f"slurm-{jobid}"
     print(f"waiting for log -> {log}")
     while not log.is_file():

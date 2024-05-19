@@ -1,10 +1,10 @@
 # https://mlflow.org
 
 mlflow:
-  artifact_location_horeka: file:/hkfs/work/workspace/scratch/qv2382-madonna-ddp/mlflowsql/artifacts/
-  tracking_uri_horeka: sqlite:////hkfs/work/workspace/scratch/qv2382-madonna-ddp/mlflowsql/runsdb.sqlite
-  artifact_location_uc2: file:/pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/mlflowsql/artifacts/
-  tracking_uri_uc2: sqlite:////pfs/work7/workspace/scratch/qv2382-madonna-ddp/qv2382-madonna-ddp/mlflowsql/runsdb.sqlite
+  artifact_location_horeka: file:/hkfs/work/workspace/scratch/CHANGE/ME-madonna/mlflowsql/artifacts/
+  tracking_uri_horeka: sqlite:////hkfs/work/workspace/scratch/CHANGE/ME-madonna/mlflowsql/runsdb.sqlite
+  artifact_location_uc2: file:/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/mlflowsql/artifacts/
+  tracking_uri_uc2: sqlite:////pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/mlflowsql/runsdb.sqlite
   port: 24685
 
 # mlflow:

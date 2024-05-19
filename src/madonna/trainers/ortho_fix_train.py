@@ -27,6 +27,7 @@ import torch.backends.cudnn as cudnn
 import torch.distributed as dist
 import torch.optim
 import torch.utils.data.distributed
+import wandb
 from omegaconf import OmegaConf, open_dict
 from rich import print as rprint
 from rich.columns import Columns
@@ -39,7 +40,6 @@ from torchmetrics import MetricCollection, Precision, Recall
 from torchmetrics.classification import MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import madonna
-import wandb
 
 best_acc1 = 0
 log = logging.getLogger(__name__)
@@ -205,7 +205,6 @@ def main(config):  # noqa: C901
     # sam_opt = madonna.optimizers.svd_sam.SAM(params=params, base_optimizer=optimizer, rho=0.05, adaptive=False)
     train_len = len(train_loader)
     scheduler, _ = madonna.utils.get_lr_schedules(config, optimizer, train_len)
-    # optimizer = madonna.optimizers.MixedSVDOpt(config=config, model=model)
     # if not config.baseline:
     #     model.set_optimizer(optimizer)
 
@@ -475,8 +474,8 @@ def main(config):  # noqa: C901
     # ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
     # ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
     # print("from train", ret_dict)
-    # # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna2/madonna/configs/tmp/")
-    # out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+    # # out_file_root = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/madonna/configs/tmp/")
+    # out_file = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/tmp/")
     # with open(out_file / f"{os.environ['RANK']}-output.txt", "w") as convert_file:
     #     # convert_file.write(json.dumps(ret_dict))
     #     json.dump(ret_dict, convert_file)
@@ -494,7 +493,7 @@ def get_lrs(opt):
 
 def train(
     train_loader,
-    optimizer: madonna.optimizers.MixedSVDOpt,
+    optimizer: torch.optim.Optimizer,
     model,
     criterion,
     epoch,

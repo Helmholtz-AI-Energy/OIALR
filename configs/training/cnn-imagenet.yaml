@@ -7,8 +7,8 @@ trainer: "ortho_fix_train"
 init_ddp: True
 
 # ckpt path
-checkpoint: null # /hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
-checkpoint_out_root: # /hkfs/work/workspace/scratch/qv2382-madonna-ddp/madonna/models
+checkpoint: null # /hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/models/baseine/vit_b_16-imagenet/epoch43.pth.tar #
+checkpoint_out_root: # /hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/models
 resume_run: False
 
 criterion:
