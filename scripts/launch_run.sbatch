@@ -8,32 +8,32 @@
 #SBATCH --job-name=madonna
 #SBATCH --partition=accelerated
 #SBATCH --account=hk-project-madonna
-#SBATCH --output="/hkfs/work/workspace/scratch/qv2382-madonna2/madonna/logs/slurm/slurm-%j"
-#####SBATCH --output="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/madonna/logs/slurm/slurm-%j"
+#SBATCH --output="/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/madonna/logs/slurm/slurm-%j"
+#####SBATCH --output="/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/madonna/logs/slurm/slurm-%j"
 
 ml purge
 
 # pmi2 cray_shasta
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
+BASE_DIR="/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/"
 # export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-# BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/madonna/"
+# BASE_DIR="/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/madonna/"
 
-BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
+BASE_DIR="/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/"
 export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
 TOMOUNT='/etc/slurm/task_prolog:/etc/slurm/task_prolog,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp"
-# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
+# TOMOUNT+="/hkfs/work/workspace/scratch/CHANGE/ME-dlrt2/datasets"
 export TOMOUNT="${TOMOUNT}"
-export WANDB_API_KEY="4a4a69b3f101858c816995e6dfa553718fdf0dbe"
+export WANDB_API_KEY="NONE"
 
-# TOMOUNT="/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/,/scratch,"
+# TOMOUNT="/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/,/scratch,"
 # TOMOUNT+='/etc/slurm/:/etc/slurm/,'
 # # TOMOUNT+="${EXT_DATA_PREFIX},"
 # # TOMOUNT+="${BASE_DIR},"
 # # TOMOUNT+="/sys,/tmp,"
-# export TOMOUNT+="/home/kit/scc/qv2382/"
+# export TOMOUNT+="/home/kit/scc/CHANGE/ME/"
 
 SRUN_PARAMS=(
   --mpi="pmi2"
@@ -50,7 +50,7 @@ SRUN_PARAMS=(
 )
 
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
-# SCRIPT_DIR="/hkfs/work/workspace/scratch/qv2382-madonna2/"
+# SCRIPT_DIR="/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/"
 # TODO: set up singularity as well?
 
 export UCX_MEMTYPE_CACHE=0

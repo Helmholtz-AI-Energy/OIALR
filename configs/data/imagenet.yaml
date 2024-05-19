@@ -1,8 +1,8 @@
 dataset: imagenet
-# data_dir_horeka: "/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets/imagenet/" # data_dir is specified in config.yaml
+# data_dir_horeka: "/hkfs/work/workspace/scratch/CHANGE/ME-dlrt2/datasets/imagenet/" # data_dir is specified in config.yaml
 data_dir_horeka: "/hkfs/home/dataset/datasets/imagenet-2012/original/imagenet-raw/ILSVRC/Data/CLS-LOC/"
-# data_dir: "/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
-data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna2/qv2382-madonna2/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
+# data_dir: "/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
+data_dir_uc2: "/pfs/work7/workspace/scratch/CHANGE/ME-madonna2/CHANGE/ME-madonna2/datasets/imagenet/ILSVRC/Data/CLS-LOC/"
 local_batch_size: 256
 num_workers: 8
 pin_memory: True
@@ -17,8 +17,8 @@ dali: False
 classes: 1000
 
 use_mini: False
-# mini_file_list: "/hkfs/work/workspace/scratch/qv2382-madonna2/datasets/imagenet-mini/base.json"
-mini_dir: "/hkfs/work/workspace/scratch/qv2382-madonna2/datasets/imagenet-mini/links/"
+# mini_file_list: "/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/datasets/imagenet-mini/base.json"
+mini_dir: "/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/datasets/imagenet-mini/links/"
 
 use_real: False
-real_label_location: "/hkfs/work/workspace/scratch/qv2382-madonna2/datasets/imagenet-real/reassessed-imagenet/real.json"
+real_label_location: "/hkfs/work/workspace/scratch/CHANGE/ME-madonna2/datasets/imagenet-real/reassessed-imagenet/real.json"

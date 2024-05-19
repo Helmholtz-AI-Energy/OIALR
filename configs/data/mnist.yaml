@@ -1,7 +1,7 @@
 dataset: mnist
-data_dir_horeka: "/hkfs/work/workspace/scratch/qv2382-dlrt/datasets/mnist"
+data_dir_horeka: "/hkfs/work/workspace/scratch/CHANGE/ME-dlrt/datasets/mnist"
 # data_dir: "/home/daniel/git/mnist"
-data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/mnist/"
+data_dir_uc2: "/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/datasets/mnist/"
 num_workers: 1
 pin_memory: True
 local_batch_size: 512 #128

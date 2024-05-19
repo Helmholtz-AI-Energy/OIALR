@@ -251,7 +251,7 @@ def save_selected_weights(network, epoch):
         "module.layer4.0.downsample.0.weight",
     ]
     save_location = Path(
-        "/hkfs/work/workspace/scratch/qv2382-dlrt/saved_models/4gpu-svd-tests/normal/resnet18",
+        "/hkfs/work/workspace/scratch/CHANGE/ME-dlrt/saved_models/4gpu-svd-tests/normal/resnet18",
     )
     rank = dist.get_rank()
 

@@ -8,7 +8,7 @@ def obj_train():
 
     rank = os.environ["RANK"]
 
-    base_config_path = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/")
+    base_config_path = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/")
     base_config = OmegaConf.load(base_config_path / "ortho_train.yaml")
     iteration = 0
     if (base_config_path / f"propulate-{rank}.yaml").exists():
@@ -33,7 +33,7 @@ def obj_train():
     def train(config: DictConfig):
         # need to load the other config and update it
         overrides = OmegaConf.load(
-            f"/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/newest_config_{rank}.yaml",
+            f"/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/tmp/newest_config_{rank}.yaml",
         )
         for param in overrides:
             # try:
@@ -45,7 +45,7 @@ def obj_train():
         with open_dict(config):
             config[
                 "loaded_file"
-            ] = f"/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/newest_config_{rank}.yaml"
+            ] = f"/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/tmp/newest_config_{rank}.yaml"
         # Imports can be nested inside @hydra.main to optimize tab completion
         # https://github.com/facebookresearch/hydra/issues/934
         OmegaConf.set_struct(config, True)
@@ -68,8 +68,8 @@ def obj_train():
             # propulate minimizes...
             ret_dict["train_top1"] = 1 - (ret_dict["train_top1"] * 0.01)
             ret_dict["val_top1"] = 1 - (ret_dict["val_top1"] * 0.01)
-            # out_file_root = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
-            out_file = Path("/hkfs/work/workspace/scratch/qv2382-madonna/madonna/configs/tmp/")
+            # out_file_root = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/tmp/")
+            out_file = Path("/hkfs/work/workspace/scratch/CHANGE/ME-madonna/madonna/configs/tmp/")
             with open(out_file / f"{rank}-output.txt", "w") as convert_file:
                 # convert_file.write(json.dumps(ret_dict))
                 json.dump(ret_dict, convert_file)

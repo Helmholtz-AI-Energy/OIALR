@@ -1,6 +1,6 @@
 dataset: cifar10
 data_dir_horeka: "/hkfs/home/dataset/datasets/CIFAR10/"
-data_dir_uc2: "/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets/cifar10"
+data_dir_uc2: "/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/datasets/cifar10"
 num_workers: 6
 pin_memory: True
 local_batch_size: 256

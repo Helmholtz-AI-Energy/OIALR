@@ -30,13 +30,13 @@ if [ -z "${GPUS_PER_NODE}" ]; then GPUS_PER_NODE="4"; fi
 if [ -z "${SLURM_NNODES}" ]; then SLURM_NNODES="1"; fi
 if [ -z "${PARTITION}" ]; then PARTITION="gpu_4"; fi
 
-# BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
-# BASE_DIR="/hkfs/work/workspace/scratch/qv2382-madonna/"
+# BASE_DIR="/hkfs/work/workspace/scratch/CHANGE/ME-madonna/"
+# BASE_DIR="/hkfs/work/workspace/scratch/CHANGE/ME-madonna/"
 
-export PATH="$PATH:/home/kit/scc/qv2382/.local/bin"
+export PATH="$PATH:/home/kit/scc/CHANGE/ME/.local/bin"
 
 # export EXT_DATA_PREFIX="/hkfs/home/dataset/datasets/"
-export EXT_DATA_PREFIX="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/datasets"
+export EXT_DATA_PREFIX="/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/datasets"
 export CUDA_VISIBLE_DEVICES="0,1,2,3"
 
 export UCX_MEMTYPE_CACHE=0
@@ -46,18 +46,18 @@ export OMPI_MCA_coll_hcoll_enable=0
 export NCCL_SOCKET_IFNAME="ib0"
 export NCCL_COLLNET_ENABLE=0
 
-BASE_DIR="/pfs/work7/workspace/scratch/qv2382-madonna/qv2382-madonna/madonna"
+BASE_DIR="/pfs/work7/workspace/scratch/CHANGE/ME-madonna/CHANGE/ME-madonna/madonna"
 
 TOMOUNT='/etc/slurm/task_prolog.hk:/etc/slurm/task_prolog.hk,'
 TOMOUNT+="${EXT_DATA_PREFIX},"
 TOMOUNT+="${BASE_DIR},"
 TOMOUNT+="/scratch,/tmp,"
-TOMOUNT+="/home/kit/scc/qv2382/"
-# TOMOUNT+="/hkfs/work/workspace/scratch/qv2382-dlrt2/datasets"
+TOMOUNT+="/home/kit/scc/CHANGE/ME/"
+# TOMOUNT+="/hkfs/work/workspace/scratch/CHANGE/ME-dlrt2/datasets"
 
 export TOMOUNT=$TOMOUNT
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/intel/lib/intel64
-export PATH="$PATH:/home/kit/scc/qv2382/.local/bin"
+export PATH="$PATH:/home/kit/scc/CHANGE/ME/.local/bin"
 # gpu_4_h100
 
 salloc \
