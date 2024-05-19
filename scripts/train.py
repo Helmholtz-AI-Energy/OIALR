@@ -2,7 +2,6 @@ import logging
 import os
 
 import hydra
-import mlflow
 import torch
 import wandb
 from mpi4py import MPI
@@ -55,6 +54,8 @@ def main(config: DictConfig):
         fn = madonna.trainers.ortho_fix_train.main
     elif config.training.trainer == "ortho_sam_train":
         fn = madonna.trainers.ortho_sam_trainer.main
+    elif config.training.trainer == "lr_sync_train":
+        fn = madonna.trainers.lr_sync_train.main
     else:
         raise ValueError(f"unknown trainer: {config.trainer.trainer}")
 
@@ -68,6 +69,8 @@ def main(config: DictConfig):
         else:
             fn(config)
     elif rank == 0 and config.enable_tracking and config.tracking == "mlflow":
+        import mlflow
+
         _ = utils.tracking.setup_mlflow(config, verbose=False)
 
         run_id = None

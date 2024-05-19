@@ -70,6 +70,8 @@ class SVDLinearUSVh(nn.Module):
         start_bias=None,
         update_from_simga=True,
         reinit_shapes=False,
+        distributed_updates=True,
+        inner_dim_init_ratio=1.0,
     ) -> None:
         factory_kwargs = {"device": device, "dtype": dtype}
         super(SVDLinearUSVh, self).__init__()
@@ -77,6 +79,8 @@ class SVDLinearUSVh(nn.Module):
         self.out_features = out_features
         self.update_from_simga = update_from_simga
         self.reinit_shapes = reinit_shapes
+        self.distributed_updates = distributed_updates
+        self.inner_dim_init_ratio = inner_dim_init_ratio
 
         if start_weight is not None:
             self.weight = start_weight
@@ -96,11 +100,11 @@ class SVDLinearUSVh(nn.Module):
         # u, s, vh = torch.linalg.svd(w, full_matrices=False)
         # k = min(tuple(w.shape))
         u, s, vh = torch.linalg.svd(w, full_matrices=False)  # TS matrix so its not a big deal
-
-        self.u = nn.Parameter(u, requires_grad=False)
+        self.inner_dim = torch.tensor(int(s.shape[0] * self.inner_dim_init_ratio), dtype=torch.int)
+        self.u = nn.Parameter(u[:, : self.inner_dim], requires_grad=False)
         # self.s = nn.Parameter(self.s, requires_grad=True)
-        self.s = nn.Parameter(torch.diag(s), requires_grad=True)
-        self.vh = nn.Parameter(vh, requires_grad=False)
+        self.s = nn.Parameter(torch.diag(s[: self.inner_dim]), requires_grad=True)
+        self.vh = nn.Parameter(vh[: self.inner_dim], requires_grad=False)
 
         if bias:
             if start_bias is None:
@@ -113,7 +117,7 @@ class SVDLinearUSVh(nn.Module):
         self.cossim = nn.CosineSimilarity(dim=0)
         self.sigma_cutoff_fraction = sigma_cutoff_fraction
         # self.inner_dim = torch.tensor(self.s.shape[0], dtype=torch.int)  #
-        self.inner_dim = torch.tensor(min(in_features, out_features), dtype=torch.int)
+
         self.inner_dim_buffer = torch.empty(3)  # inner dim, csmean, changing k
         self.uvhthreshold = uvhthreshold
         self.wait_inner_dim, self.wait_s, self.wait_u, self.wait_vh = None, None, None, None
@@ -127,6 +131,14 @@ class SVDLinearUSVh(nn.Module):
         self.last_send_rank = None
         # self.prev_uvh = torch.tensor([1])
         del self.weight
+
+        # internal random generator
+        seed = torch.seed()
+        if dist.is_initialized():
+            seed = seed + dist.get_rank() + 1000
+        # log.info(f"Internal seed for linear layer: {seed}")
+        self.gen = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu")
+        self.gen.manual_seed(seed)
 
     def reset_parameters(self) -> None:
         # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
@@ -237,11 +249,12 @@ class SVDLinearUSVh(nn.Module):
             self.inner_dim_buffer = self.inner_dim_buffer.to(device=self.s.device, non_blocking=True)
             self.inner_dim = self.inner_dim.to(device=self.s.device, non_blocking=True)
             # receive the wait_k from the working process
-            self.wait_inner_dim = dist.broadcast(
-                self.inner_dim_buffer,
-                src=working_rank,
-                async_op=nonblocking,
-            )
+            if self.distributed_updates:
+                self.wait_inner_dim = dist.broadcast(
+                    self.inner_dim_buffer,
+                    src=working_rank,
+                    async_op=nonblocking,
+                )
             return
 
         # case 3: update the stable U and Vh from the full rank sigma matrix
@@ -260,7 +273,8 @@ class SVDLinearUSVh(nn.Module):
         if not dist.is_initialized():
             return
         self.inner_dim_buffer = self.inner_dim_buffer.to(self.s.device)
-        self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
+        if self.distributed_updates:
+            self.wait_inner_dim = dist.broadcast(self.inner_dim_buffer, src=working_rank, async_op=nonblocking)
 
     @torch.no_grad()
     def wait_inner_dim_reshape_bcast_usvh(self, nonblocking=True):
@@ -285,7 +299,7 @@ class SVDLinearUSVh(nn.Module):
 
     @torch.no_grad()
     def bcast_usvh(self, src, nonblocking=True):
-        if not dist.is_initialized() or self.last_send_rank is None:
+        if not dist.is_initialized() or self.last_send_rank is None or not self.distributed_updates:
             return
         # self.wait_k = dist.broadcast(self.k, src=src, async_op=nonblocking)
         if not self.u.is_contiguous():
@@ -332,3 +346,32 @@ class SVDLinearUSVh(nn.Module):
         normal_params += bias_params
         perc_params = trainable_params / normal_params
         return perc_params, trainable_params, normal_params
+
+    @torch.no_grad()
+    def blur_sigma(self):
+        # NOTE: this will also update U/Vh as well
+        # blur sigma with a specified method, only RBF available right now
+        usig, sig, vhsig = torch.linalg.svd(self.s)
+        holdu = self.u @ usig
+        self.u.zero_()
+        self.u.add_(holdu)
+        holdvh = vhsig @ self.vh
+        self.vh.zero_()
+        self.vh.add_(holdvh)
+
+        r = torch.rand(
+            sig.shape[0],
+            sig.shape[0],
+            device=sig.device,
+            dtype=sig.dtype,
+            generator=self.gen,
+        )  # sig is 1D vec
+        # r = torch.randn(sig.shape[0], sig.shape[0], device=sig.device, dtype=sig.dtype)  # sig is 1D vec
+        r = (r * torch.arange(sig.shape[0], device=sig.device)).T / sig.shape[0]
+        sigma_dist = 1.0  # hyperparam
+        neighbor_influ = 0.05
+        m = (sigma_dist**2 * torch.exp(-((torch.cdist(r, r, p=2) ** 2) / (2 * neighbor_influ**2)))).triu()
+        # print(f"{m[:5, :5]}")
+        s = sig * m
+        self.s.zero_()
+        self.s.add_(s)

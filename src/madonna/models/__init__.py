@@ -4,7 +4,8 @@ from . import components, utils
 
 # from .ortho import QROrthoFixingModel
 # from .qr_fixing import QRFixingModel
-from .svd import *
+from .oialr import *
+from .svdsync import SVDSyncModel
 
 # from .xox import XOXModel
 

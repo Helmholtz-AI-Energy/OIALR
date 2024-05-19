@@ -17,33 +17,16 @@ criterion:
   _target_: torch.nn.CrossEntropyLoss
   label_smoothing: 0.1
 
-# lr: 0.0002
-# lr_schedule:
-#   _target_: null
-#   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
-#   sched: cosine  # cosine LR scheduler from timm
-#   epochs: 300  # number of epochs for the cycle to run for
-#   warmup_epochs: 17
-#   cooldown_epochs: 10
-#   min_lr: 0.0008  # min LR of cosine annealing pattern
-#   warmup_lr: 0.00008  # starting point of warmup
-#   warmup_prefix: True  # default
-#   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
-#   lr_cycle_limit: 30
-#   lr_cycle_decay: 0.4  # NOTE: the implementation is wrong in the docs!! it should be that the decay_rate is lr_cycle_decay!!!
-#   lr_k_decay: 0.4  # default 1.0
-#   sched_on_updates: True
-
-lr: 0.003
+lr: 0.0002
 lr_schedule:
   _target_: null
   # torch.optim.lr_scheduler.StepLR # torch.optim.lr_scheduler.CosineAnnealingWarmRestarts # torch.optim.lr_scheduler.CosineAnnealingLR #
-  sched: cosine # cosine  # cosine LR scheduler from timm
-  epochs: 90  # number of epochs for the cycle to run for
-  warmup_epochs: 15
+  sched: cosine  # cosine LR scheduler from timm
+  epochs: 300  # number of epochs for the cycle to run for
+  warmup_epochs: 17
   cooldown_epochs: 10
-  min_lr: 0.008  # min LR of cosine annealing pattern
-  warmup_lr: 0.0001  # starting point of warmup
+  min_lr: 0.0008  # min LR of cosine annealing pattern
+  warmup_lr: 0.00008  # starting point of warmup
   warmup_prefix: True  # default
   lr_cycle_mul: 1.5  # default -> cycle length: int(math.floor(-self.t_initial * (self.cycle_mul ** cycles - 1) / (1 - self.cycle_mul)))
   lr_cycle_limit: 30

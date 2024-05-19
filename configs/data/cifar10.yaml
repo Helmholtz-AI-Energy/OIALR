@@ -7,6 +7,6 @@ local_batch_size: 256
 timm_transforms: True
 persistent_workers: True
 distributed_sample: True
-distributed_sample_val: True
+distributed_sample_val: False
 train_crop_size: 32
 classes: 10

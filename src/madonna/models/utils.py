@@ -1,10 +1,12 @@
 import logging
 import time
+from collections import OrderedDict, defaultdict
 from copy import deepcopy
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.modules.batchnorm import _BatchNorm
 
@@ -63,31 +65,44 @@ def change_adam_shapes(optimizer, update_from_svd=False):
     for group in optimizer.param_groups:
         for p in group["params"]:
             state = optimizer.state[p]
-            if len(list(state.keys())) > 0:
-                for k in ["exp_avg", "exp_avg_sq"]:
-                    if state[k].shape != p.shape:
-                        # this will only happen for Sigma matrices!
-                        # therefore, we dont need to worry about shapes/transposes
-                        # st = state[k].to(torch.float32)
-                        # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
-                        sl = []
-                        for d in range(p.ndim):
-                            sl.append(slice(0, p.shape[d]))
-                        # print(type(state[k]))
-                        state[k] = state[k][tuple(sl)]
-                        # state[k] *= 0
-                        # state[k] = torch.diag(s)[tuple(sl)].to(state[k].dtype)
+            if len(list(state.keys())) == 0:
+                continue
+            for k in ["exp_avg", "exp_avg_sq"]:
+                if state[k].shape == p.shape:
+                    continue
+                # this will only happen for Sigma matrices!
+                # therefore, we dont need to worry about shapes/transposes
+                # st = state[k].to(torch.float32)
+                # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
+                sl = []
+                pad = []
+                for d in range(p.ndim):
+                    sl.append(slice(0, p.shape[d]))
+                    if state[k].shape[d] < p.shape[d]:
+                        pad = [0, p.shape[d] - state[k].shape[d]] + pad
 
-                if group["amsgrad"]:
-                    if state["max_exp_avg_sq"].shape != p.shape:
-                        sl = []
-                        for d in range(p.ndim):
-                            sl.append(slice(0, p.shape[d]))
-                        # st = state["max_exp_avg_sq"].to(torch.float32)
-                        # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
-                        state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
-                        # state["max_exp_avg_sq"] *= 0
-                        # state["max_exp_avg_sq"] = torch.diag(s)[tuple(sl)].to(state["max_exp_avg_sq"].dtype)
+                state[k] = state[k][tuple(sl)]
+                if len(pad) > 0:
+                    state[k] = F.pad(state[k], pad, "constant", 0)
+                    state[k].mul_(0)
+
+            if group["amsgrad"] and state["max_exp_avg_sq"].shape != p.shape:
+                sl = []
+                pad = []
+                for d in range(p.ndim):
+                    sl.append(slice(0, p.shape[d]))
+                    if state["max_exp_avg_sq"].shape[d] < p.shape[d]:
+                        pad = [0, p.shape[d] - state["max_exp_avg_sq"].shape[d]] + pad
+
+                state["max_exp_avg_sq"] = state["max_exp_avg_sq"][tuple(sl)]
+                if len(pad) > 0:
+                    state["max_exp_avg_sq"] = F.pad(state["max_exp_avg_sq"], pad, "constant", 0)
+                    state["max_exp_avg_sq"].mul_(0)
+                # st = state["max_exp_avg_sq"].to(torch.float32)
+                # _u, s, _vh = torch.linalg.svd(st, full_matrices=False)
+
+                # state["max_exp_avg_sq"] *= 0
+                # state["max_exp_avg_sq"] = torch.diag(s)[tuple(sl)].to(state["max_exp_avg_sq"].dtype)
     if rank == 0:
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
@@ -106,12 +121,20 @@ def change_sgd_shapes(optimizer):
             state = optimizer.state[p]
             if len(list(state.keys())) > 0:
                 # only need to change "momentum_buffer"
+                if state["momentum_buffer"] is None:
+                    continue
                 if state["momentum_buffer"].shape != p.shape:
                     sl = []
+                    k = "momentum_buffer"
+                    pad = []
                     for d in range(p.ndim):
                         sl.append(slice(0, p.shape[d]))
-                    # print(type(state[k]))
-                    state["momentum_buffer"] = state["momentum_buffer"][tuple(sl)]
+                        if state[k].shape[d] < p.shape[d]:
+                            pad = [0, p.shape[d] - state[k].shape[d]] + pad
+
+                    state[k] = state[k][tuple(sl)]
+                    if len(pad) > 0:
+                        state[k] = F.pad(state[k], pad, "constant", 0)
     if rank == 0:
         log.info(f"Reset Optimizer time: {time.perf_counter() - resettime}")
 
@@ -161,11 +184,11 @@ def replace_opt_state_with_svd_adam(optimizer: optim.Optimizer, replacement_dict
     for group in optimizer.param_groups:
         replace_idx = 0
         for p in group["params"]:
-            if p not in replacement_dict:
+            if id(p) not in replacement_dict:
                 replace_idx += 1
                 continue
-            new_p = replacement_dict[p][0]
-            layer_type = replacement_dict[p][1]
+            new_p = replacement_dict[id(p)][0]
+            layer_type = replacement_dict[id(p)][1]
             # change the state info to the svd
             state = optimizer.state[p]
             if len(list(state.keys())) > 0:
